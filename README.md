@@ -117,3 +117,38 @@ not Next.js config:
 
 When assembled by the App Builder, these are configured for you (logo upload, color,
 font, and app name are injected at deploy time).
+
+## Bulk Trader
+
+The **Bulk Trader** tab lets you run several digit-contract strategies
+(Differs/Matches/Over/Under/Even/Odd) at the same time on one account, each
+with its own stake, money management, and stop conditions. Because the
+bot-builder engine only runs one strategy at a time in the browser, Bulk
+Trader's execution happens on a small backend service instead — see
+[`backend/README.md`](./backend/README.md) for what it does and how to deploy
+it to Render.
+
+To connect the two once the backend is deployed, set this on the frontend
+(Vercel → Settings → Environment Variables), then rebuild:
+
+```env
+NEXT_PUBLIC_BULK_TRADER_API_URL=https://your-backend.onrender.com
+```
+
+## Deploying to Vercel
+
+This repo includes a `vercel.json` that builds the Rsbuild static site to
+`dist/` and rewrites all routes to `index.html` so client-side routing works.
+In Vercel: **New Project → Import this repo**, and set the same environment
+variables listed in Step 2 above (plus `NEXT_PUBLIC_BULK_TRADER_API_URL` if
+you're using Bulk Trader) under Settings → Environment Variables. No other
+configuration is required — Vercel will pick up `vercel.json` automatically.
+
+## Compliance note
+
+A risk-disclosure banner (see `src/components/layout/risk-banner`) is shown
+across the app, identifying it as an independent third-party application
+built on the Deriv API and carrying Deriv's standard risk warning, per
+[Deriv's guidelines for apps built on its API](https://deriv.com/terms-and-conditions/important-guidelines).
+If you rebrand this app, update `app_name` via `brand.config.json` — the
+banner picks it up automatically — and keep the risk wording intact.

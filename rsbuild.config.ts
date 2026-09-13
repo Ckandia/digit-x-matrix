@@ -48,6 +48,9 @@ export default defineConfig({
         GD_CLIENT_ID: JSON.stringify(process.env.GD_CLIENT_ID),
         GD_APP_ID: JSON.stringify(process.env.GD_APP_ID),
         GD_API_KEY: JSON.stringify(process.env.GD_API_KEY),
+        // Base URL of the Bulk Trader backend (deployed separately on Render).
+        // e.g. https://digit-x-matrix-backend.onrender.com — no trailing slash.
+        NEXT_PUBLIC_BULK_TRADER_API_URL: JSON.stringify(process.env.NEXT_PUBLIC_BULK_TRADER_API_URL ?? ''),
       },
     },
     alias: {
