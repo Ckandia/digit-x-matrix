@@ -119,23 +119,44 @@ export const generateDerivApiInstance = async (forceNew = false) => {
 };
 
 export const getLoginId = () => {
-    const login_id = localStorage.getItem('active_loginid');
-    if (login_id && login_id !== 'null') return login_id;
+    try {
+        const login_id = localStorage.getItem('active_loginid');
+        if (login_id && login_id !== 'null' && login_id !== 'undefined') return login_id;
+    } catch (error) {
+        console.error('[DerivAPI] Error getting login_id:', error);
+    }
     return null;
 };
 
 export const V2GetActiveAccountId = () => {
-    const account_id = localStorage.getItem('active_loginid');
-    if (account_id && account_id !== 'null') return account_id;
-    return null;
+    return getLoginId();
 };
 
 export const getToken = () => {
     const active_loginid = getLoginId();
-    const client_accounts = JSON.parse(localStorage.getItem('accountsList')) ?? undefined;
-    const active_account = (client_accounts && client_accounts[active_loginid]) || {};
+    let client_accounts = null;
+
+    try {
+        const rawAccounts = localStorage.getItem('accountsList');
+        if (rawAccounts) {
+            client_accounts = JSON.parse(rawAccounts);
+        }
+    } catch (error) {
+        console.error('[DerivAPI] Error parsing accountsList from localStorage:', error);
+    }
+
+    const active_account = (client_accounts && active_loginid) ? client_accounts[active_loginid] : null;
+
+    // Extract raw string token safely whether active_account is an object or string
+    let extractedToken = null;
+    if (typeof active_account === 'object' && active_account !== null) {
+        extractedToken = active_account.token || active_account.tokenValue || null;
+    } else if (typeof active_account === 'string') {
+        extractedToken = active_account;
+    }
+
     return {
-        token: active_account ?? undefined,
-        account_id: active_loginid ?? undefined,
+        token: extractedToken || undefined,
+        account_id: active_loginid || undefined,
     };
 };
