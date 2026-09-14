@@ -1,4 +1,3 @@
-// @ts-nocheck — vendored bot code with known upstream type gaps; see AGENTS.md
 import React from 'react';
 import classNames from 'classnames';
 import { TransitionGroup } from 'react-transition-group';
@@ -14,8 +13,8 @@ import {
     ListRowProps,
 } from 'react-virtualized';
 import { MeasuredCellParent } from 'react-virtualized/dist/es/CellMeasurer';
-import { isDesktop, isForwardStartingBuyTransaction, isMobile } from '../shared';
-import ThemedScrollbars from '../shared_ui/themed-scrollbars';
+import { isDesktop, isForwardStartingBuyTransaction, isMobile } from '@/components/shared';
+import ThemedScrollbars from '../themed-scrollbars';
 import { TPassThrough, TRow, TTableRowItem } from '../types/common.types';
 import DataListCell from './data-list-cell';
 import DataListRow, { TRowRenderer } from './data-list-row';
@@ -60,7 +59,7 @@ const DataList = React.memo(
         const [is_scrolling, setIsScrolling] = React.useState(false);
         const [scroll_top, setScrollTop] = React.useState(0);
 
-        const cache = React.useRef<CellMeasurerCache>();
+        const cache = React.useRef<CellMeasurerCache>(undefined);
         const list_ref = React.useRef<MeasuredCellParent | null>(null);
         const items_transition_map_ref = React.useRef<{ [key: string]: boolean }>({});
         const data_source_ref = React.useRef<TRow[] | null>(null);
@@ -118,6 +117,7 @@ const DataList = React.memo(
 
             const getContent = ({ measure }: GetContentType = {}) => (
                 <DataListRow
+                    //@ts-expect-error needs refactor
                     action_desc={action_desc}
                     destination_link={destination_link}
                     is_new_row={!items_transition_map_ref.current[row_key]}

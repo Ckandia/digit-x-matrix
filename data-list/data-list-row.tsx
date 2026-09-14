@@ -2,9 +2,8 @@
 import React from 'react';
 import classNames from 'classnames';
 import { NavLink } from 'react-router';
-import { useIsMounted } from 'usehooks-ts';
+import { clickAndKeyEventHandler, useIsMounted } from '@/components/shared';
 import { useDebounce } from '@/hooks/useDebounce';
-import { clickAndKeyEventHandler } from '../shared';
 // Fixed import path - TSource is now defined in common.types
 import { TPassThrough, TRow, TSource } from '../types/common.types';
 import { TColIndex, TDataListCell } from './data-list-cell';
