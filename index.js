@@ -1,5 +1,10 @@
-export * from './constants';
-export * from './scratch';
-export { default as DBot } from './scratch/dbot';
-export * from './services/api';
-export * from './utils';
+import './index.scss';
+
+export {
+    load,
+    runGroupedEvents,
+    runIrreversibleEvents,
+    save,
+    scrollWorkspace,
+    updateWorkspaceName,
+} from './utils/index';
