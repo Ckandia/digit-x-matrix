@@ -1,6 +1,8 @@
-@use 'components/shared/styles/devices' as *;
-
 /** @define data-list; weak */
+
+@use 'components/shared/styles/devices' as *;
+@use 'components/shared/styles/constants' as *;
+
 .data-list {
     position: relative;
     height: 100%;
@@ -37,7 +39,7 @@
         }
 
         @include mobile-or-tablet-screen {
-            // border-radius: $BORDER_RADIUS;
+            border-radius: $BORDER_RADIUS;
         }
     }
 
