@@ -1,0 +1,212 @@
+.bulk-trader {
+    padding: 16px;
+    max-width: 1100px;
+    margin: 0 auto;
+    overflow-y: auto;
+    height: 100%;
+
+    &__intro {
+        margin-bottom: 16px;
+
+        h3 {
+            margin: 0 0 4px;
+            font-size: 1.8rem;
+            color: var(--text-general, inherit);
+        }
+
+        p {
+            margin: 0;
+            font-size: 1.3rem;
+            color: var(--text-less-prominent, #6e6e6e);
+            max-width: 640px;
+        }
+    }
+
+    &__notice {
+        padding: 10px 14px;
+        border-radius: 6px;
+        background: var(--general-section-1, #f2f3f4);
+        font-size: 1.2rem;
+        margin-bottom: 12px;
+
+        &--warning {
+            background: #fff4e5;
+            color: #b25e09;
+        }
+
+        &--error {
+            background: #ffe9e9;
+            color: #c92c2c;
+        }
+    }
+
+    &__strategies {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+
+    &__card {
+        border: 1px solid var(--general-section-6, #e0e0e0);
+        border-radius: 8px;
+        padding: 12px;
+        background: var(--general-main-1, #fff);
+    }
+
+    &__card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 10px;
+    }
+
+    &__label-input {
+        font-weight: 600;
+        font-size: 1.3rem;
+        border: none;
+        background: transparent;
+        flex: 1;
+        color: var(--text-general, inherit);
+
+        &:focus {
+            outline: 1px solid var(--button-primary-default, #ff444f);
+        }
+    }
+
+    &__remove-btn {
+        border: none;
+        background: transparent;
+        font-size: 1.8rem;
+        line-height: 1;
+        cursor: pointer;
+        color: var(--text-less-prominent, #999);
+
+        &:hover {
+            color: #c92c2c;
+        }
+    }
+
+    &__grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px 12px;
+
+        label {
+            display: flex;
+            flex-direction: column;
+            font-size: 1.1rem;
+            gap: 4px;
+            color: var(--text-less-prominent, #6e6e6e);
+        }
+
+        select,
+        input {
+            padding: 6px 8px;
+            border-radius: 4px;
+            border: 1px solid var(--general-section-6, #d0d0d0);
+            font-size: 1.2rem;
+            background: var(--general-main-1, #fff);
+            color: var(--text-general, inherit);
+        }
+    }
+
+    &__add-btn {
+        display: block;
+        margin-bottom: 16px;
+        padding: 8px 14px;
+        border-radius: 6px;
+        border: 1px dashed var(--general-section-6, #b0b0b0);
+        background: transparent;
+        cursor: pointer;
+        font-size: 1.2rem;
+
+        &:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    }
+
+    &__risk-check {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        font-size: 1.1rem;
+        color: var(--text-less-prominent, #6e6e6e);
+        margin-bottom: 14px;
+        max-width: 640px;
+
+        input {
+            margin-top: 3px;
+        }
+    }
+
+    &__start-btn,
+    &__stop-all-btn,
+    &__stop-one-btn {
+        padding: 10px 20px;
+        border-radius: 6px;
+        border: none;
+        background: var(--button-primary-default, #ff444f);
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+
+        &:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    }
+
+    &__stop-one-btn {
+        padding: 4px 10px;
+        font-size: 1rem;
+    }
+
+    &__run-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+        font-size: 1.2rem;
+    }
+
+    &__table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 1.2rem;
+
+        th,
+        td {
+            text-align: left;
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--general-section-6, #e0e0e0);
+        }
+    }
+
+    &__status {
+        text-transform: capitalize;
+
+        &--running {
+            color: #2e9e50;
+        }
+
+        &--stopped {
+            color: #6e6e6e;
+        }
+
+        &--error {
+            color: #c92c2c;
+        }
+    }
+
+    &__profit {
+        color: #2e9e50;
+        font-weight: 600;
+    }
+
+    &__loss {
+        color: #c92c2c;
+        font-weight: 600;
+    }
+}
