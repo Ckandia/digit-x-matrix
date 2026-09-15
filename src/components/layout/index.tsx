@@ -10,6 +10,7 @@ import { crypto_currencies_display_order, fiat_currencies_display_order } from '
 import Footer from './footer';
 import AppHeader from './header';
 import Body from './main-body';
+import RiskBanner from './risk-banner';
 import './layout.scss';
 
 const Layout = observer(() => {
@@ -150,6 +151,7 @@ const Layout = observer(() => {
             })}
         >
             {!isCallbackPage && <AppHeader isAuthenticating={isAuthenticating || !isInitialAuthCheckComplete} />}
+            {!isCallbackPage && <RiskBanner />}
             <Body>
                 <Outlet />
             </Body>
