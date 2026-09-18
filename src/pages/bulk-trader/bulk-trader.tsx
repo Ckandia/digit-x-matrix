@@ -1,9 +1,19 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { localize } from '@deriv-com/translations';
 import { useApiBase } from '@/hooks/useApiBase';
 import { getBulkRunStatus, startBulkRun, stopBulkRun, BulkTraderApiError } from './api';
-import { BULK_TRADER_MAX_STRATEGIES, CONTRACT_TYPE_OPTIONS, DEFAULT_STRATEGY, MONEY_MANAGEMENT_OPTIONS, SYMBOL_OPTIONS } from './constants';
+import {
+    BULK_TRADER_MAX_STRATEGIES,
+    CONTRACT_TYPE_LABELS,
+    CONTRACT_TYPE_OPTIONS,
+    DEFAULT_STRATEGY,
+    FLIP_PAIR,
+    MONEY_MANAGEMENT_OPTIONS,
+    SYMBOL_OPTIONS,
+} from './constants';
+import { TDigitSignal } from './analysis-types';
 import { TRunStatus, TStrategyConfig } from './types';
+import { useDigitSignals } from './useDigitSignals';
 import './bulk-trader.scss';
 
 const STORAGE_KEY = 'bulk_trader_run_id';
@@ -27,15 +37,132 @@ const getActiveToken = (): string | null => {
     return null;
 };
 
-const newStrategy = (index: number): TStrategyConfig => ({
+// --- Digit percentage grid (the 0-9 boxes) -------------------------------
+
+const DigitGrid = ({
+    percentages,
+    hotDigit,
+    coldDigit,
+    highlightedDigit,
+}: {
+    percentages: number[];
+    hotDigit: number;
+    coldDigit: number;
+    highlightedDigit?: number;
+}) => (
+    <div className='bulk-trader__digit-grid'>
+        {Array.from({ length: 10 }, (_, digit) => {
+            const pct = percentages[digit] ?? 0;
+            const is_hot = digit === hotDigit;
+            const is_cold = digit === coldDigit;
+            const is_highlighted = digit === highlightedDigit;
+            return (
+                <div
+                    key={digit}
+                    className={[
+                        'bulk-trader__digit-cell',
+                        is_hot && 'bulk-trader__digit-cell--hot',
+                        is_cold && 'bulk-trader__digit-cell--cold',
+                        is_highlighted && 'bulk-trader__digit-cell--highlight',
+                    ]
+                        .filter(Boolean)
+                        .join(' ')}
+                >
+                    <span className='bulk-trader__digit-value'>{digit}</span>
+                    <span className='bulk-trader__digit-pct'>{pct.toFixed(2)}%</span>
+                </div>
+            );
+        })}
+    </div>
+);
+
+// --- Recent-tick history matrix (Even/Odd coloured grid) -----------------
+
+const HistoryMatrix = ({ digits }: { digits: number[] }) => {
+    const cells = digits.slice(-40);
+    return (
+        <div className='bulk-trader__history-matrix'>
+            {cells.map((digit, index) => {
+                const is_even = digit % 2 === 0;
+                return (
+                    <span
+                        key={index}
+                        className={`bulk-trader__history-cell ${is_even ? 'bulk-trader__history-cell--even' : 'bulk-trader__history-cell--odd'}`}
+                        title={String(digit)}
+                    >
+                        {is_even ? 'E' : 'O'}
+                    </span>
+                );
+            })}
+            {cells.length === 0 && (
+                <span className='bulk-trader__history-empty'>{localize('Waiting for ticks…')}</span>
+            )}
+        </div>
+    );
+};
+
+// --- Live AI signal banner -------------------------------------------------
+
+const SignalBanner = ({
+    signal,
+    totalTicks,
+    onEnter,
+}: {
+    signal: TDigitSignal | undefined;
+    totalTicks: number;
+    onEnter: (signal: TDigitSignal) => void;
+}) => {
+    if (!signal) {
+        return (
+            <div className='bulk-trader__signal bulk-trader__signal--empty'>
+                {totalTicks > 0
+                    ? localize('Collecting ticks — no statistically significant signal yet.')
+                    : localize('Connecting to the live digit feed…')}
+            </div>
+        );
+    }
+    return (
+        <div className='bulk-trader__signal'>
+            <div className='bulk-trader__signal-info'>
+                <span className='bulk-trader__signal-tag'>{localize('SIGNAL')}</span>
+                <div className='bulk-trader__signal-label'>{signal.label}</div>
+                <div className='bulk-trader__signal-basis'>
+                    {signal.basis} · {localize('confidence')} {signal.confidence}%
+                </div>
+            </div>
+            <button type='button' className='bulk-trader__signal-enter' onClick={() => onEnter(signal)}>
+                {localize('ENTER NOW')}
+            </button>
+        </div>
+    );
+};
+
+const newStrategy = (overrides: Partial<TStrategyConfig> = {}): TStrategyConfig => ({
     ...DEFAULT_STRATEGY,
     client_id: makeId(),
-    label: `Strategy ${index}`,
+    ...overrides,
 });
 
 const BulkTrader = () => {
     const { isAuthorized, activeLoginid } = useApiBase();
-    const [strategies, setStrategies] = useState<TStrategyConfig[]>([newStrategy(1)]);
+    const { snapshots, connectionState } = useDigitSignals();
+
+    const [symbol, setSymbol] = useState(DEFAULT_STRATEGY.symbol);
+    const [contractType, setContractType] = useState<TStrategyConfig['contract_type']>(DEFAULT_STRATEGY.contract_type);
+    const [prediction, setPrediction] = useState(DEFAULT_STRATEGY.prediction);
+    const [stake, setStake] = useState(DEFAULT_STRATEGY.stake);
+    const [durationTicks, setDurationTicks] = useState(DEFAULT_STRATEGY.duration_ticks);
+    const [maxTrades, setMaxTrades] = useState(DEFAULT_STRATEGY.max_trades ?? 10);
+    const [moneyManagement, setMoneyManagement] = useState(DEFAULT_STRATEGY.money_management);
+    const [multiplier, setMultiplier] = useState(DEFAULT_STRATEGY.multiplier);
+    const [takeProfit, setTakeProfit] = useState(DEFAULT_STRATEGY.take_profit);
+    const [stopLoss, setStopLoss] = useState(DEFAULT_STRATEGY.stop_loss);
+    const [autoFlip, setAutoFlip] = useState(DEFAULT_STRATEGY.auto_flip);
+    const [stopWin, setStopWin] = useState(true);
+    const [bothSides, setBothSides] = useState(false);
+    const [fastExecution, setFastExecution] = useState(DEFAULT_STRATEGY.fast_execution);
+    const [showAdvanced, setShowAdvanced] = useState(false);
+
     const [runStatus, setRunStatus] = useState<TRunStatus | null>(null);
     const [runId, setRunId] = useState<string | null>(() => sessionStorage.getItem(STORAGE_KEY));
     const [hasAcceptedRisk, setHasAcceptedRisk] = useState(false);
@@ -46,6 +173,13 @@ const BulkTrader = () => {
     const backend_configured = Boolean(process.env.NEXT_PUBLIC_BULK_TRADER_API_URL);
     const is_running = Boolean(runStatus?.is_active);
 
+    const contract_meta = CONTRACT_TYPE_OPTIONS.find(c => c.value === contractType);
+    const snapshot = snapshots[symbol];
+    const stats = snapshot?.stats;
+    const signals = snapshot?.signals ?? [];
+    const topSignal = signals[0];
+    const opposite_type = FLIP_PAIR[contractType];
+
     const stopPolling = useCallback(() => {
         if (pollRef.current) {
             clearInterval(pollRef.current);
@@ -53,18 +187,21 @@ const BulkTrader = () => {
         }
     }, []);
 
-    const pollStatus = useCallback(async (id: string) => {
-        try {
-            const status = await getBulkRunStatus(id);
-            setRunStatus(status);
-            if (!status.is_active) {
+    const pollStatus = useCallback(
+        async (id: string) => {
+            try {
+                const status = await getBulkRunStatus(id);
+                setRunStatus(status);
+                if (!status.is_active) {
+                    stopPolling();
+                }
+            } catch (err) {
+                setError(err instanceof BulkTraderApiError ? err.message : localize('Could not reach the Bulk Trader backend.'));
                 stopPolling();
             }
-        } catch (err) {
-            setError(err instanceof BulkTraderApiError ? err.message : localize('Could not reach the Bulk Trader backend.'));
-            stopPolling();
-        }
-    }, [stopPolling]);
+        },
+        [stopPolling]
+    );
 
     useEffect(() => {
         if (runId) {
@@ -75,24 +212,64 @@ const BulkTrader = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [runId]);
 
-    const updateStrategy = (client_id: string, patch: Partial<TStrategyConfig>) => {
-        setStrategies(prev => prev.map(s => (s.client_id === client_id ? { ...s, ...patch } : s)));
-    };
+    const buildStrategyConfigs = useCallback(
+        (override_contract_type?: TStrategyConfig['contract_type']): TStrategyConfig[] => {
+            const base: Omit<TStrategyConfig, 'client_id' | 'label' | 'contract_type'> = {
+                symbol,
+                prediction,
+                stake,
+                duration_ticks: durationTicks,
+                money_management: moneyManagement,
+                multiplier,
+                auto_flip: autoFlip,
+                fast_execution: fastExecution,
+                take_profit: stopWin ? takeProfit : undefined,
+                stop_loss: stopLoss,
+                max_trades: maxTrades,
+            };
+            const primary_type = override_contract_type ?? contractType;
 
-    const addStrategy = () => {
-        if (strategies.length >= BULK_TRADER_MAX_STRATEGIES) return;
-        setStrategies(prev => [...prev, newStrategy(prev.length + 1)]);
-    };
+            if (bothSides && FLIP_PAIR[primary_type]) {
+                const secondary_type = FLIP_PAIR[primary_type] as TStrategyConfig['contract_type'];
+                return [
+                    newStrategy({ ...base, contract_type: primary_type, label: CONTRACT_TYPE_LABELS[primary_type] }),
+                    newStrategy({ ...base, contract_type: secondary_type, label: CONTRACT_TYPE_LABELS[secondary_type] }),
+                ];
+            }
+            return [newStrategy({ ...base, contract_type: primary_type, label: CONTRACT_TYPE_LABELS[primary_type] })];
+        },
+        [
+            symbol,
+            prediction,
+            stake,
+            durationTicks,
+            moneyManagement,
+            multiplier,
+            autoFlip,
+            fastExecution,
+            stopWin,
+            takeProfit,
+            stopLoss,
+            maxTrades,
+            contractType,
+            bothSides,
+        ]
+    );
 
-    const removeStrategy = (client_id: string) => {
-        setStrategies(prev => (prev.length > 1 ? prev.filter(s => s.client_id !== client_id) : prev));
-    };
-
-    const handleStart = async () => {
+    const handleStart = async (override_contract_type?: TStrategyConfig['contract_type']) => {
         setError(null);
+        if (!hasAcceptedRisk) {
+            setError(localize('Please confirm you understand the risk before starting a bulk run.'));
+            return;
+        }
         const token = getActiveToken();
         if (!token) {
             setError(localize('No active session token found. Please log in again.'));
+            return;
+        }
+        const strategies = buildStrategyConfigs(override_contract_type);
+        if (strategies.length > BULK_TRADER_MAX_STRATEGIES) {
+            setError(localize('Too many strategies for one run.'));
             return;
         }
         setIsStarting(true);
@@ -130,13 +307,26 @@ const BulkTrader = () => {
         }
     };
 
+    const applySignal = (signal: TDigitSignal) => {
+        setContractType(signal.contract_type);
+        if (typeof signal.prediction === 'number') setPrediction(signal.prediction);
+    };
+
+    const status_label = is_running ? localize('Running') : localize('Idle');
+    const connection_label = useMemo(() => {
+        if (connectionState === 'open') return localize('Live');
+        if (connectionState === 'connecting') return localize('Connecting…');
+        if (connectionState === 'unconfigured') return localize('Analysis feed not configured');
+        return localize('Reconnecting…');
+    }, [connectionState]);
+
     return (
         <div className='bulk-trader'>
             <div className='bulk-trader__intro'>
-                <h3>{localize('Bulk Trader')}</h3>
+                <h3>{localize('Bulk Trades')}</h3>
                 <p>
                     {localize(
-                        'Run several digit-trading strategies at the same time on this account. Each strategy trades independently with its own stake, money management, and stop conditions.'
+                        'The backend analyses live digit ticks and surfaces a statistical signal here. You choose whether to act on it — nothing trades until you start a run.'
                     )}
                 </p>
             </div>
@@ -144,202 +334,241 @@ const BulkTrader = () => {
             {!backend_configured && (
                 <div className='bulk-trader__notice bulk-trader__notice--warning'>
                     {localize(
-                        'The Bulk Trader backend is not configured yet. Set NEXT_PUBLIC_BULK_TRADER_API_URL to your deployed Render backend URL.'
+                        'The backend is not configured yet. Set NEXT_PUBLIC_BULK_TRADER_API_URL to your deployed Render backend URL.'
                     )}
                 </div>
             )}
 
             {!isAuthorized && (
-                <div className='bulk-trader__notice'>{localize('Log in to your Deriv account to use Bulk Trader.')}</div>
+                <div className='bulk-trader__notice'>{localize('Log in to your Deriv account to use Bulk Trades.')}</div>
             )}
 
             {error && <div className='bulk-trader__notice bulk-trader__notice--error'>{error}</div>}
 
-            {!is_running && isAuthorized && (
-                <>
-                    <div className='bulk-trader__strategies'>
-                        {strategies.map((strategy, index) => {
-                            const contract_meta = CONTRACT_TYPE_OPTIONS.find(c => c.value === strategy.contract_type);
-                            return (
-                                <div className='bulk-trader__card' key={strategy.client_id}>
-                                    <div className='bulk-trader__card-header'>
-                                        <input
-                                            className='bulk-trader__label-input'
-                                            value={strategy.label}
-                                            onChange={e => updateStrategy(strategy.client_id, { label: e.target.value })}
-                                        />
-                                        {strategies.length > 1 && (
-                                            <button
-                                                type='button'
-                                                className='bulk-trader__remove-btn'
-                                                onClick={() => removeStrategy(strategy.client_id)}
-                                                aria-label={localize('Remove strategy')}
-                                            >
-                                                ×
-                                            </button>
-                                        )}
-                                    </div>
+            <div className='bulk-trader__status-bar'>
+                <span className={`bulk-trader__dot bulk-trader__dot--${isAuthorized ? 'on' : 'off'}`} />
+                {isAuthorized ? (
+                    <span>
+                        {localize('Connected')} — <strong>{activeLoginid}</strong>
+                    </span>
+                ) : (
+                    <span>{localize('Not connected')}</span>
+                )}
+                <span className='bulk-trader__status-bar-divider' />
+                <span className={`bulk-trader__feed-dot bulk-trader__feed-dot--${connectionState}`} />
+                <span>{connection_label}</span>
+            </div>
 
-                                    <div className='bulk-trader__grid'>
-                                        <label>
-                                            {localize('Symbol')}
-                                            <select
-                                                value={strategy.symbol}
-                                                onChange={e => updateStrategy(strategy.client_id, { symbol: e.target.value })}
-                                            >
-                                                {SYMBOL_OPTIONS.map(opt => (
-                                                    <option key={opt.value} value={opt.value}>
-                                                        {opt.label}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </label>
+            <SignalBanner signal={topSignal} totalTicks={stats?.total_ticks ?? 0} onEnter={applySignal} />
 
-                                        <label>
-                                            {localize('Contract type')}
-                                            <select
-                                                value={strategy.contract_type}
-                                                onChange={e =>
-                                                    updateStrategy(strategy.client_id, {
-                                                        contract_type: e.target.value as TStrategyConfig['contract_type'],
-                                                    })
-                                                }
-                                            >
-                                                {CONTRACT_TYPE_OPTIONS.map(opt => (
-                                                    <option key={opt.value} value={opt.value}>
-                                                        {opt.label}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </label>
+            <div className='bulk-trader__console'>
+                <div className='bulk-trader__panel'>
+                    <div className='bulk-trader__field-row'>
+                        <label className='bulk-trader__field'>
+                            <span>{localize('MARKET')}</span>
+                            <select value={symbol} onChange={e => setSymbol(e.target.value)} disabled={is_running}>
+                                {SYMBOL_OPTIONS.map(opt => (
+                                    <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
 
-                                        {contract_meta?.needs_prediction && (
-                                            <label>
-                                                {localize('Digit')}
-                                                <select
-                                                    value={strategy.prediction}
-                                                    onChange={e =>
-                                                        updateStrategy(strategy.client_id, {
-                                                            prediction: Number(e.target.value),
-                                                        })
-                                                    }
-                                                >
-                                                    {Array.from({ length: 10 }, (_, d) => d).map(d => (
-                                                        <option key={d} value={d}>
-                                                            {d}
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                            </label>
-                                        )}
+                        <label className='bulk-trader__field'>
+                            <span>{localize('STRATEGY')}</span>
+                            <select
+                                value={contractType}
+                                onChange={e => setContractType(e.target.value as TStrategyConfig['contract_type'])}
+                                disabled={is_running}
+                            >
+                                {CONTRACT_TYPE_OPTIONS.map(opt => (
+                                    <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                    </div>
 
-                                        <label>
-                                            {localize('Stake')}
-                                            <input
-                                                type='number'
-                                                min={0.35}
-                                                step={0.01}
-                                                value={strategy.stake}
-                                                onChange={e =>
-                                                    updateStrategy(strategy.client_id, { stake: Number(e.target.value) })
-                                                }
-                                            />
-                                        </label>
+                    {contract_meta?.needs_prediction && (
+                        <label className='bulk-trader__field'>
+                            <span>{localize('DIGIT')}</span>
+                            <select
+                                value={prediction}
+                                onChange={e => setPrediction(Number(e.target.value))}
+                                disabled={is_running}
+                            >
+                                {Array.from({ length: 10 }, (_, d) => d).map(d => (
+                                    <option key={d} value={d}>
+                                        {d}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                    )}
 
-                                        <label>
-                                            {localize('Money management')}
-                                            <select
-                                                value={strategy.money_management}
-                                                onChange={e =>
-                                                    updateStrategy(strategy.client_id, {
-                                                        money_management: e.target.value as TStrategyConfig['money_management'],
-                                                    })
-                                                }
-                                            >
-                                                {MONEY_MANAGEMENT_OPTIONS.map(opt => (
-                                                    <option key={opt.value} value={opt.value}>
-                                                        {opt.label}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </label>
+                    <label className='bulk-trader__field'>
+                        <span>{localize('STAKE (USD)')}</span>
+                        <input
+                            type='number'
+                            min={0.35}
+                            step={0.01}
+                            value={stake}
+                            onChange={e => setStake(Number(e.target.value))}
+                            disabled={is_running}
+                        />
+                    </label>
 
-                                        {strategy.money_management !== 'flat' && (
-                                            <label>
-                                                {localize('Multiplier')}
-                                                <input
-                                                    type='number'
-                                                    min={1.01}
-                                                    step={0.1}
-                                                    value={strategy.multiplier}
-                                                    onChange={e =>
-                                                        updateStrategy(strategy.client_id, {
-                                                            multiplier: Number(e.target.value),
-                                                        })
-                                                    }
-                                                />
-                                            </label>
-                                        )}
+                    <div className='bulk-trader__field-row'>
+                        <label className='bulk-trader__field'>
+                            <span>{localize('DURATION (TICKS)')}</span>
+                            <input
+                                type='number'
+                                min={1}
+                                step={1}
+                                value={durationTicks}
+                                onChange={e => setDurationTicks(Number(e.target.value))}
+                                disabled={is_running}
+                            />
+                        </label>
 
-                                        <label>
-                                            {localize('Take profit')}
-                                            <input
-                                                type='number'
-                                                min={0}
-                                                step={0.01}
-                                                value={strategy.take_profit ?? ''}
-                                                onChange={e =>
-                                                    updateStrategy(strategy.client_id, {
-                                                        take_profit: e.target.value ? Number(e.target.value) : undefined,
-                                                    })
-                                                }
-                                            />
-                                        </label>
+                        <label className='bulk-trader__field'>
+                            <span>{localize('NO. OF BULK TRADES')}</span>
+                            <input
+                                type='number'
+                                min={1}
+                                step={1}
+                                value={maxTrades}
+                                onChange={e => setMaxTrades(Number(e.target.value))}
+                                disabled={is_running}
+                            />
+                        </label>
+                    </div>
 
-                                        <label>
-                                            {localize('Stop loss')}
-                                            <input
-                                                type='number'
-                                                min={0}
-                                                step={0.01}
-                                                value={strategy.stop_loss ?? ''}
-                                                onChange={e =>
-                                                    updateStrategy(strategy.client_id, {
-                                                        stop_loss: e.target.value ? Number(e.target.value) : undefined,
-                                                    })
-                                                }
-                                            />
-                                        </label>
+                    <div className='bulk-trader__toggle-row'>
+                        <label className='bulk-trader__toggle'>
+                            <input
+                                type='checkbox'
+                                checked={autoFlip}
+                                onChange={e => setAutoFlip(e.target.checked)}
+                                disabled={is_running}
+                            />
+                            <span className='bulk-trader__toggle-track' />
+                            <span className='bulk-trader__toggle-label'>
+                                {localize('Auto Flip')}
+                                <em title={localize('Switches Even/Odd (or Over/Under) after a loss.')}>i</em>
+                            </span>
+                        </label>
 
-                                        <label>
-                                            {localize('Max trades')}
-                                            <input
-                                                type='number'
-                                                min={1}
-                                                step={1}
-                                                value={strategy.max_trades ?? ''}
-                                                onChange={e =>
-                                                    updateStrategy(strategy.client_id, {
-                                                        max_trades: e.target.value ? Number(e.target.value) : undefined,
-                                                    })
-                                                }
-                                            />
-                                        </label>
-                                    </div>
-                                </div>
-                            );
-                        })}
+                        <label className='bulk-trader__toggle'>
+                            <input
+                                type='checkbox'
+                                checked={stopWin}
+                                onChange={e => setStopWin(e.target.checked)}
+                                disabled={is_running}
+                            />
+                            <span className='bulk-trader__toggle-track' />
+                            <span className='bulk-trader__toggle-label'>
+                                {localize('Stop Win')}
+                                <em title={localize('Stops the run once the take-profit target below is reached.')}>i</em>
+                            </span>
+                        </label>
+
+                        <label className='bulk-trader__toggle'>
+                            <input
+                                type='checkbox'
+                                checked={bothSides}
+                                onChange={e => setBothSides(e.target.checked)}
+                                disabled={is_running || !opposite_type}
+                            />
+                            <span className='bulk-trader__toggle-track' />
+                            <span className='bulk-trader__toggle-label'>
+                                {localize('Both Sides')}
+                                <em title={localize('Runs this strategy and its opposite side at the same time.')}>i</em>
+                            </span>
+                        </label>
                     </div>
 
                     <button
                         type='button'
-                        className='bulk-trader__add-btn'
-                        onClick={addStrategy}
-                        disabled={strategies.length >= BULK_TRADER_MAX_STRATEGIES}
+                        className='bulk-trader__advanced-toggle'
+                        onClick={() => setShowAdvanced(v => !v)}
                     >
-                        + {localize('Add strategy')} ({strategies.length}/{BULK_TRADER_MAX_STRATEGIES})
+                        {showAdvanced ? localize('Hide advanced settings') : localize('Advanced settings')}
                     </button>
 
+                    {showAdvanced && (
+                        <div className='bulk-trader__advanced'>
+                            <label className='bulk-trader__field'>
+                                <span>{localize('Money management')}</span>
+                                <select
+                                    value={moneyManagement}
+                                    onChange={e => setMoneyManagement(e.target.value as TStrategyConfig['money_management'])}
+                                    disabled={is_running}
+                                >
+                                    {MONEY_MANAGEMENT_OPTIONS.map(opt => (
+                                        <option key={opt.value} value={opt.value}>
+                                            {opt.label}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+
+                            {moneyManagement !== 'flat' && (
+                                <label className='bulk-trader__field'>
+                                    <span>{localize('Multiplier')}</span>
+                                    <input
+                                        type='number'
+                                        min={1.01}
+                                        step={0.1}
+                                        value={multiplier}
+                                        onChange={e => setMultiplier(Number(e.target.value))}
+                                        disabled={is_running}
+                                    />
+                                </label>
+                            )}
+
+                            <label className='bulk-trader__field'>
+                                <span>{localize('Take profit (USD)')}</span>
+                                <input
+                                    type='number'
+                                    min={0}
+                                    step={0.01}
+                                    value={takeProfit ?? ''}
+                                    onChange={e => setTakeProfit(e.target.value ? Number(e.target.value) : undefined)}
+                                    disabled={is_running || !stopWin}
+                                />
+                            </label>
+
+                            <label className='bulk-trader__field'>
+                                <span>{localize('Stop loss (USD)')}</span>
+                                <input
+                                    type='number'
+                                    min={0}
+                                    step={0.01}
+                                    value={stopLoss ?? ''}
+                                    onChange={e => setStopLoss(e.target.value ? Number(e.target.value) : undefined)}
+                                    disabled={is_running}
+                                />
+                            </label>
+                        </div>
+                    )}
+                </div>
+
+                <div className='bulk-trader__panel bulk-trader__panel--matrix'>
+                    <DigitGrid
+                        percentages={stats?.digit_percentages ?? new Array(10).fill(0)}
+                        hotDigit={stats?.hot_digit ?? -1}
+                        coldDigit={stats?.cold_digit ?? -1}
+                        highlightedDigit={contract_meta?.needs_prediction ? prediction : undefined}
+                    />
+                    <HistoryMatrix digits={stats?.last_digits ?? []} />
+                </div>
+            </div>
+
+            {!is_running && (
+                <>
                     <label className='bulk-trader__risk-check'>
                         <input
                             type='checkbox'
@@ -347,20 +576,72 @@ const BulkTrader = () => {
                             onChange={e => setHasAcceptedRisk(e.target.checked)}
                         />
                         {localize(
-                            'I understand these strategies will place real trades automatically on my account and I could lose some or all of my stake.'
+                            'I understand this will place real trades automatically on my account and I could lose some or all of my stake.'
                         )}
                     </label>
 
-                    <button
-                        type='button'
-                        className='bulk-trader__start-btn'
-                        disabled={!hasAcceptedRisk || isStarting || !backend_configured}
-                        onClick={handleStart}
-                    >
-                        {isStarting ? localize('Starting...') : localize('Start bulk run')}
-                    </button>
+                    <div className='bulk-trader__action-row'>
+                        {opposite_type ? (
+                            <>
+                                <button
+                                    type='button'
+                                    className='bulk-trader__action-btn bulk-trader__action-btn--positive'
+                                    disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
+                                    onClick={() => handleStart(contractType)}
+                                >
+                                    {isStarting ? localize('Starting…') : `${localize('Bulk')} ${CONTRACT_TYPE_LABELS[contractType]}`}
+                                </button>
+
+                                <button
+                                    type='button'
+                                    className='bulk-trader__action-btn bulk-trader__action-btn--ai'
+                                    disabled={!topSignal}
+                                    onClick={() => topSignal && applySignal(topSignal)}
+                                    title={localize('Apply the current AI signal to the form above')}
+                                >
+                                    {localize('AI')}: {topSignal ? topSignal.label : localize('—')}
+                                </button>
+
+                                <button
+                                    type='button'
+                                    className='bulk-trader__action-btn bulk-trader__action-btn--negative'
+                                    disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
+                                    onClick={() => handleStart(opposite_type)}
+                                >
+                                    {isStarting
+                                        ? localize('Starting…')
+                                        : `${localize('Bulk')} ${CONTRACT_TYPE_LABELS[opposite_type]}`}
+                                </button>
+                            </>
+                        ) : (
+                            <button
+                                type='button'
+                                className='bulk-trader__action-btn bulk-trader__action-btn--positive bulk-trader__action-btn--wide'
+                                disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
+                                onClick={() => handleStart()}
+                            >
+                                {isStarting ? localize('Starting…') : localize('Start bulk run')}
+                            </button>
+                        )}
+                    </div>
                 </>
             )}
+
+            <div className='bulk-trader__footer-row'>
+                <span className={`bulk-trader__status-pill bulk-trader__status-pill--${is_running ? 'running' : 'idle'}`}>
+                    {status_label}
+                </span>
+                <label className='bulk-trader__toggle bulk-trader__toggle--inline'>
+                    <input
+                        type='checkbox'
+                        checked={fastExecution}
+                        onChange={e => setFastExecution(e.target.checked)}
+                        disabled={is_running}
+                    />
+                    <span className='bulk-trader__toggle-track' />
+                    <span className='bulk-trader__toggle-label'>{localize('Execution FAST')}</span>
+                </label>
+            </div>
 
             {is_running && runStatus && (
                 <div className='bulk-trader__run'>

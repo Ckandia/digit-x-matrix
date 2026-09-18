@@ -51,6 +51,10 @@ export default defineConfig({
         // Base URL of the Bulk Trader backend (deployed separately on Render).
         // e.g. https://digit-x-matrix-backend.onrender.com — no trailing slash.
         NEXT_PUBLIC_BULK_TRADER_API_URL: JSON.stringify(process.env.NEXT_PUBLIC_BULK_TRADER_API_URL ?? ''),
+        // Optional explicit WebSocket URL for the live digit-analysis feed
+        // (defaults to NEXT_PUBLIC_BULK_TRADER_API_URL + /ws/signals if unset).
+        // e.g. wss://digit-x-matrix-backend.onrender.com/ws/signals
+        NEXT_PUBLIC_ANALYSIS_WS_URL: JSON.stringify(process.env.NEXT_PUBLIC_ANALYSIS_WS_URL ?? ''),
       },
     },
     alias: {

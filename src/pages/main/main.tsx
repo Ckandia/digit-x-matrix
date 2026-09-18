@@ -438,7 +438,7 @@ const AppWrapper = observer(() => {
                                             width='24px'
                                             fill='var(--text-general)'
                                         />
-                                        <Localize i18n_default_text='Bulk Trader' />
+                                        <Localize i18n_default_text='Bulk Trades' />
                                     </>
                                 }
                                 id='id-bulk-trader'

@@ -1,8 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
 
 const TRADE_COOLDOWN_MS = 1000;
+const FAST_TRADE_COOLDOWN_MS = 250;
 
 const NEEDS_BARRIER = new Set(['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER']);
+
+// Auto Flip swaps between the two sides of a binary digit bet after a loss
+// (a simple "switch sides" heuristic some digit traders use). Only defined
+// for pairs that are genuinely opposite — Matches/Differs and Over/Under also
+// depend on the predicted digit, so Auto Flip only applies to Even/Odd.
+const FLIP_PAIR = { DIGITEVEN: 'DIGITODD', DIGITODD: 'DIGITEVEN' };
 
 /**
  * Runs a single digit-contract strategy against a shared DerivConnection.
@@ -24,6 +31,7 @@ export class StrategyEngine {
         this.losses = 0;
         this.total_profit = 0;
         this.current_stake = config.stake;
+        this.current_contract_type = config.contract_type;
         this.last_result = undefined;
         this.last_payout = undefined;
         this.stop_reason = undefined;
@@ -39,7 +47,7 @@ export class StrategyEngine {
             client_id: this.client_id,
             label: this.label,
             symbol: this.config.symbol,
-            contract_type: this.config.contract_type,
+            contract_type: this.current_contract_type,
             status: this.status,
             trades: this.trades,
             wins: this.wins,
@@ -110,13 +118,13 @@ export class StrategyEngine {
         const parameters = {
             amount: this.current_stake,
             basis: 'stake',
-            contract_type: this.config.contract_type,
+            contract_type: this.current_contract_type,
             currency: this.currency,
-            duration: 1,
+            duration: Math.max(1, Number(this.config.duration_ticks) || 1),
             duration_unit: 't',
             symbol: this.config.symbol,
         };
-        if (NEEDS_BARRIER.has(this.config.contract_type)) {
+        if (NEEDS_BARRIER.has(this.current_contract_type)) {
             parameters.barrier = String(this.config.prediction);
         }
 
@@ -160,10 +168,18 @@ export class StrategyEngine {
                 else this.losses += 1;
 
                 this._applyMoneyManagement(won);
+                this._applyAutoFlip(won);
 
                 if (this._stopRequested) return;
-                setTimeout(() => this._placeNextTrade(), TRADE_COOLDOWN_MS);
+                const cooldown = this.config.fast_execution ? FAST_TRADE_COOLDOWN_MS : TRADE_COOLDOWN_MS;
+                setTimeout(() => this._placeNextTrade(), cooldown);
             }
         );
+    }
+
+    _applyAutoFlip(won) {
+        if (!this.config.auto_flip || won) return;
+        const flipped = FLIP_PAIR[this.current_contract_type];
+        if (flipped) this.current_contract_type = flipped;
     }
 }

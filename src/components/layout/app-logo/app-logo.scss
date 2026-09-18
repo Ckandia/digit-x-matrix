@@ -35,11 +35,34 @@
         line-height: 1;
     }
 
-    &__logo-text {
+    &__logo-text-group {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
         margin-left: 1.2rem;
+        min-width: 0;
+        line-height: 1.15;
+    }
+
+    &__logo-text {
         color: var(--text-general);
         font-weight: 600;
         font-size: 1.8rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 220px;
+    }
+
+    // "Powered by Deriv" — required by Deriv's third-party site guidelines.
+    // Kept small and muted so it reads as a subtitle, not competing with the
+    // partner's own app name above it.
+    &__logo-subtext {
+        color: var(--text-less-prominent, #9494a3);
+        font-weight: 500;
+        font-size: 0.9rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -55,7 +78,7 @@
             padding-inline-end: 0.8rem;
         }
 
-        .app-header__logo-text {
+        .app-header__logo-text-group {
             display: none;
         }
     }
@@ -63,7 +86,8 @@
 
 // The same mark inside the mobile drawer header shows the app name (the header's
 // --mobile rule hides it, but the drawer has room) and can use the full available width.
-.mobile-menu__header .app-header__logo-text {
-    display: block;
+.mobile-menu__header .app-header__logo-text-group {
+    display: flex;
     max-width: 180px;
 }
+

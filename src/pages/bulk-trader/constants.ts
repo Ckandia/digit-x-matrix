@@ -24,21 +24,40 @@ export const CONTRACT_TYPE_OPTIONS: { value: TDigitContractType; label: string; 
     { value: 'DIGITODD', label: 'Odd', needs_prediction: false },
 ];
 
+export const CONTRACT_TYPE_LABELS: Record<TDigitContractType, string> = CONTRACT_TYPE_OPTIONS.reduce(
+    (acc, opt) => ({ ...acc, [opt.value]: opt.label }),
+    {} as Record<TDigitContractType, string>
+);
+
 export const MONEY_MANAGEMENT_OPTIONS: { value: TMoneyManagement; label: string }[] = [
     { value: 'flat', label: 'Flat stake' },
     { value: 'martingale', label: 'Martingale (multiply stake after a loss)' },
     { value: 'dalembert', label: "D'Alembert (step stake after a loss/win)" },
 ];
 
+// The two-sided contract families the quick "Bulk <X> / AI / Bulk <Y>" action
+// row understands. Matches/Differs aren't a natural opposite pair (the
+// counterpart depends on the predicted digit, not just the contract type), so
+// they fall back to a single "Start bulk run" button instead of this row.
+export const FLIP_PAIR: Partial<Record<TDigitContractType, TDigitContractType>> = {
+    DIGITEVEN: 'DIGITODD',
+    DIGITODD: 'DIGITEVEN',
+    DIGITOVER: 'DIGITUNDER',
+    DIGITUNDER: 'DIGITOVER',
+};
+
 export const DEFAULT_STRATEGY: Omit<TStrategyConfig, 'client_id'> = {
     label: 'Strategy 1',
     symbol: 'R_10',
-    contract_type: 'DIGITDIFF',
+    contract_type: 'DIGITEVEN',
     prediction: 5,
     stake: 1,
-    money_management: 'martingale',
+    duration_ticks: 1,
+    money_management: 'flat',
     multiplier: 2,
+    auto_flip: false,
+    fast_execution: true,
     take_profit: 10,
     stop_loss: 10,
-    max_trades: 50,
+    max_trades: 10,
 };

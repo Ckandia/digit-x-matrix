@@ -20,6 +20,7 @@ import { localize } from '@deriv-com/translations';
 import Audio from '../components/audio';
 import BlocklyLoading from '../components/blockly-loading';
 import BotStopped from '../components/bot-stopped';
+import { RiskDisclaimer } from '../components/layout/risk-disclaimer';
 import BotBuilder from '../pages/bot-builder';
 import Main from '../pages/main';
 import './app.scss';
@@ -201,6 +202,7 @@ const AppContent = observer(() => {
                             <BotStopped />
                             <TransactionDetailsModal />
                             <ToastContainer limit={3} draggable={false} />
+                            <RiskDisclaimer />
                         </div>
                     </ThemeProvider>
                 </AuthLoadingWrapper>

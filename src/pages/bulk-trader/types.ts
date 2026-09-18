@@ -11,9 +11,15 @@ export type TStrategyConfig = {
     /** Predicted digit (0-9). Required for DIGITMATCH / DIGITDIFF / DIGITOVER / DIGITUNDER. */
     prediction: number;
     stake: number;
+    /** Contract duration in ticks (Deriv digit contracts are duration_unit: 't'). */
+    duration_ticks: number;
     money_management: TMoneyManagement;
     /** Multiplier applied to stake after a loss (martingale) or step size (d'alembert). */
     multiplier: number;
+    /** Switches Even<->Odd after a loss. Only meaningful for those two contract types. */
+    auto_flip: boolean;
+    /** Shortens the pause between trades from 1s to 250ms. */
+    fast_execution: boolean;
     take_profit?: number;
     stop_loss?: number;
     max_trades?: number;
