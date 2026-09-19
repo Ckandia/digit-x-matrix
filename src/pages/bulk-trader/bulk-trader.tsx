@@ -320,6 +320,12 @@ const BulkTrader = () => {
         return localize('Reconnecting…');
     }, [connectionState]);
 
+    // Whether the live AI signal currently agrees with the primary /
+    // opposite-side action button, so we can give the matching button a
+    // "ready to press" glow instead of only glowing the signal banner.
+    const primary_matches_signal = Boolean(topSignal && topSignal.contract_type === contractType);
+    const opposite_matches_signal = Boolean(topSignal && opposite_type && topSignal.contract_type === opposite_type);
+
     return (
         <div className='bulk-trader'>
             <div className='bulk-trader__intro'>
@@ -585,7 +591,13 @@ const BulkTrader = () => {
                             <>
                                 <button
                                     type='button'
-                                    className='bulk-trader__action-btn bulk-trader__action-btn--positive'
+                                    className={[
+                                        'bulk-trader__action-btn',
+                                        'bulk-trader__action-btn--positive',
+                                        primary_matches_signal && 'bulk-trader__action-btn--signal-match',
+                                    ]
+                                        .filter(Boolean)
+                                        .join(' ')}
                                     disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
                                     onClick={() => handleStart(contractType)}
                                 >
@@ -604,7 +616,13 @@ const BulkTrader = () => {
 
                                 <button
                                     type='button'
-                                    className='bulk-trader__action-btn bulk-trader__action-btn--negative'
+                                    className={[
+                                        'bulk-trader__action-btn',
+                                        'bulk-trader__action-btn--negative',
+                                        opposite_matches_signal && 'bulk-trader__action-btn--signal-match',
+                                    ]
+                                        .filter(Boolean)
+                                        .join(' ')}
                                     disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
                                     onClick={() => handleStart(opposite_type)}
                                 >
@@ -616,7 +634,14 @@ const BulkTrader = () => {
                         ) : (
                             <button
                                 type='button'
-                                className='bulk-trader__action-btn bulk-trader__action-btn--positive bulk-trader__action-btn--wide'
+                                className={[
+                                    'bulk-trader__action-btn',
+                                    'bulk-trader__action-btn--positive',
+                                    'bulk-trader__action-btn--wide',
+                                    primary_matches_signal && 'bulk-trader__action-btn--signal-match',
+                                ]
+                                    .filter(Boolean)
+                                    .join(' ')}
                                 disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
                                 onClick={() => handleStart()}
                             >
