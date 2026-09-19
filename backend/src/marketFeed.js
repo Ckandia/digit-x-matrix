@@ -1,8 +1,10 @@
 import WebSocket from 'ws';
 import { computeSignals, computeStats, createDigitWindow, pushDigit } from './digitAnalysis.js';
 
-const DERIV_WS_URL = 'wss://ws.derivws.com/websockets/v3';
-const APP_ID = process.env.DERIV_APP_ID || '1089';
+// Deriv migrated its trading API to this gateway; the old ws.derivws.com/websockets/v3
+// endpoint still accepts connections but no longer serves synthetic-index data through
+// it. Public market data needs no app_id or auth at all on the new gateway.
+const DERIV_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
 const HISTORY_COUNT = 500; // ticks_history backfill so the window isn't empty on boot
 const RECONNECT_DELAY_MS = 3000;
 
@@ -87,7 +89,7 @@ export class MarketFeed {
     }
 
     _connect() {
-        this.ws = new WebSocket(`${DERIV_WS_URL}?app_id=${APP_ID}`);
+        this.ws = new WebSocket(DERIV_WS_URL);
 
         this.ws.on('open', () => {
             // eslint-disable-next-line no-console
