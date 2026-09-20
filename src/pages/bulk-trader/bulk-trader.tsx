@@ -21,6 +21,20 @@ const POLL_INTERVAL_MS = 3000;
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
+// Mirrors ClientStore.getToken() in stores/client-store.ts — the app's own
+// canonical way of reading the active account's token. authData$ (and
+// therefore useApiBase()) only carries loginid/currency/balance here, never
+// the token itself, so we read the same { loginid: token } map the app
+// itself maintains in localStorage instead of guessing at a different shape.
+const getActiveToken = (login_id: string): string => {
+    try {
+        const accountList = JSON.parse(localStorage.getItem('accountsList') ?? '{}');
+        return accountList?.[login_id] ?? '';
+    } catch {
+        return '';
+    }
+};
+
 // --- Digit percentage grid (the 0-9 boxes) -------------------------------
 
 const DigitGrid = ({
@@ -128,7 +142,7 @@ const newStrategy = (overrides: Partial<TStrategyConfig> = {}): TStrategyConfig 
 });
 
 const BulkTrader = () => {
-    const { isAuthorized, activeLoginid, authData } = useApiBase();
+    const { isAuthorized, activeLoginid } = useApiBase();
     const { snapshots, connectionState } = useDigitSignals();
 
     const [symbol, setSymbol] = useState(DEFAULT_STRATEGY.symbol);
@@ -325,7 +339,7 @@ const BulkTrader = () => {
             setError(localize('Please confirm you understand the risk before starting a bulk run.'));
             return;
         }
-        const token = authData?.token;
+        const token = getActiveToken(activeLoginid);
         if (!token) {
             setError(localize('No active session token found. Please log in again.'));
             return;
