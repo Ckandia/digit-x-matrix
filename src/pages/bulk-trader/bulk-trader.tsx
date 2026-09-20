@@ -177,8 +177,14 @@ const BulkTrader = () => {
     const snapshot = snapshots[symbol];
     const stats = snapshot?.stats;
     const signals = snapshot?.signals ?? [];
-    const topSignal = signals[0];
     const opposite_type = FLIP_PAIR[contractType];
+    // Only surface a signal for the strategy currently selected — if you're
+    // set up to trade Even/Odd, the signal shown (and the "ENTER NOW" /
+    // glow) should be about Even or Odd, not whichever contract type
+    // happens to have the strongest reading right now. When "Both Sides" is
+    // on, either side of the pair counts as relevant.
+    const relevant_contract_types = bothSides && opposite_type ? [contractType, opposite_type] : [contractType];
+    const topSignal = signals.find(s => relevant_contract_types.includes(s.contract_type));
 
     const stopPolling = useCallback(() => {
         if (pollRef.current) {
