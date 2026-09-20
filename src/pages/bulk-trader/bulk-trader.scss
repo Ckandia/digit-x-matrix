@@ -441,6 +441,12 @@
         margin-bottom: 14px;
     }
 
+    &__disabled-hint {
+        font-size: 1rem;
+        color: var(--bt-yellow);
+        margin: -6px 0 14px;
+    }
+
     &__action-btn {
         border: none;
         border-radius: 8px;
