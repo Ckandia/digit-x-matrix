@@ -21,22 +21,6 @@ const POLL_INTERVAL_MS = 3000;
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
-const getActiveToken = (): string | null => {
-    try {
-        const direct = localStorage.getItem('authToken');
-        if (direct) return direct;
-        const login_id = localStorage.getItem('active_loginid');
-        const accounts_list = localStorage.getItem('accountsList');
-        if (login_id && accounts_list) {
-            const parsed = JSON.parse(accounts_list);
-            if (parsed?.[login_id]) return String(parsed[login_id]);
-        }
-    } catch {
-        // ignore malformed localStorage content
-    }
-    return null;
-};
-
 // --- Digit percentage grid (the 0-9 boxes) -------------------------------
 
 const DigitGrid = ({
@@ -144,7 +128,7 @@ const newStrategy = (overrides: Partial<TStrategyConfig> = {}): TStrategyConfig 
 });
 
 const BulkTrader = () => {
-    const { isAuthorized, activeLoginid } = useApiBase();
+    const { isAuthorized, activeLoginid, authData } = useApiBase();
     const { snapshots, connectionState } = useDigitSignals();
 
     const [symbol, setSymbol] = useState(DEFAULT_STRATEGY.symbol);
@@ -268,7 +252,7 @@ const BulkTrader = () => {
             setError(localize('Please confirm you understand the risk before starting a bulk run.'));
             return;
         }
-        const token = getActiveToken();
+        const token = authData?.token;
         if (!token) {
             setError(localize('No active session token found. Please log in again.'));
             return;
