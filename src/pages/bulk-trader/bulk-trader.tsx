@@ -21,11 +21,17 @@ const POLL_INTERVAL_MS = 3000;
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
-// The app's OAuth2 login flow (Ory-issued tokens, prefixed "ory_at_") stores
-// the active session's access token as JSON in localStorage.auth_info —
-// confirmed by inspecting actual browser storage. The older accountsList /
-// ClientStore.getToken() map is not populated by this flow.
+// Bulk Trader prefers a manually-pasted, longer-lived API token (saved via
+// the "Bulk Trader API token" field in the header) when one is set, since
+// that's a stable credential meant for exactly this. It only falls back to
+// the OAuth2 browser-session token (Ory-issued, in localStorage.auth_info)
+// if no manual token has been saved — that one is short-lived by design and
+// not ideal for a backend run, but better than nothing.
+const MANUAL_TOKEN_STORAGE_KEY = 'deriv_manual_api_token';
+
 const getActiveToken = (): string => {
+    const manual = localStorage.getItem(MANUAL_TOKEN_STORAGE_KEY);
+    if (manual && manual.trim()) return manual.trim();
     try {
         const raw = localStorage.getItem('auth_info');
         if (!raw) return '';
@@ -207,11 +213,6 @@ const BulkTrader = () => {
     const stats = snapshot?.stats;
     const signals = snapshot?.signals ?? [];
     const opposite_type = FLIP_PAIR[contractType];
-    // Only surface a signal for the strategy currently selected — if you're
-    // set up to trade Even/Odd, the signal shown (and the "ENTER NOW" /
-    // glow) should be about Even or Odd, not whichever contract type
-    // happens to have the strongest reading right now. When "Both Sides" is
-    // on, either side of the pair counts as relevant.
     const relevant_contract_types = bothSides && opposite_type ? [contractType, opposite_type] : [contractType];
     const topSignal = signals.find(s => relevant_contract_types.includes(s.contract_type));
 
@@ -247,13 +248,6 @@ const BulkTrader = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [runId]);
 
-    // Workaround: this panel can grow taller than the viewport (e.g. when a
-    // strategy adds the DIGIT field, or the run table appears), and some
-    // ancestor in the surrounding tab shell clips overflow instead of
-    // scrolling, making the lower part of the panel unreachable. Rather than
-    // depend on that shell being fixed, walk up from this panel on mount and
-    // temporarily relax any ancestor that's clipping, restoring its original
-    // styles when this tab is left so other tabs are unaffected.
     useEffect(() => {
         const root = rootRef.current;
         if (!root) return undefined;
@@ -398,9 +392,6 @@ const BulkTrader = () => {
         return localize('Reconnecting…');
     }, [connectionState]);
 
-    // Whether the live AI signal currently agrees with the primary /
-    // opposite-side action button, so we can give the matching button a
-    // "ready to press" glow instead of only glowing the signal banner.
     const primary_matches_signal = Boolean(topSignal && topSignal.contract_type === contractType);
     const opposite_matches_signal = Boolean(topSignal && opposite_type && topSignal.contract_type === opposite_type);
 
