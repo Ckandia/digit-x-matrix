@@ -423,13 +423,28 @@
     &__risk-check {
         display: flex;
         align-items: flex-start;
-        gap: 8px;
+        gap: 10px;
         font-size: 1.1rem;
         color: var(--bt-text-dim);
         margin-bottom: 10px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        border: 1px solid transparent;
+        transition: background 0.3s ease, border-color 0.3s ease;
 
         input {
             margin-top: 3px;
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+            accent-color: var(--bt-magenta);
+            cursor: pointer;
+        }
+
+        &--highlight {
+            background: rgba(255, 46, 147, 0.12);
+            border-color: var(--bt-magenta);
+            animation: bt-risk-flash 1.8s ease-in-out;
         }
     }
 
@@ -487,6 +502,13 @@
         // AI signal — a visual nudge that "this one is ready to press".
         &--signal-match {
             animation: bt-pulse-glow 1.6s ease-in-out infinite;
+        }
+
+        // Applied when start_disabled_reasons is non-empty — the button
+        // stays clickable (so clicking it can guide the user to what's
+        // missing) but looks visibly "not ready" rather than fully normal.
+        &--not-ready {
+            opacity: 0.55;
         }
     }
 
@@ -600,5 +622,16 @@
     }
     50% {
         box-shadow: 0 0 0 8px rgba(255, 46, 147, 0);
+    }
+}
+
+@keyframes bt-risk-flash {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(255, 46, 147, 0.5);
+    }
+    20%,
+    60% {
+        box-shadow: 0 0 0 6px rgba(255, 46, 147, 0.25);
     }
 }
