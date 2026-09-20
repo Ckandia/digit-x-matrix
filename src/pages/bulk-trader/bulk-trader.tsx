@@ -21,15 +21,16 @@ const POLL_INTERVAL_MS = 3000;
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
-// Mirrors ClientStore.getToken() in stores/client-store.ts — the app's own
-// canonical way of reading the active account's token. authData$ (and
-// therefore useApiBase()) only carries loginid/currency/balance here, never
-// the token itself, so we read the same { loginid: token } map the app
-// itself maintains in localStorage instead of guessing at a different shape.
-const getActiveToken = (login_id: string): string => {
+// The app's OAuth2 login flow (Ory-issued tokens, prefixed "ory_at_") stores
+// the active session's access token as JSON in localStorage.auth_info —
+// confirmed by inspecting actual browser storage. The older accountsList /
+// ClientStore.getToken() map is not populated by this flow.
+const getActiveToken = (): string => {
     try {
-        const accountList = JSON.parse(localStorage.getItem('accountsList') ?? '{}');
-        return accountList?.[login_id] ?? '';
+        const raw = localStorage.getItem('auth_info');
+        if (!raw) return '';
+        const parsed = JSON.parse(raw);
+        return parsed?.access_token ?? '';
     } catch {
         return '';
     }
@@ -339,7 +340,7 @@ const BulkTrader = () => {
             setError(localize('Please confirm you understand the risk before starting a bulk run.'));
             return;
         }
-        const token = getActiveToken(activeLoginid);
+        const token = getActiveToken();
         if (!token) {
             setError(localize('No active session token found. Please log in again.'));
             return;
