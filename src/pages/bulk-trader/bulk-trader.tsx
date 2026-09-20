@@ -153,9 +153,20 @@ const BulkTrader = () => {
     const [isStarting, setIsStarting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const rootRef = useRef<HTMLDivElement>(null);
 
     const backend_configured = Boolean(process.env.NEXT_PUBLIC_BULK_TRADER_API_URL);
     const is_running = Boolean(runStatus?.is_active);
+
+    // Reasons the start buttons are currently disabled, in priority order —
+    // shown to the user instead of leaving them to guess at a plain
+    // not-allowed cursor.
+    const start_disabled_reasons: string[] = [];
+    if (!isAuthorized) start_disabled_reasons.push(localize('log in to your Deriv account'));
+    if (!backend_configured) start_disabled_reasons.push(localize('the Bulk Trader backend is not configured for this deployment'));
+    if (!hasAcceptedRisk) start_disabled_reasons.push(localize('tick the risk checkbox above'));
+    const start_disabled = start_disabled_reasons.length > 0 || isStarting;
+    const start_disabled_title = start_disabled_reasons.length > 0 ? start_disabled_reasons.join(', ') : undefined;
 
     const contract_meta = CONTRACT_TYPE_OPTIONS.find(c => c.value === contractType);
     const snapshot = snapshots[symbol];
@@ -201,6 +212,49 @@ const BulkTrader = () => {
         return () => stopPolling();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [runId]);
+
+    // Workaround: this panel can grow taller than the viewport (e.g. when a
+    // strategy adds the DIGIT field, or the run table appears), and some
+    // ancestor in the surrounding tab shell clips overflow instead of
+    // scrolling, making the lower part of the panel unreachable. Rather than
+    // depend on that shell being fixed, walk up from this panel on mount and
+    // temporarily relax any ancestor that's clipping, restoring its original
+    // styles when this tab is left so other tabs are unaffected.
+    useEffect(() => {
+        const root = rootRef.current;
+        if (!root) return undefined;
+
+        const touched: { el: HTMLElement; overflow: string; overflowY: string; maxHeight: string; height: string }[] = [];
+        let el: HTMLElement | null = root.parentElement;
+        while (el && el !== document.body) {
+            const computed = window.getComputedStyle(el);
+            const clips =
+                computed.overflowY === 'hidden' ||
+                computed.overflow === 'hidden' ||
+                computed.overflow === 'clip';
+            if (clips) {
+                touched.push({
+                    el,
+                    overflow: el.style.overflow,
+                    overflowY: el.style.overflowY,
+                    maxHeight: el.style.maxHeight,
+                    height: el.style.height,
+                });
+                el.style.overflowY = 'auto';
+                el.style.maxHeight = 'none';
+            }
+            el = el.parentElement;
+        }
+
+        return () => {
+            touched.forEach(({ el, overflow, overflowY, maxHeight, height }) => {
+                el.style.overflow = overflow;
+                el.style.overflowY = overflowY;
+                el.style.maxHeight = maxHeight;
+                el.style.height = height;
+            });
+        };
+    }, []);
 
     const buildStrategyConfigs = useCallback(
         (override_contract_type?: TStrategyConfig['contract_type']): TStrategyConfig[] => {
@@ -317,7 +371,7 @@ const BulkTrader = () => {
     const opposite_matches_signal = Boolean(topSignal && opposite_type && topSignal.contract_type === opposite_type);
 
     return (
-        <div className='bulk-trader'>
+        <div className='bulk-trader' ref={rootRef}>
             <div className='bulk-trader__intro'>
                 <h3>{localize('Bulk Trades')}</h3>
                 <p>
@@ -588,7 +642,8 @@ const BulkTrader = () => {
                                     ]
                                         .filter(Boolean)
                                         .join(' ')}
-                                    disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
+                                    disabled={start_disabled}
+                                    title={start_disabled_title}
                                     onClick={() => handleStart(contractType)}
                                 >
                                     {isStarting ? localize('Starting…') : `${localize('Bulk')} ${CONTRACT_TYPE_LABELS[contractType]}`}
@@ -613,7 +668,8 @@ const BulkTrader = () => {
                                     ]
                                         .filter(Boolean)
                                         .join(' ')}
-                                    disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
+                                    disabled={start_disabled}
+                                    title={start_disabled_title}
                                     onClick={() => handleStart(opposite_type)}
                                 >
                                     {isStarting
@@ -632,13 +688,21 @@ const BulkTrader = () => {
                                 ]
                                     .filter(Boolean)
                                     .join(' ')}
-                                disabled={!hasAcceptedRisk || isStarting || !backend_configured || !isAuthorized}
+                                disabled={start_disabled}
+                                title={start_disabled_title}
                                 onClick={() => handleStart()}
                             >
                                 {isStarting ? localize('Starting…') : localize('Start bulk run')}
                             </button>
                         )}
                     </div>
+
+                    {start_disabled_reasons.length > 0 && (
+                        <div className='bulk-trader__disabled-hint'>
+                            {localize('Can\'t start yet — ')}
+                            {start_disabled_reasons.join(localize(' · '))}
+                        </div>
+                    )}
                 </>
             )}
 
