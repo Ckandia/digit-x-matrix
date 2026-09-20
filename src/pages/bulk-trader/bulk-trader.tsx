@@ -165,8 +165,27 @@ const BulkTrader = () => {
     if (!isAuthorized) start_disabled_reasons.push(localize('log in to your Deriv account'));
     if (!backend_configured) start_disabled_reasons.push(localize('the Bulk Trader backend is not configured for this deployment'));
     if (!hasAcceptedRisk) start_disabled_reasons.push(localize('tick the risk checkbox above'));
-    const start_disabled = start_disabled_reasons.length > 0 || isStarting;
-    const start_disabled_title = start_disabled_reasons.length > 0 ? start_disabled_reasons.join(', ') : undefined;
+    const start_disabled = isStarting;
+    const start_not_ready = start_disabled_reasons.length > 0;
+    const start_disabled_title = start_not_ready ? start_disabled_reasons.join(', ') : undefined;
+    const [riskHighlight, setRiskHighlight] = useState(false);
+    const riskCheckboxRef = useRef<HTMLInputElement>(null);
+
+    const focusRiskCheck = () => {
+        riskCheckboxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        riskCheckboxRef.current?.focus();
+        setRiskHighlight(true);
+        window.setTimeout(() => setRiskHighlight(false), 1800);
+    };
+
+    const guardedStart = (override_contract_type?: TStrategyConfig['contract_type']) => {
+        if (start_not_ready) {
+            setError(start_disabled_reasons.join(', '));
+            if (!hasAcceptedRisk) focusRiskCheck();
+            return;
+        }
+        handleStart(override_contract_type);
+    };
 
     const contract_meta = CONTRACT_TYPE_OPTIONS.find(c => c.value === contractType);
     const snapshot = snapshots[symbol];
@@ -619,8 +638,16 @@ const BulkTrader = () => {
 
             {!is_running && (
                 <>
-                    <label className='bulk-trader__risk-check'>
+                    <label
+                        className={[
+                            'bulk-trader__risk-check',
+                            riskHighlight && 'bulk-trader__risk-check--highlight',
+                        ]
+                            .filter(Boolean)
+                            .join(' ')}
+                    >
                         <input
+                            ref={riskCheckboxRef}
                             type='checkbox'
                             checked={hasAcceptedRisk}
                             onChange={e => setHasAcceptedRisk(e.target.checked)}
@@ -639,12 +666,13 @@ const BulkTrader = () => {
                                         'bulk-trader__action-btn',
                                         'bulk-trader__action-btn--positive',
                                         primary_matches_signal && 'bulk-trader__action-btn--signal-match',
+                                        start_not_ready && 'bulk-trader__action-btn--not-ready',
                                     ]
                                         .filter(Boolean)
                                         .join(' ')}
                                     disabled={start_disabled}
                                     title={start_disabled_title}
-                                    onClick={() => handleStart(contractType)}
+                                    onClick={() => guardedStart(contractType)}
                                 >
                                     {isStarting ? localize('Starting…') : `${localize('Bulk')} ${CONTRACT_TYPE_LABELS[contractType]}`}
                                 </button>
@@ -665,12 +693,13 @@ const BulkTrader = () => {
                                         'bulk-trader__action-btn',
                                         'bulk-trader__action-btn--negative',
                                         opposite_matches_signal && 'bulk-trader__action-btn--signal-match',
+                                        start_not_ready && 'bulk-trader__action-btn--not-ready',
                                     ]
                                         .filter(Boolean)
                                         .join(' ')}
                                     disabled={start_disabled}
                                     title={start_disabled_title}
-                                    onClick={() => handleStart(opposite_type)}
+                                    onClick={() => guardedStart(opposite_type)}
                                 >
                                     {isStarting
                                         ? localize('Starting…')
@@ -685,12 +714,13 @@ const BulkTrader = () => {
                                     'bulk-trader__action-btn--positive',
                                     'bulk-trader__action-btn--wide',
                                     primary_matches_signal && 'bulk-trader__action-btn--signal-match',
+                                    start_not_ready && 'bulk-trader__action-btn--not-ready',
                                 ]
                                     .filter(Boolean)
                                     .join(' ')}
                                 disabled={start_disabled}
                                 title={start_disabled_title}
-                                onClick={() => handleStart()}
+                                onClick={() => guardedStart()}
                             >
                                 {isStarting ? localize('Starting…') : localize('Start bulk run')}
                             </button>
