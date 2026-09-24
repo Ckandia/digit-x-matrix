@@ -57,5 +57,17 @@ export function attachSignalHub(httpServer, marketFeed, { path = '/ws/signals', 
         pendingBroadcast.set(symbol, timer);
     });
 
-    return wss;
+    // AI agent decisions (scored / gate-passed / gate-rejected / executing /
+    // settled) are pushed unthrottled and immediately — unlike tick stats,
+    // these are discrete events, not a stream to coalesce, and the frontend
+    // pipeline view needs them in order to stay honest about what the agent
+    // actually did rather than animating a guess.
+    const broadcastAgentEvent = event => {
+        const payload = JSON.stringify({ type: 'agent_event', data: event });
+        for (const client of wss.clients) {
+            if (client.readyState === client.OPEN) client.send(payload);
+        }
+    };
+
+    return { wss, broadcastAgentEvent };
 }

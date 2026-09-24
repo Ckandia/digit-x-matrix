@@ -293,3 +293,184 @@
     from { transform: rotate(0deg); }
     to   { transform: rotate(360deg); }
 }
+
+/* ------------------------------------------------------------------
+   Bulk Trader manual API token control.
+   Previously this markup had NO styles at all, so the input inherited a
+   transparent background and near-invisible text against the dark header.
+   ------------------------------------------------------------------ */
+.manual-token-slot {
+    --token-accent: #ff4d4f; /* red   = not connected */
+    --token-accent-soft: rgba(255, 77, 79, 0.14);
+
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    margin-inline-end: 12px;
+    border-radius: 8px;
+    border: 1px solid var(--token-accent);
+    background: var(--token-accent-soft);
+    transition: border-color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
+
+    &--pending {
+        --token-accent: #faad14; /* amber = typed but not saved yet */
+        --token-accent-soft: rgba(250, 173, 20, 0.14);
+    }
+
+    &--connected {
+        --token-accent: #22c55e; /* green = saved and in use */
+        --token-accent-soft: rgba(34, 197, 94, 0.14);
+        box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25);
+
+        .manual-token-slot__dot {
+            animation: token-pulse 2s ease-in-out infinite;
+        }
+    }
+
+    &__status {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 1.1rem;
+        font-weight: 700;
+        line-height: 1;
+        white-space: nowrap;
+        color: var(--token-accent);
+    }
+
+    &__dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--token-accent);
+        flex-shrink: 0;
+    }
+
+    &__field {
+        position: relative;
+        display: flex;
+        align-items: center;
+    }
+
+    &__input {
+        width: 210px;
+        height: 30px;
+        padding: 0 30px 0 10px;
+        font-size: 1.2rem;
+        font-family: 'Courier New', ui-monospace, monospace;
+        letter-spacing: 0.04em;
+        /* The actual visibility fix: explicit surface + explicit ink. */
+        color: #f5f7fa;
+        background: rgba(10, 14, 24, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        border-radius: 6px;
+        outline: none;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+
+        &::placeholder {
+            color: rgba(245, 247, 250, 0.55);
+            font-family: inherit;
+            letter-spacing: normal;
+        }
+
+        &:hover {
+            border-color: rgba(255, 255, 255, 0.45);
+        }
+
+        &:focus {
+            border-color: var(--token-accent);
+            box-shadow: 0 0 0 2px var(--token-accent-soft);
+        }
+    }
+
+    &__reveal {
+        position: absolute;
+        inset-inline-end: 4px;
+        display: grid;
+        place-items: center;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        font-size: 1.2rem;
+        line-height: 1;
+        background: transparent;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        opacity: 0.75;
+
+        &:hover {
+            opacity: 1;
+            background: rgba(255, 255, 255, 0.1);
+        }
+    }
+
+    &__save {
+        height: 30px;
+        padding: 0 12px;
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #0a0e18;
+        background: var(--token-accent);
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: filter 0.2s ease, opacity 0.2s ease;
+
+        &:hover:not(:disabled) {
+            filter: brightness(1.12);
+        }
+
+        &:disabled {
+            opacity: 0.45;
+            cursor: default;
+        }
+    }
+
+    &__clear {
+        display: grid;
+        place-items: center;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        font-size: 1.2rem;
+        color: rgba(245, 247, 250, 0.75);
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        border-radius: 6px;
+        cursor: pointer;
+
+        &:hover {
+            color: #fff;
+            border-color: rgba(255, 255, 255, 0.5);
+        }
+    }
+
+    /* Narrow screens: keep the control usable instead of hiding it entirely. */
+    @media (max-width: 900px) {
+        margin-inline-end: 6px;
+        padding: 4px 6px;
+        gap: 6px;
+
+        &__status {
+            font-size: 0; /* dot-only indicator, no room for the word */
+            gap: 0;
+        }
+
+        &__input {
+            width: 120px;
+        }
+    }
+}
+
+@keyframes token-pulse {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.55);
+    }
+    50% {
+        box-shadow: 0 0 0 5px rgba(34, 197, 94, 0);
+    }
+}

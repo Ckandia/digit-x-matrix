@@ -2,7 +2,7 @@ import 'dotenv/config';
 import http from 'http';
 import cors from 'cors';
 import express from 'express';
-import { getRunStatus, startBulkRun, stopStrategy } from './runner.js';
+import { getRunStatus, startBulkRun, stopStrategy, startAiRun, stopAiRun, getAiRunStatus } from './runner.js';
 import { getSignalHistory, isPersistenceEnabled, logSignalSnapshot } from './db.js';
 import { DIGIT_SYMBOLS, MarketFeed } from './marketFeed.js';
 import { attachSignalHub } from './signalHub.js';
@@ -101,10 +101,44 @@ app.post('/api/bulk/stop', (req, res) => {
     }
 });
 
+// AI agent: same token-authenticated pattern as /api/bulk/*, but there is
+// exactly one agent per run and its config passes through buildAgentConfig's
+// hard caps (see aiAgent.js) before anything is authorized with Deriv.
+app.post('/api/ai/start', async (req, res) => {
+    const { token, config } = req.body || {};
+    if (!token) return res.status(400).json({ error: 'Missing token' });
+    try {
+        const result = await startAiRun(token, config, marketFeed, broadcastAgentEvent);
+        res.json(result);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.get('/api/ai/status/:run_id', (req, res) => {
+    const status = getAiRunStatus(req.params.run_id);
+    if (!status) return res.status(404).json({ error: 'AI run not found' });
+    res.json(status);
+});
+
+app.post('/api/ai/stop', (req, res) => {
+    const { run_id } = req.body || {};
+    if (!run_id) return res.status(400).json({ error: 'Missing run_id' });
+    try {
+        stopAiRun(run_id);
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
 // Use a raw HTTP server so Express (REST) and the ws WebSocketServer (live
 // signals) can share one port — this is what Render exposes for the service.
 const httpServer = http.createServer(app);
-attachSignalHub(httpServer, marketFeed, { path: '/ws/signals', allowedOrigins: allowed_origins });
+const { broadcastAgentEvent } = attachSignalHub(httpServer, marketFeed, {
+    path: '/ws/signals',
+    allowedOrigins: allowed_origins,
+});
 
 httpServer.listen(PORT, () => {
     // eslint-disable-next-line no-console

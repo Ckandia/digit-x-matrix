@@ -2,6 +2,10 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { LOGO_CANDIDATES } from '../../../../utils/branding';
 import { LogoMark } from '../LogoMark';
 
+import brandConfig from '../../../../../brand.config.json';
+
+const BRAND_NAME = brandConfig.platform.name;
+
 // Default to the old-BFF fallback (all extension candidates) so the probing tests
 // exercise the full chain; individual tests reassign this to simulate a
 // brand.config.json with platform.logo_path recorded. The mock factory closes over
@@ -16,7 +20,8 @@ jest.mock('../../../../utils/branding', () => {
 });
 
 // No NEXT_PUBLIC_DERIV_APP_NAME / preview name in the test env, so getAppName()
-// resolves to brand.config.json platform.name ("Deriv Trading Bot").
+// resolves to brand.config.json platform.name, read live below so a
+// rebrand does not break the suite.
 describe('LogoMark', () => {
     const originalAppBuild = process.env.NEXT_PUBLIC_APP_BUILD;
 
@@ -30,7 +35,7 @@ describe('LogoMark', () => {
 
     it('renders the resolved app name', () => {
         render(<LogoMark />);
-        expect(screen.getByText('Deriv Trading Bot')).toBeInTheDocument();
+        expect(screen.getByText(BRAND_NAME)).toBeInTheDocument();
     });
 
     it('renders the logo image (first candidate) by default', () => {
@@ -71,7 +76,7 @@ describe('LogoMark', () => {
             setPreviewShowAppName(false);
         });
         render(<LogoMark />);
-        expect(screen.queryByText('Deriv Trading Bot')).not.toBeInTheDocument();
+        expect(screen.queryByText(BRAND_NAME)).not.toBeInTheDocument();
         act(() => {
             setPreviewShowAppName(true);
         });

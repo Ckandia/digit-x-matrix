@@ -50,6 +50,13 @@ const AppHeader = observer(() => {
     );
     const [manualTokenDraft, setManualTokenDraft] = useState(manualToken);
     const [manualTokenSaved, setManualTokenSaved] = useState(false);
+    const [isTokenRevealed, setIsTokenRevealed] = useState(false);
+
+    // A token counts as "connected" once it's been saved AND the draft still
+    // matches it — editing the field drops you back to disconnected so the
+    // indicator never lies about which credential is actually in use.
+    const isTokenConnected = Boolean(manualToken) && manualTokenDraft.trim() === manualToken;
+    const hasUnsavedToken = manualTokenDraft.trim() !== manualToken && manualTokenDraft.trim().length > 0;
 
     const handleSaveManualToken = useCallback(() => {
         const trimmed = manualTokenDraft.trim();
@@ -145,37 +152,80 @@ const AppHeader = observer(() => {
     // Small pasteable-token control, shown only on desktop (there isn't room
     // on mobile) right before the account switcher/balance.
     const renderManualTokenSlot = useCallback(() => {
-        if (!isDesktop) return null;
         return (
-            <div className='manual-token-slot' title='Deriv API token used by Bulk Trader to place trades'>
-                <input
-                    type='password'
-                    className='manual-token-slot__input'
-                    placeholder='Bulk Trader API token'
-                    value={manualTokenDraft}
-                    onChange={e => setManualTokenDraft(e.target.value)}
-                />
+            <div
+                className={clsx('manual-token-slot', {
+                    'manual-token-slot--connected': isTokenConnected,
+                    'manual-token-slot--pending': hasUnsavedToken,
+                })}
+                title='Deriv API token used by Bulk Trader to place trades'
+            >
+                <span
+                    className='manual-token-slot__status'
+                    role='status'
+                    aria-live='polite'
+                    aria-label={isTokenConnected ? 'API token connected' : 'API token not connected'}
+                >
+                    <span className='manual-token-slot__dot' />
+                    {isTokenConnected ? 'Connected' : 'Not connected'}
+                </span>
+
+                <div className='manual-token-slot__field'>
+                    <input
+                        type={isTokenRevealed ? 'text' : 'password'}
+                        className='manual-token-slot__input'
+                        placeholder='Paste Deriv API token (trade scope)'
+                        autoComplete='off'
+                        spellCheck={false}
+                        value={manualTokenDraft}
+                        onChange={e => setManualTokenDraft(e.target.value)}
+                        onKeyDown={e => {
+                            if (e.key === 'Enter') handleSaveManualToken();
+                        }}
+                    />
+                    <button
+                        type='button'
+                        className='manual-token-slot__reveal'
+                        onClick={() => setIsTokenRevealed(v => !v)}
+                        title={isTokenRevealed ? 'Hide token' : 'Show token'}
+                        aria-label={isTokenRevealed ? 'Hide token' : 'Show token'}
+                    >
+                        {isTokenRevealed ? '🙈' : '👁'}
+                    </button>
+                </div>
+
                 <button
                     type='button'
                     className='manual-token-slot__save'
                     onClick={handleSaveManualToken}
                     disabled={manualTokenDraft.trim() === manualToken}
                 >
-                    {manualTokenSaved ? '✓' : 'Save'}
+                    {manualTokenSaved ? '✓ Saved' : isTokenConnected ? 'Saved' : 'Connect'}
                 </button>
+
                 {manualToken && (
                     <button
                         type='button'
                         className='manual-token-slot__clear'
                         onClick={handleClearManualToken}
                         title='Remove saved token'
+                        aria-label='Remove saved token'
                     >
                         ✕
                     </button>
                 )}
             </div>
         );
-    }, [isDesktop, manualTokenDraft, manualToken, manualTokenSaved, handleSaveManualToken, handleClearManualToken]);
+    }, [
+        manualTokenDraft,
+        manualToken,
+        manualTokenSaved,
+        isTokenRevealed,
+        isTokenConnected,
+        hasUnsavedToken,
+        handleSaveManualToken,
+        handleClearManualToken,
+    ]);
 
     const renderAccountSection = useCallback(
         (position: 'left' | 'right' = 'right') => {

@@ -1,12 +1,18 @@
 import { v4 as uuidv4 } from 'uuid';
 import { DerivConnection } from './derivConnection.js';
 import { StrategyEngine } from './strategyEngine.js';
+import { AiAgent, buildAgentConfig } from './aiAgent.js';
 import { logRunStart, logRunEnd } from './db.js';
 
 const MAX_STRATEGIES_PER_RUN = 5;
 
 /** run_id -> { connection, engines: Map<engine_id, StrategyEngine>, loginid, started_at } */
 const runs = new Map();
+
+/** run_id -> { connection, agent: AiAgent, loginid, started_at } — kept separate
+ *  from `runs` because an AI run has exactly one agent, not a set of engines,
+ *  and it needs its own event stream instead of per-engine status polling. */
+const ai_runs = new Map();
 
 export const startBulkRun = async (token, strategy_configs) => {
     if (!Array.isArray(strategy_configs) || strategy_configs.length === 0) {
@@ -125,5 +131,73 @@ const closeRunIfIdle = run_id => {
 setInterval(() => {
     for (const run_id of runs.keys()) {
         getRunStatus(run_id);
+    }
+}, 60_000).unref?.();
+
+// ---------------------------------------------------------------------------
+// AI agent runs. Same authenticated-connection lifecycle as a bulk run, but
+// with a single AiAgent instead of a set of fixed strategies, and an event
+// stream (onEvent) instead of poll-only status, so the frontend pipeline view
+// can react to real decisions in real time.
+// ---------------------------------------------------------------------------
+
+export const startAiRun = async (token, rawConfig, marketFeed, onEvent) => {
+    const config = buildAgentConfig(rawConfig); // throws on anything unsafe — caller returns 400
+
+    const connection = new DerivConnection(token);
+    const auth = await connection.connect();
+    const loginid = auth?.authorize?.loginid;
+    const currency = auth?.authorize?.currency;
+    if (!loginid) {
+        connection.close();
+        throw new Error('Could not authorize with the provided token');
+    }
+
+    const agent = new AiAgent({ connection, marketFeed, config, currency, onEvent });
+
+    connection.onFatalError = () => {
+        if (agent.status === 'running') {
+            agent.status = 'error';
+            agent.error = 'Lost connection to Deriv';
+            agent._emit?.({ phase: 'error', error: agent.error });
+        }
+    };
+
+    const run_id = uuidv4();
+    ai_runs.set(run_id, { connection, agent, loginid, started_at: new Date().toISOString() });
+
+    agent.start();
+    logRunStart(run_id, loginid, [{ label: 'AI agent', ...config }]);
+
+    return { run_id, agent_id: agent.id, loginid };
+};
+
+export const getAiRunStatus = run_id => {
+    const run = ai_runs.get(run_id);
+    if (!run) return null;
+    const agent = run.agent.toJSON();
+    if (agent.status !== 'running') closeAiRunIfIdle(run_id);
+    return { run_id, loginid: run.loginid, started_at: run.started_at, agent };
+};
+
+export const stopAiRun = run_id => {
+    const run = ai_runs.get(run_id);
+    if (!run) throw new Error('AI run not found');
+    run.agent.stop('stopped by user');
+    closeAiRunIfIdle(run_id);
+    return true;
+};
+
+const closeAiRunIfIdle = run_id => {
+    const run = ai_runs.get(run_id);
+    if (!run || run.agent.status === 'running') return;
+    run.connection.close();
+    logRunEnd(run_id, [run.agent.toJSON()]);
+    ai_runs.delete(run_id);
+};
+
+setInterval(() => {
+    for (const run_id of ai_runs.keys()) {
+        getAiRunStatus(run_id);
     }
 }, 60_000).unref?.();

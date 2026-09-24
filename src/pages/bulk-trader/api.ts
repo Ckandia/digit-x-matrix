@@ -1,4 +1,5 @@
 import { TRunStatus, TStartBulkRunResponse, TStrategyConfig } from './types';
+import { TAiAgentConfig, TAiRunStatus, TStartAiRunResponse } from './aiAgentTypes';
 
 // Injected at build time via rsbuild's source.define (see rsbuild.config.ts).
 // Falls back to '' so calls fail loudly/obviously in dev if it isn't configured,
@@ -47,6 +48,25 @@ export const stopBulkRun = (runId: string, strategyId?: string) =>
     request<{ ok: boolean }>('/api/bulk/stop', {
         method: 'POST',
         body: JSON.stringify({ run_id: runId, strategy_id: strategyId }),
+    });
+
+// --- AI agent -------------------------------------------------------------
+// Same token-authenticated pattern as the bulk-run calls above. The backend
+// re-validates and clamps `config` against hard caps regardless of what is
+// sent here (see backend/src/aiAgent.js) — nothing here is the real gate.
+
+export const startAiRun = (token: string, config: TAiAgentConfig) =>
+    request<TStartAiRunResponse>('/api/ai/start', {
+        method: 'POST',
+        body: JSON.stringify({ token, config }),
+    });
+
+export const getAiRunStatus = (runId: string) => request<TAiRunStatus>(`/api/ai/status/${runId}`);
+
+export const stopAiRun = (runId: string) =>
+    request<{ ok: boolean }>('/api/ai/stop', {
+        method: 'POST',
+        body: JSON.stringify({ run_id: runId }),
     });
 
 export { BulkTraderApiError };

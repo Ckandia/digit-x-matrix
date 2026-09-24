@@ -441,6 +441,28 @@
             cursor: pointer;
         }
 
+        /* Unmistakable "you have acknowledged this" state. Colour alone isn't
+           enough to carry the meaning, so the label also gains weight and a
+           check mark renders before the text. */
+        &--accepted {
+            background: rgba(34, 197, 94, 0.14);
+            border-color: #22c55e;
+            color: #d6ffe4;
+            font-weight: 600;
+
+            input {
+                accent-color: #22c55e;
+                box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.28);
+                border-radius: 4px;
+            }
+
+            .bulk-trader__risk-check-label::before {
+                content: '✓ ';
+                color: #22c55e;
+                font-weight: 800;
+            }
+        }
+
         &--highlight {
             background: rgba(255, 46, 147, 0.12);
             border-color: var(--bt-magenta);

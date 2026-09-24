@@ -14,6 +14,8 @@ import {
 import { TDigitSignal } from './analysis-types';
 import { TRunStatus, TStrategyConfig } from './types';
 import { useDigitSignals } from './useDigitSignals';
+import { getActiveToken } from './tokenStorage';
+import AiAgentPanel from './AiAgentPanel';
 import './bulk-trader.scss';
 
 const STORAGE_KEY = 'bulk_trader_run_id';
@@ -21,26 +23,6 @@ const POLL_INTERVAL_MS = 3000;
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
-// Bulk Trader prefers a manually-pasted, longer-lived API token (saved via
-// the "Bulk Trader API token" field in the header) when one is set, since
-// that's a stable credential meant for exactly this. It only falls back to
-// the OAuth2 browser-session token (Ory-issued, in localStorage.auth_info)
-// if no manual token has been saved — that one is short-lived by design and
-// not ideal for a backend run, but better than nothing.
-const MANUAL_TOKEN_STORAGE_KEY = 'deriv_manual_api_token';
-
-const getActiveToken = (): string => {
-    const manual = localStorage.getItem(MANUAL_TOKEN_STORAGE_KEY);
-    if (manual && manual.trim()) return manual.trim();
-    try {
-        const raw = localStorage.getItem('auth_info');
-        if (!raw) return '';
-        const parsed = JSON.parse(raw);
-        return parsed?.access_token ?? '';
-    } catch {
-        return '';
-    }
-};
 
 // --- Digit percentage grid (the 0-9 boxes) -------------------------------
 
@@ -647,6 +629,7 @@ const BulkTrader = () => {
                     <label
                         className={[
                             'bulk-trader__risk-check',
+                            hasAcceptedRisk && 'bulk-trader__risk-check--accepted',
                             riskHighlight && 'bulk-trader__risk-check--highlight',
                         ]
                             .filter(Boolean)
@@ -658,9 +641,11 @@ const BulkTrader = () => {
                             checked={hasAcceptedRisk}
                             onChange={e => setHasAcceptedRisk(e.target.checked)}
                         />
-                        {localize(
-                            'I understand this will place real trades automatically on my account and I could lose some or all of my stake.'
-                        )}
+                        <span className='bulk-trader__risk-check-label'>
+                            {localize(
+                                'I understand this will place real trades automatically on my account and I could lose some or all of my stake.'
+                            )}
+                        </span>
                     </label>
 
                     <div className='bulk-trader__action-row'>
@@ -816,6 +801,8 @@ const BulkTrader = () => {
                     </table>
                 </div>
             )}
+
+            <AiAgentPanel hasAcceptedRisk={hasAcceptedRisk} onNeedsRiskAccept={focusRiskCheck} />
         </div>
     );
 };

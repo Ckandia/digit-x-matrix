@@ -4,7 +4,23 @@ import { computeSignals, computeStats, createDigitWindow, pushDigit } from './di
 // Deriv migrated its trading API to this gateway; the old ws.derivws.com/websockets/v3
 // endpoint still accepts connections but no longer serves synthetic-index data through
 // it. Public market data needs no app_id or auth at all on the new gateway.
-const DERIV_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
+// This file speaks the Deriv v3 message protocol (ticks_history, active_symbols,
+// msg_type responses). The documented endpoint for that protocol is
+// ws.derivws.com/websockets/v3, which requires a NUMERIC app_id registered at
+// api.deriv.com — that is a different credential from the alphanumeric OAuth
+// client ID used for login. Set DERIV_WS_APP_ID to your numeric app_id.
+//
+// Endpoints are tried in order and the first one that delivers a valid response
+// wins, so a wrong guess degrades to a retry instead of a silent dead feed.
+const WS_APP_ID = (process.env.DERIV_WS_APP_ID || '1089').trim();
+const DERIV_WS_ENDPOINTS = (
+    process.env.DERIV_WS_URL
+        ? [process.env.DERIV_WS_URL.trim()]
+        : [
+              `wss://ws.derivws.com/websockets/v3?app_id=${WS_APP_ID}`,
+              'wss://api.derivws.com/trading/v1/options/ws/public',
+          ]
+).filter(Boolean);
 const HISTORY_COUNT = 500; // ticks_history backfill so the window isn't empty on boot
 const RECONNECT_DELAY_MS = 3000;
 
@@ -21,14 +37,41 @@ export const DIGIT_SYMBOLS = [
     { symbol: '1HZ100V', display_name: 'Volatility 100 (1s) Index' },
 ];
 
-const lastDigitOf = quote => {
-    // Deriv quotes are decimal strings/numbers with a fixed pip size per symbol;
-    // the "last digit" is the last digit of the quote as displayed, i.e. after
-    // rounding to the symbol's pip size. `data.tick.quote` already comes rounded
-    // to that precision, so we can read the string form directly.
-    const str = String(quote);
-    const digits_only = str.replace('.', '');
-    return Number(digits_only[digits_only.length - 1]);
+// Fallback pip sizes (decimal places) used only until active_symbols responds.
+// Deriv synthetics do NOT share a precision: R_100 prints 2dp, R_10/R_25 3dp,
+// R_50/R_75 4dp, and the 1HZ family differs again. Getting this wrong silently
+// corrupts the whole digit distribution (see lastDigitOf below).
+const FALLBACK_PIP_SIZE = {
+    R_10: 3,
+    R_25: 3,
+    R_50: 4,
+    R_75: 4,
+    R_100: 2,
+    '1HZ10V': 2,
+    '1HZ25V': 2,
+    '1HZ50V': 2,
+    '1HZ75V': 2,
+    '1HZ100V': 2,
+};
+
+/**
+ * Extracts the last displayed digit of a quote.
+ *
+ * THE BUG THIS FIXES: the old version did `String(quote)`. Deriv sends the quote
+ * as a JSON number, so JSON.parse turns "184.5670" into the Number 184.567 and
+ * the trailing zero is gone forever. String() then read "7" as the last digit.
+ *
+ * Consequence: digit 0 could only ever be counted when the quote genuinely ended
+ * in a non-zero-padded 0, which for a 4dp symbol is almost never — so digit 0
+ * showed ~0% frequency, and every other digit was inflated to absorb its share.
+ * The distribution was wrong across the board, not just for 0.
+ *
+ * The fix is to pad back to the symbol's real pip size before reading the digit.
+ */
+const lastDigitOf = (quote, pip_size) => {
+    const dp = Number.isInteger(pip_size) ? pip_size : 2;
+    const fixed = Number(quote).toFixed(dp); // re-pads the lost trailing zeros
+    return Number(fixed[fixed.length - 1]);
 };
 
 /**
@@ -46,6 +89,12 @@ export class MarketFeed {
         this.pending = new Map();
         this.listeners = new Set();
         this._reconnectTimer = null;
+        this._endpoint_index = 0;
+        this._got_valid_data = false;
+        // symbol -> decimal places. Seeded with fallbacks, then overwritten by
+        // the authoritative values from active_symbols as soon as they arrive.
+        this.pip_sizes = new Map(Object.entries(FALLBACK_PIP_SIZE));
+        this._pending_history = new Map(); // symbol -> raw prices awaiting pip size
         for (const { symbol } of DIGIT_SYMBOLS) this.windows.set(symbol, createDigitWindow());
     }
 
@@ -88,12 +137,22 @@ export class MarketFeed {
         return this.req_id_counter++;
     }
 
+    /** The endpoint currently being tried. */
+    get endpoint() {
+        return DERIV_WS_ENDPOINTS[this._endpoint_index % DERIV_WS_ENDPOINTS.length];
+    }
+
     _connect() {
-        this.ws = new WebSocket(DERIV_WS_URL);
+        const url = this.endpoint;
+        // eslint-disable-next-line no-console
+        console.log('[marketFeed] dialling', url.replace(/app_id=[^&]*/, 'app_id=***'));
+        this.ws = new WebSocket(url);
 
         this.ws.on('open', () => {
             // eslint-disable-next-line no-console
-            console.log('[marketFeed] connected to Deriv, backfilling + subscribing…');
+            console.log('[marketFeed] connected to Deriv, resolving pip sizes…');
+            // Ask for real precision FIRST. Digit stats are meaningless without it.
+            this._send({ active_symbols: 'brief', product_type: 'basic' });
             for (const { symbol } of DIGIT_SYMBOLS) {
                 this._backfillAndSubscribe(symbol);
             }
@@ -107,6 +166,13 @@ export class MarketFeed {
         });
 
         this.ws.on('close', () => {
+            // If this endpoint never produced usable data, rotate to the next
+            // candidate rather than retrying a URL that clearly doesn't work.
+            if (!this._got_valid_data && DERIV_WS_ENDPOINTS.length > 1) {
+                this._endpoint_index += 1;
+                // eslint-disable-next-line no-console
+                console.warn('[marketFeed] no data from that endpoint — trying the next one');
+            }
             // eslint-disable-next-line no-console
             console.warn('[marketFeed] connection closed, reconnecting in', RECONNECT_DELAY_MS, 'ms');
             this._reconnectTimer = setTimeout(() => this._connect(), RECONNECT_DELAY_MS);
@@ -145,23 +211,61 @@ export class MarketFeed {
             return;
         }
 
+        this._got_valid_data = true;
+
+        if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
+            for (const entry of data.active_symbols) {
+                // Deriv exposes precision as `pip` (e.g. 0.0001) and/or `pip_size` (e.g. 4).
+                let dp = entry.pip_size;
+                if (!Number.isInteger(dp) && typeof entry.pip === 'number' && entry.pip > 0) {
+                    dp = Math.round(Math.log10(1 / entry.pip));
+                }
+                if (Number.isInteger(dp) && dp >= 0 && dp <= 8) {
+                    this.pip_sizes.set(entry.symbol, dp);
+                }
+            }
+            // Any history that landed before we knew the precision was parsed with a
+            // fallback — rebuild those windows now so they aren't silently skewed.
+            for (const [symbol, prices] of this._pending_history) {
+                this._rebuildWindow(symbol, prices);
+            }
+            this._pending_history.clear();
+            return;
+        }
+
         if (data.msg_type === 'history' && data.echo_req?.ticks_history) {
             const symbol = data.echo_req.ticks_history;
-            const window = createDigitWindow();
             const prices = data.history?.prices ?? [];
-            for (const price of prices) pushDigit(window, lastDigitOf(price));
-            this.windows.set(symbol, window);
-            this._emit(symbol);
+            // Keep the raw prices so we can re-derive digits if active_symbols
+            // later tells us this symbol's precision differs from our fallback.
+            this._pending_history.set(symbol, prices);
+            this._rebuildWindow(symbol, prices);
             return;
         }
 
         if (data.msg_type === 'tick' && data.tick) {
-            const { symbol, quote } = data.tick;
+            const { symbol, quote, pip_size } = data.tick;
             const window = this.windows.get(symbol);
             if (!window) return;
-            pushDigit(window, lastDigitOf(quote));
+            // The tick frame is the most authoritative source when present.
+            if (Number.isInteger(pip_size)) this.pip_sizes.set(symbol, pip_size);
+            pushDigit(window, lastDigitOf(quote, this.pip_sizes.get(symbol)));
             this._emit(symbol);
         }
+    }
+
+    /** Decimal places for a symbol, falling back to 2 if we somehow have none. */
+    getPipSize(symbol) {
+        return this.pip_sizes.get(symbol) ?? 2;
+    }
+
+    /** (Re)builds a symbol's rolling window from raw history at current precision. */
+    _rebuildWindow(symbol, prices) {
+        const dp = this.getPipSize(symbol);
+        const window = createDigitWindow();
+        for (const price of prices) pushDigit(window, lastDigitOf(price, dp));
+        this.windows.set(symbol, window);
+        this._emit(symbol);
     }
 
     _emit(symbol) {

@@ -279,10 +279,11 @@
         max-width: calc(100% - 1.4rem);
     }
 
-    &:not(&--no-placeholder) {
-        $parent: &;
-
-        #{$parent}__label {
+    // `&:not(&--...)` compiles to adjacent compound selectors, which is a
+    // hard error in Dart Sass 2.0. Naming the class explicitly is equivalent
+    // and forward-compatible.
+    &:not(.dc-input--no-placeholder) {
+        .dc-input__label {
             color: var(--text-general);
             transition: 0.25s ease all;
             transform: translateZ(0);

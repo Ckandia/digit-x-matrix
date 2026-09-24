@@ -5,6 +5,25 @@ const { Pool } = pg;
 let pool = null;
 let ready = false;
 
+/** Deriv permits caching API-derived content for at most 24 hours. */
+const RETENTION_HOURS = Number(process.env.SIGNAL_RETENTION_HOURS || 24);
+const PURGE_INTERVAL_MS = 60 * 60 * 1000; // hourly
+
+/** Deletes signal_history rows older than the permitted retention window. */
+export const purgeExpiredSignalHistory = async () => {
+    if (!pool) return 0;
+    const hours = Math.min(Math.max(RETENTION_HOURS, 1), 24);
+    const result = await pool.query(
+        `DELETE FROM signal_history WHERE recorded_at < now() - ($1 || ' hours')::interval`,
+        [String(hours)]
+    );
+    if (result.rowCount) {
+        // eslint-disable-next-line no-console
+        console.log(`[db] purged ${result.rowCount} signal_history rows older than ${hours}h`);
+    }
+    return result.rowCount;
+};
+
 const init = async () => {
     if (!process.env.DATABASE_URL) return;
     pool = new Pool({
@@ -45,6 +64,13 @@ const init = async () => {
                 ON signal_history (symbol, recorded_at DESC);
         `);
         ready = true;
+        // Deriv API Terms (R26|03, cl. 2.1 & 2.3): content derived from the API
+        // may be cached for a maximum of 24 hours, not stored indefinitely.
+        // signal_history rows embed tick-derived digit data, so they must expire.
+        await purgeExpiredSignalHistory();
+        setInterval(() => {
+            purgeExpiredSignalHistory().catch(() => undefined);
+        }, PURGE_INTERVAL_MS).unref?.();
         // eslint-disable-next-line no-console
         console.log('[db] Postgres connected — run history + signal history will be logged.');
     } catch (err) {
