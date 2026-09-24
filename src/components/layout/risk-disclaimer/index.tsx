@@ -1,1 +1,0 @@
-export { RiskDisclaimer } from './RiskDisclaimer';
