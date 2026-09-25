@@ -408,11 +408,17 @@ class APIBase {
 
             const { active_symbols = [], error = {} } = apiResult as any;
 
+            // [FIX] New Options API returns `underlying_symbol` instead of `symbol`.
+            // Copy it into `symbol` so the rest of the app can read it.
+            const normalized_symbols = (active_symbols as any[]).map(sym =>
+                sym && sym.symbol ? sym : { ...sym, symbol: sym?.underlying_symbol }
+            );
+
             if (error && Object.keys(error).length > 0) {
                 throw new Error(`Active symbols API error: ${error.message || 'Unknown error'}`);
             }
 
-            if (!active_symbols.length) {
+            if (!normalized_symbols.length) {
                 throw new Error('No active symbols received from API');
             }
 
@@ -424,7 +430,7 @@ class APIBase {
                     setTimeout(() => reject(new Error('Enrichment timeout')), this.ENRICHMENT_TIMEOUT_MS)
                 );
 
-                const enrichmentPromise = activeSymbolsProcessorService.processActiveSymbols(active_symbols);
+                const enrichmentPromise = activeSymbolsProcessorService.processActiveSymbols(normalized_symbols);
                 const processedResult = await Promise.race([enrichmentPromise, enrichmentTimeout]);
 
                 this.active_symbols = processedResult.enrichedSymbols;
@@ -432,7 +438,7 @@ class APIBase {
             } catch (enrichmentError) {
                 console.warn('Symbol enrichment failed, using raw symbols:', enrichmentError);
                 // Fallback to raw symbols if enrichment fails
-                this.active_symbols = active_symbols;
+                this.active_symbols = normalized_symbols;
                 this.pip_sizes = {};
             }
 
