@@ -295,4 +295,34 @@
     &__bar-now {
         color: #e8eaed;
     }
+
+    &__connection {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: #8b93a1;
+    }
+
+    &__dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #d85a30;
+
+        &--on {
+            background: #5dcaa5;
+        }
+    }
+
+    &__retry {
+        margin-left: auto;
+        background: transparent;
+        border: 1px solid #2a2f3a;
+        color: #e8eaed;
+        border-radius: 6px;
+        padding: 3px 10px;
+        font-size: 11px;
+        cursor: pointer;
+    }
 }

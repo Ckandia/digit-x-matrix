@@ -28,8 +28,10 @@ type TPending = { resolve: (v: any) => void; reject: (e: Error) => void };
 type TOnUpdate = (data: any, error: Error | null) => void;
 
 const resolveActiveAccount = async (token: string): Promise<DerivAccount> => {
-    const accounts =
-        DerivWSAccountsService.getStoredAccounts() ?? (await DerivWSAccountsService.fetchAccountsList(token));
+    // An empty stored list counts as "nothing stored" — fall through to a
+    // fresh fetch instead of failing on it.
+    const stored = DerivWSAccountsService.getStoredAccounts();
+    const accounts = stored && stored.length > 0 ? stored : await DerivWSAccountsService.fetchAccountsList(token);
     if (!accounts || accounts.length === 0) {
         throw new Error('No Deriv accounts found for this session. Try logging in again.');
     }

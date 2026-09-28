@@ -15,7 +15,6 @@ import { TDigitSignal } from './analysis-types';
 import { TRunStatus, TStrategyConfig } from './types';
 import { useDigitSignals } from './useDigitSignals';
 import { getActiveToken } from './tokenStorage';
-import AiAgentPanel from './AiAgentPanel';
 import './bulk-trader.scss';
 
 const STORAGE_KEY = 'bulk_trader_run_id';
@@ -166,7 +165,6 @@ const BulkTrader = () => {
     // not-allowed cursor.
     const start_disabled_reasons: string[] = [];
     if (!isAuthorized) start_disabled_reasons.push(localize('log in to your Deriv account'));
-    if (!backend_configured) start_disabled_reasons.push(localize('the Bulk Trader backend is not configured for this deployment'));
     if (!hasAcceptedRisk) start_disabled_reasons.push(localize('tick the risk checkbox above'));
     const start_disabled = isStarting;
     const start_not_ready = start_disabled_reasons.length > 0;
@@ -395,7 +393,7 @@ const BulkTrader = () => {
             {!backend_configured && (
                 <div className='bulk-trader__notice bulk-trader__notice--warning'>
                     {localize(
-                        'The backend is not configured yet. Set NEXT_PUBLIC_BULK_TRADER_API_URL to your deployed Render backend URL.'
+                        'The live signal feed is not configured (NEXT_PUBLIC_BULK_TRADER_API_URL). You can still place trades manually, but the digit grid and signals will stay empty.'
                     )}
                 </div>
             )}
@@ -806,7 +804,6 @@ const BulkTrader = () => {
                 </div>
             )}
 
-            <AiAgentPanel hasAcceptedRisk={hasAcceptedRisk} onNeedsRiskAccept={focusRiskCheck} />
         </div>
     );
 };

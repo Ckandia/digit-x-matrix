@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { localize } from '@deriv-com/translations';
+import { useApiBase } from '@/hooks/useApiBase';
 import { getActiveToken } from './tokenStorage';
 import { DerivClientConnection } from './derivClient';
 import { useDigitSignals } from './useDigitSignals';
@@ -37,6 +38,7 @@ const AiAgentPanel = ({
     onNeedsRiskAccept: () => void;
 }) => {
     const { snapshots } = useDigitSignals();
+    const { isAuthorized, authData, activeLoginid } = useApiBase();
     const snapshotsRef = useRef(snapshots);
     useEffect(() => {
         snapshotsRef.current = snapshots;
@@ -57,28 +59,49 @@ const AiAgentPanel = ({
     const engineRef = useRef<AutoPilotEngine | null>(null);
     const is_running = status === 'running';
 
-    // Read the balance as soon as the panel mounts (if already logged in) so
-    // the idle screen can show real preset numbers before Start is pressed.
-    useEffect(() => {
+    const [connectError, setConnectError] = useState<string | null>(null);
+    const [isConnecting, setIsConnecting] = useState(false);
+
+    // Opens this tab's own trading connection and reads the balance. Errors
+    // are shown (not swallowed) so "not connected" always says why.
+    const connectAccount = React.useCallback(async () => {
         const token = getActiveToken();
-        if (!token) return undefined;
-        const connection = new DerivClientConnection(token);
-        connectionRef.current = connection;
-        connection
-            .connect()
-            .then(auth => {
-                setBalance(auth.authorize.balance ?? 0);
-                setCurrency(auth.authorize.currency || 'USD');
-            })
-            .catch(() => {
-                // Silent here — the Start button will surface a clear error
-                // if the user actually tries to use a broken session.
-            });
+        if (!token) {
+            setConnectError(localize('No active login found. Log in with your Deriv account first.'));
+            return;
+        }
+        setIsConnecting(true);
+        setConnectError(null);
+        try {
+            connectionRef.current?.close();
+            const connection = new DerivClientConnection(token);
+            const auth = await connection.connect();
+            connectionRef.current = connection;
+            setBalance(auth.authorize.balance ?? 0);
+            setCurrency(auth.authorize.currency || 'USD');
+        } catch (err) {
+            setConnectError(err instanceof Error ? err.message : localize('Could not connect to Deriv.'));
+        } finally {
+            setIsConnecting(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        connectAccount();
         return () => {
-            if (status !== 'running') connection.close();
+            if (!engineRef.current) connectionRef.current?.close();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // If our own connection couldn't read a balance, fall back to the one the
+    // main app already has for the active account so presets still show.
+    useEffect(() => {
+        if (balance == null && typeof authData?.balance === 'number') {
+            setBalance(authData.balance);
+            setCurrency(authData.currency || 'USD');
+        }
+    }, [authData, balance]);
 
     // Recompute the preset's numbers whenever the level or balance changes,
     // as long as nothing is running — this intentionally overwrites any
@@ -202,6 +225,30 @@ const AiAgentPanel = ({
                         <span className='ai-agent-panel__balance'>
                             {balance != null ? `${currency} ${balance.toFixed(2)}` : '—'}
                         </span>
+                    </div>
+
+                    <div className='ai-agent-panel__connection'>
+                        <span
+                            className={`ai-agent-panel__dot ai-agent-panel__dot--${
+                                connectionRef.current?.isReady ? 'on' : 'off'
+                            }`}
+                        />
+                        {connectionRef.current?.isReady ? (
+                            <span>
+                                {localize('Connected')} — <strong>{activeLoginid || '—'}</strong>
+                            </span>
+                        ) : (
+                            <span>
+                                {isConnecting
+                                    ? localize('Connecting…')
+                                    : connectError || (isAuthorized ? localize('Not connected') : localize('Log in to your Deriv account first.'))}
+                            </span>
+                        )}
+                        {!connectionRef.current?.isReady && !isConnecting && (
+                            <button type='button' className='ai-agent-panel__retry' onClick={connectAccount}>
+                                {localize('Retry')}
+                            </button>
+                        )}
                     </div>
 
                     <div className='ai-agent-panel__preset-row'>
