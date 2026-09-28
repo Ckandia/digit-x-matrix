@@ -1,0 +1,12 @@
+{
+    "$schema": "https://openapi.vercel.sh/vercel.json",
+    "buildCommand": "npm run build",
+    "outputDirectory": "dist",
+    "framework": null,
+    "rewrites": [
+        {
+            "source": "/((?!js/|assets/|deriv-logo.svg|front-channel.html|favicon).*)",
+            "destination": "/index.html"
+        }
+    ]
+}
