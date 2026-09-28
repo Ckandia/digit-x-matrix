@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { computeSignals, computeStats, createDigitWindow, pushDigit } from './digitAnalysis.js';
+import { computeContractSignals, createPriceWindow, pushPrice } from './contractAnalysis.js';
 
 // Deriv's current documentation ("Use ONLY this API") and live testing both
 // confirm ws.derivws.com/websockets/v3 (legacy v3) is now unreliable —
@@ -88,6 +89,7 @@ export class MarketFeed {
     constructor() {
         this.ws = null;
         this.windows = new Map(); // symbol -> digit window
+        this.priceWindows = new Map(); // symbol -> raw price window (rise/fall, touch, asians, etc.)
         this.req_id_counter = 1;
         this.pending = new Map();
         this.listeners = new Set();
@@ -98,7 +100,10 @@ export class MarketFeed {
         // the authoritative values from active_symbols as soon as they arrive.
         this.pip_sizes = new Map(Object.entries(FALLBACK_PIP_SIZE));
         this._pending_history = new Map(); // symbol -> raw prices awaiting pip size
-        for (const { symbol } of DIGIT_SYMBOLS) this.windows.set(symbol, createDigitWindow());
+        for (const { symbol } of DIGIT_SYMBOLS) {
+            this.windows.set(symbol, createDigitWindow());
+            this.priceWindows.set(symbol, createPriceWindow());
+        }
     }
 
     onUpdate(fn) {
@@ -123,17 +128,23 @@ export class MarketFeed {
     getAllSnapshots() {
         const out = {};
         for (const { symbol } of DIGIT_SYMBOLS) {
-            const stats = computeStats(this.windows.get(symbol), symbol);
-            out[symbol] = { stats, signals: computeSignals(stats) };
+            out[symbol] = this.getSnapshot(symbol);
         }
         return out;
     }
 
+    /** Combines digit signals (family: 'digits') with the price-based
+     *  Rise/Fall, Only Ups/Downs, Touch/No Touch, Ends Between/Outside,
+     *  Asians, High/Low Tick and Reset Call/Put signals into one ranked list. */
     getSnapshot(symbol) {
         const window = this.windows.get(symbol);
-        if (!window) return null;
+        const priceWindow = this.priceWindows.get(symbol);
+        if (!window || !priceWindow) return null;
         const stats = computeStats(window, symbol);
-        return { stats, signals: computeSignals(stats) };
+        const digit_signals = computeSignals(stats).map(s => ({ family: 'digits', ...s }));
+        const contract_signals = computeContractSignals(priceWindow, symbol);
+        const signals = [...digit_signals, ...contract_signals].sort((a, b) => b.confidence - a.confidence);
+        return { stats, signals };
     }
 
     _nextReqId() {
@@ -254,10 +265,12 @@ export class MarketFeed {
         if (data.msg_type === 'tick' && data.tick) {
             const { symbol, quote, pip_size } = data.tick;
             const window = this.windows.get(symbol);
-            if (!window) return;
+            const priceWindow = this.priceWindows.get(symbol);
+            if (!window || !priceWindow) return;
             // The tick frame is the most authoritative source when present.
             if (Number.isInteger(pip_size)) this.pip_sizes.set(symbol, pip_size);
             pushDigit(window, lastDigitOf(quote, this.pip_sizes.get(symbol)));
+            pushPrice(priceWindow, quote);
             this._emit(symbol);
         }
     }
@@ -267,12 +280,19 @@ export class MarketFeed {
         return this.pip_sizes.get(symbol) ?? 2;
     }
 
-    /** (Re)builds a symbol's rolling window from raw history at current precision. */
+
+
+    /** (Re)builds a symbol's rolling digit + price windows from raw history at current precision. */
     _rebuildWindow(symbol, prices) {
         const dp = this.getPipSize(symbol);
         const window = createDigitWindow();
-        for (const price of prices) pushDigit(window, lastDigitOf(price, dp));
+        const priceWindow = createPriceWindow();
+        for (const price of prices) {
+            pushDigit(window, lastDigitOf(price, dp));
+            pushPrice(priceWindow, price);
+        }
         this.windows.set(symbol, window);
+        this.priceWindows.set(symbol, priceWindow);
         this._emit(symbol);
     }
 

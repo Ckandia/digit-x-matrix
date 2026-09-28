@@ -1,63 +1,84 @@
 # Digit X Matrix — Backend
 
-A small Node/Express service with two jobs:
+A small Node/Express service with one job: **the "brain"**.
 
-1. **The "brain"** — a always-on, unauthenticated feed of Deriv ticks for
-   every digit-contract symbol, turned into rolling statistics and
-   confidence-scored signals. This powers the digit grid, history matrix and
-   "SIGNAL … ENTER NOW" banner on the **Bulk Trades** tab.
-2. **The trader** — runs multiple digit-contract trading strategies
-   concurrently against the Deriv API, on behalf of one account, when the
-   user actually starts a bulk run. Nothing here places a trade on its own —
-   every run is started explicitly from the frontend, by the account holder.
+- An always-on, unauthenticated feed of Deriv ticks for every digit-contract
+  symbol, turned into rolling statistics and confidence-scored signals. This
+  powers the digit grid, history matrix and "SIGNAL … ENTER NOW" banner on
+  the **Bulk Trades** tab.
+- A confidence-gated AI signal scanner that watches those same signals and
+  reports (`gate_passed` / `gate_rejected`) whenever one clears the
+  configured threshold.
+
+**This backend never holds a Deriv token and never places a trade.** Both
+manual "Bulk Trades" strategies and the AI agent's signals are executed
+entirely in the browser, on the user's own authenticated session — see
+`src/pages/bulk-trader/derivClient.ts`, `strategyEngineClient.ts`,
+`bulkRunManager.ts` and `aiExecutor.ts` in the frontend repo. This service
+only ever analyses and signals.
 
 ## Why a separate backend?
 
-The frontend's bot engine (Deriv's Blockly-based `bot-skeleton`) is a
-singleton — it's built to run one strategy at a time in the browser. Running
-several strategies *truly* concurrently, independent of the browser tab
-staying open, needs a server-side process. The live analysis feed also needs
-somewhere to keep computing 24/7 even while nobody has the app open, so the
-digit grid isn't empty on the next page load. That's this service.
+The live analysis feed needs somewhere to keep computing 24/7 even while
+nobody has the app open, so the digit grid isn't empty on the next page
+load, and the confidence-gate scan needs a consistent, shared view of every
+symbol's live signals rather than ten independent per-tab feeds. That's what
+this service is for — nothing more.
 
 ## The analysis "brain"
 
 `marketFeed.js` opens **one public (no token, no login) WebSocket** to Deriv
-on boot and subscribes to ticks for 10 volatility-index symbols. Each new
-tick's last digit is pushed into a rolling window (`digitAnalysis.js`,
-500 ticks by default) and turned into:
+on boot and subscribes to ticks for 10 volatility-index symbols, keeping both
+a rolling last-digit window (`digitAnalysis.js`) and a rolling raw-price
+window (`contractAnalysis.js`) per symbol, 500 and 300 ticks respectively.
+These are turned into a ranked list of **signals** spanning 9 contract
+families:
 
-- Per-digit frequency (0-9), hot/cold digit, even/odd + over/under splits,
-  trailing streaks.
-- A ranked list of **signals** — one per digit contract family
-  (Even/Odd, Over/Under 5, Differs on the hottest digit, Matches on the
-  coldest) — each with a 0-100 **confidence** score based on how far the
-  observed frequency has drifted from its fair-RNG baseline, scaled by
-  sample size.
+- **Digits** (`digitAnalysis.js`): Even/Odd, Over/Under 5, Differs, Matches —
+  from per-digit frequency deviation against a fair-RNG baseline.
+- **Rise/Fall, Reset Call/Put, Asian Up/Down** (`contractAnalysis.js`): same
+  underlying momentum/drift z-score over whichever recent lookback shows the
+  strongest signal, applied to three contract shapes with the same
+  directional read.
+- **Only Ups/Only Downs**: trailing same-direction tick run, scored against
+  how often a run that length has actually continued in this window vs a
+  50% fair-coin baseline (needs 25+ occurrences before it trusts the rate at
+  all — small samples are noise, not signal).
+- **Touch/No Touch, Ends Between/Outside**: realized-volatility regime
+  (expanding vs contracting relative to its own baseline), with a barrier
+  offset scaled to recent volatility.
+- **High Tick/Low Tick**: momentum-implied pick of which of the next 5 ticks
+  is the plausible extreme — the single weakest-evidence family here, since
+  it's one tick pick rather than a distributional read.
 
-**Important:** Deriv's synthetic indices are independent random draws —
-past digit frequency does not change the odds of the next tick. These are
-statistical *deviation* signals, not predictions, and the frontend labels
-them that way. `signalHub.js` broadcasts every update over `/ws/signals` to
-all connected frontends, throttled to ~2-3 updates/sec per symbol.
+Every signal carries a `family` tag alongside `contract_type`,
+`duration_ticks` (auto-picked per signal — not fixed), an optional
+`prediction`/barrier, `confidence`, and `basis`.
 
-## The trader
+**Important:** Deriv's synthetic indices are independent random draws /
+fair random-walk processes — past behaviour does not change the odds of the
+next tick. These are statistical *deviation/momentum* signals, not
+predictions or win-probability estimates. `signalHub.js` broadcasts every
+update over `/ws/signals` to all connected frontends, throttled to ~2-3
+updates/sec per symbol.
 
-1. `POST /api/bulk/start` opens **one** authorized WebSocket connection to
-   Deriv for the account (using the token you send), then starts one
-   `StrategyEngine` per strategy you configured, all sharing that connection.
-2. Each `StrategyEngine` places a real contract (`buy`), watches
-   `proposal_open_contract` until it settles, applies your chosen money
-   management rule (flat / martingale / d'Alembert), optional Auto Flip
-   (switches Even↔Odd or Over↔Under after a loss), checks your stop
-   conditions (take profit / stop loss / max trades), and — if still
-   running — places the next contract.
-3. The frontend polls `GET /api/bulk/status/:run_id` every few seconds to
-   show live results, and calls `POST /api/bulk/stop` to stop one or all
-   strategies.
+**Not yet covered:** Multiplier and Accumulators. Both are open-position
+contracts (no fixed duration, actively closed or knocked out) rather than
+the fixed-duration "settles after N ticks" shape every family above shares —
+they need a different execution/monitoring model on the frontend before an
+analysis model for them is useful, so they're a deliberate follow-up rather
+than a gap that was missed.
 
-**The account token is only ever held in memory for the lifetime of the run.**
-It is never written to disk or to the database.
+## The AI auto-pilot
+
+There is no backend "AI run" anymore — the frontend's auto-pilot
+(`src/pages/bulk-trader/autoPilotEngine.ts`) reads the same `/ws/signals`
+feed the Digit Matrix grid uses, picks the best signal across every
+family above, and executes, watches, and martingale-recovers (flipping to
+the opposite side of whichever family just lost, escalating stake) entirely
+in the browser. This backend's only involvement is computing and
+broadcasting the signals it was already broadcasting — nothing here starts,
+stops, or tracks a trading run.
 
 ## Endpoints
 
@@ -69,9 +90,6 @@ It is never written to disk or to the database.
 | GET | `/api/analysis/snapshot/:symbol` | — | Current stats + signals for one symbol |
 | GET | `/api/analysis/history/:symbol` | — | Recent stored signal snapshots for one symbol (`?limit=`, max 500). Empty array if no database is configured |
 | WS | `/ws/signals` | — | Live push feed: full snapshot on connect, then throttled per-symbol updates as ticks arrive |
-| POST | `/api/bulk/start` | `{ token, strategies: [...] }` | Authorizes and starts up to 5 concurrent strategies |
-| GET | `/api/bulk/status/:run_id` | — | Current status/stats for every strategy in the run |
-| POST | `/api/bulk/stop` | `{ run_id, strategy_id? }` | Stops one strategy, or all of them if `strategy_id` is omitted |
 
 ## Deploying to Render
 
@@ -80,32 +98,32 @@ It is never written to disk or to the database.
 3. Set **Root Directory** to `backend`.
 4. Build command: `npm install`. Start command: `npm start`.
 5. Add environment variables (see `.env.example`):
-   - `DERIV_APP_ID` — your registered Deriv app id (`34o9mFaY1HjSSSXyE5DuL`).
    - `ALLOWED_ORIGIN` — your Vercel frontend URL, so only your site can call this API.
-   - `DATABASE_URL` — optional, only if you want run history persisted (see below).
+   - `DATABASE_URL` — optional, only if you want signal history persisted (see below).
+   - `AI_AGENT_MAX_STAKE` — optional hard ceiling (default 25) on the `stake` a client can request in the AI config — this only affects what's *shown* as the suggested stake, since the backend never spends it.
 6. Deploy. Copy the resulting `https://<your-service>.onrender.com` URL.
 7. In Vercel, set `NEXT_PUBLIC_BULK_TRADER_API_URL` to that URL and redeploy
    the frontend. `NEXT_PUBLIC_ANALYSIS_WS_URL` is optional — it's derived
    automatically from the REST URL (`https→wss`, `+ /ws/signals`) if unset.
+   Also set `NEXT_PUBLIC_DERIV_APP_ID` on the frontend to your registered
+   Deriv app id (`34o9mFaY1HjSSSXyE5DuL`) — the frontend now talks to Deriv
+   directly for trading, so it needs its own app id.
 
 Alternatively, commit `render.yaml` (already included) and use Render's
 "Blueprint" deploy option to provision it from this repo directly.
 
 ## Optional: persistence with Neon (or any Postgres)
 
-Set `DATABASE_URL` and the backend automatically creates two tables and
-starts logging to them — no other code changes needed:
-
-- **`bulk_runs`** — one row per bulk-trading run: start/end time, total
-  profit, and a JSON summary of every strategy in it.
-- **`signal_history`** — a snapshot of each symbol's stats + ranked signals
-  every 30 seconds (throttled, not every tick), so you can look back at what
-  the "brain" was seeing at any point — e.g. to later check how well the
-  confidence score tracked what actually happened. Query it via
-  `GET /api/analysis/history/:symbol?limit=100`.
+Set `DATABASE_URL` and the backend automatically creates the
+`signal_history` table and starts logging to it — no other code changes
+needed. It's a snapshot of each symbol's stats + ranked signals every 30
+seconds (throttled, not every tick), so you can look back at what the
+"brain" was seeing at any point — e.g. to later check how well the
+confidence score tracked what actually happened. Query it via
+`GET /api/analysis/history/:symbol?limit=100`.
 
 Without `DATABASE_URL` set, the backend works exactly the same — it just
-doesn't keep either kind of history.
+doesn't keep history.
 
 **Using [Neon](https://neon.tech)** (recommended — free tier, serverless
 Postgres, scales to zero when idle):
@@ -127,14 +145,17 @@ same way — just set `DATABASE_URL` to its connection string.
 - The analysis window (last 500 ticks per symbol) is in-memory only and
   rebuilds from `ticks_history` a few seconds after every restart — it's
   meant to reflect *recent* market behaviour, not a permanent record.
-- Runs are stored in memory. If the Render instance restarts (e.g. free-tier
-  spin-down), any active runs are lost — strategies will stop, but no
-  partially-placed contract is left dangling since each contract is bought
-  and settled independently.
-- Only digit contracts (Differs/Matches/Over/Under/Even/Odd) are supported —
-  matching the "Digit X Matrix" concept. Extending to other contract types
-  (Rise/Fall, Touch/No Touch, etc.) is a matter of adding them to
-  `NEEDS_BARRIER` / the frontend's contract type list.
-- There's no authentication on the backend beyond the Deriv token itself and
-  CORS restricted to `ALLOWED_ORIGIN`. If you want to expose this beyond your
-  own use, add a login layer in front of it.
+- The AI scanner's run state is in memory too. If the Render instance
+  restarts (e.g. free-tier spin-down), an active scan stops — the frontend's
+  own execution/tracking is unaffected either way since it never depended on
+  this service holding state about trades.
+- Multiplier and Accumulators aren't covered yet — see the note above; they
+  need an open-position execution model on the frontend before an analysis
+  model for them is worth building.
+- The 9 families' scoring is heuristic (momentum/streak/volatility
+  statistics), not a backtested or validated trading strategy — it hasn't
+  been run against live Deriv data yet, only synthetic price series in
+  isolated tests.
+- There's no authentication on the backend — it never sees anything
+  sensitive, so CORS restricted to `ALLOWED_ORIGIN` is the only real
+  boundary it needs.

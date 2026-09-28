@@ -1,0 +1,346 @@
+// Runs entirely in the browser, on the DerivClientConnection opened with the
+// user's own session (see derivClient.ts). This is the "press AI and it does
+// everything" engine: reads the account balance, derives stake/martingale/
+// stop-loss/take-profit from a risk preset, picks the best available signal
+// across every allowed contract family, and on a loss flips to that family's
+// opposite side (escalating stake) until it recovers or hits the step ceiling.
+//
+// Honesty note carried from the backend: every signal this consumes is a
+// statistical deviation/momentum score on markets designed as fair random
+// processes, not a validated edge — "confidence" describes how unusual
+// something looks right now, not the odds of winning the trade.
+import { DerivClientConnection } from './derivClient';
+import { TDigitSignal, TSnapshotMap } from './analysis-types';
+
+export type TRiskLevel = 'conservative' | 'moderate' | 'aggressive';
+
+export type TRiskPreset = {
+    stake_pct: number; // of balance, per trade at step 1
+    martingale_multiplier: number;
+    max_steps: number;
+    stop_loss_pct: number; // of balance
+    take_profit_pct: number; // of balance
+};
+
+export const RISK_PRESETS: Record<TRiskLevel, TRiskPreset> = {
+    conservative: { stake_pct: 1, martingale_multiplier: 1.8, max_steps: 4, stop_loss_pct: 10, take_profit_pct: 15 },
+    moderate: { stake_pct: 2, martingale_multiplier: 2.1, max_steps: 5, stop_loss_pct: 15, take_profit_pct: 20 },
+    aggressive: { stake_pct: 3, martingale_multiplier: 2.5, max_steps: 6, stop_loss_pct: 25, take_profit_pct: 30 },
+};
+
+export type TAutoPilotConfig = {
+    stake: number;
+    martingale_multiplier: number;
+    max_steps: number;
+    stop_loss: number; // absolute currency amount, anchored to balance at start
+    take_profit: number; // absolute currency amount, anchored to balance at start
+};
+
+/** Turns a risk preset + live balance into the absolute numbers shown/edited
+ *  in the UI. Editing a field in the UI just overwrites one of these — the
+ *  preset is only ever a starting point, never enforced afterward. */
+export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
+    const preset = RISK_PRESETS[level];
+    return {
+        stake: Number(((balance * preset.stake_pct) / 100).toFixed(2)),
+        martingale_multiplier: preset.martingale_multiplier,
+        max_steps: preset.max_steps,
+        stop_loss: Number(((balance * preset.stop_loss_pct) / 100).toFixed(2)),
+        take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
+    };
+};
+
+// The 8 contract families in this pass — Matches dropped (too hard to
+// program per the user), Multiplier and Accumulators deferred (they're
+// open-position contracts needing a different execution/monitoring model
+// than every fixed-duration contract here).
+const AUTOPILOT_CONTRACT_TYPES = [
+    'DIGITEVEN',
+    'DIGITODD',
+    'CALL',
+    'PUT',
+    'RUNHIGH',
+    'RUNLOW',
+    'ONETOUCH',
+    'NOTOUCH',
+    'EXPIRYRANGE',
+    'EXPIRYMISS',
+    'ASIANU',
+    'ASIAND',
+    'TICKHIGH',
+    'TICKLOW',
+    'RESETCALL',
+    'RESETPUT',
+] as const;
+
+/** Every family here has a natural opposite side — flipping alternates
+ *  between them on each martingale recovery step. */
+const FLIP_PARTNER: Record<string, string> = {
+    DIGITEVEN: 'DIGITODD',
+    DIGITODD: 'DIGITEVEN',
+    CALL: 'PUT',
+    PUT: 'CALL',
+    RUNHIGH: 'RUNLOW',
+    RUNLOW: 'RUNHIGH',
+    ONETOUCH: 'NOTOUCH',
+    NOTOUCH: 'ONETOUCH',
+    EXPIRYRANGE: 'EXPIRYMISS',
+    EXPIRYMISS: 'EXPIRYRANGE',
+    ASIANU: 'ASIAND',
+    ASIAND: 'ASIANU',
+    TICKHIGH: 'TICKLOW',
+    TICKLOW: 'TICKHIGH',
+    RESETCALL: 'RESETPUT',
+    RESETPUT: 'RESETCALL',
+};
+
+export type TCandidate = TDigitSignal & { symbol: string };
+
+/** Best-confidence signal across every symbol, restricted to the families the
+ *  auto-pilot is allowed to trade. Used for the very first entry, and again
+ *  after every win (the ladder resets and re-scans from scratch). */
+export const pickBestGlobalCandidate = (snapshots: TSnapshotMap): TCandidate | null => {
+    let best: TCandidate | null = null;
+    for (const [symbol, snapshot] of Object.entries(snapshots)) {
+        for (const signal of snapshot.signals) {
+            if (!AUTOPILOT_CONTRACT_TYPES.includes(signal.contract_type as (typeof AUTOPILOT_CONTRACT_TYPES)[number]))
+                continue;
+            if (!best || signal.confidence > best.confidence) best = { symbol, ...signal };
+        }
+    }
+    return best;
+};
+
+/** The flip candidate for a recovery step: same symbol, the opposite side of
+ *  whatever just lost. Prefers a live signal for that side (so duration is
+ *  freshly AI-picked, per the design); falls back to a synthetic same-duration
+ *  entry if the analysis doesn't currently have one for that exact side —
+ *  recovery must always be able to fire, even when the flipped side isn't
+ *  independently "in favour" right now. */
+export const pickFlipCandidate = (snapshots: TSnapshotMap, symbol: string, previous: TCandidate): TCandidate => {
+    const flip_type = FLIP_PARTNER[previous.contract_type];
+    const snapshot = snapshots[symbol];
+    const live = snapshot?.signals.find(s => s.contract_type === flip_type);
+    if (live) return { symbol, ...live };
+
+    return {
+        symbol,
+        family: previous.family,
+        contract_type: flip_type as TDigitSignal['contract_type'],
+        duration_ticks: previous.duration_ticks,
+        prediction: flipPrediction(previous),
+        label: `${previous.label} (flipped)`,
+        confidence: 0,
+        basis: 'No live signal for this side yet — flipping anyway to continue the recovery ladder.',
+    };
+};
+
+/** Barrier/selection carries over sensibly across a flip: Touch/No Touch and
+ *  Ends Between/Outside keep the same barrier distance; High/Low Tick flips
+ *  which tick (5th <-> 1st) is selected; digit barriers (5) don't change. */
+const flipPrediction = (previous: TCandidate): TDigitSignal['prediction'] => {
+    if (previous.contract_type === 'TICKHIGH' || previous.contract_type === 'TICKLOW') {
+        return previous.prediction === 5 ? 1 : 5;
+    }
+    return previous.prediction;
+};
+
+const NEEDS_SINGLE_BARRIER = new Set(['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER', 'ONETOUCH', 'NOTOUCH']);
+
+/** Builds Deriv `buy` parameters for any of the families this engine trades. */
+export const buildTradeParameters = (candidate: TCandidate, stake: number, currency: string) => {
+    const base: Record<string, unknown> = {
+        amount: stake,
+        basis: 'stake',
+        contract_type: candidate.contract_type,
+        currency,
+        symbol: candidate.symbol,
+    };
+
+    if (candidate.contract_type === 'TICKHIGH' || candidate.contract_type === 'TICKLOW') {
+        // High Tick/Low Tick is fixed at 5 ticks with a selected_tick 1-5.
+        return { ...base, duration: 5, duration_unit: 't', selected_tick: Number(candidate.prediction) || 5 };
+    }
+
+    if (candidate.contract_type === 'EXPIRYRANGE' || candidate.contract_type === 'EXPIRYMISS') {
+        const offset = Math.abs(Number(candidate.prediction) || 0);
+        return {
+            ...base,
+            duration: candidate.duration_ticks || 10,
+            duration_unit: 't',
+            barrier: `+${offset}`,
+            barrier2: `-${offset}`,
+        };
+    }
+
+    const parameters: Record<string, unknown> = {
+        ...base,
+        duration: candidate.duration_ticks || 1,
+        duration_unit: 't',
+    };
+    if (NEEDS_SINGLE_BARRIER.has(candidate.contract_type)) {
+        parameters.barrier = String(candidate.prediction);
+    }
+    return parameters;
+};
+
+export type TAutoPilotEvent = {
+    ts: number;
+    phase: 'started' | 'entering' | 'settled' | 'stopped' | 'error';
+    step?: number;
+    symbol?: string;
+    contract_type?: string;
+    label?: string;
+    confidence?: number;
+    stake?: number;
+    result?: 'win' | 'loss';
+    profit?: number;
+    total_profit?: number;
+    reason?: string;
+    error?: string;
+};
+
+export class AutoPilotEngine {
+    private connection: DerivClientConnection;
+    private currency: string;
+    private getSnapshots: () => TSnapshotMap;
+    private onEvent: (event: TAutoPilotEvent) => void;
+
+    private config: TAutoPilotConfig;
+    private step = 1;
+    private total_profit = 0;
+    private running = false;
+    private busy = false;
+    private lastCandidate: TCandidate | null = null;
+
+    constructor(
+        connection: DerivClientConnection,
+        currency: string,
+        config: TAutoPilotConfig,
+        getSnapshots: () => TSnapshotMap,
+        onEvent: (event: TAutoPilotEvent) => void
+    ) {
+        this.connection = connection;
+        this.currency = currency;
+        this.config = config;
+        this.getSnapshots = getSnapshots;
+        this.onEvent = onEvent;
+        this.connection.onFatalError = () => this._emit({ phase: 'error', error: 'Lost connection to Deriv' });
+    }
+
+    start() {
+        this.running = true;
+        this.step = 1;
+        this.total_profit = 0;
+        this._emit({ phase: 'started' });
+        this._findAndEnter(this.config.stake);
+    }
+
+    stop(reason = 'stopped by user') {
+        this.running = false;
+        this._emit({ phase: 'stopped', reason });
+    }
+
+    private _emit(event: Partial<TAutoPilotEvent> & { phase: TAutoPilotEvent['phase'] }) {
+        this.onEvent({
+            ts: Date.now(),
+            total_profit: this.total_profit,
+            step: this.step,
+            ...event,
+        } as TAutoPilotEvent);
+    }
+
+    private _findAndEnter(stake: number) {
+        if (!this.running || this.busy) return;
+
+        const candidate = pickBestGlobalCandidate(this.getSnapshots());
+        if (!candidate) {
+            // Nothing meets the bar right now — try again shortly rather than
+            // erroring out; live signals come and go every second.
+            setTimeout(() => this._findAndEnter(stake), 1500);
+            return;
+        }
+        this._enter(candidate, stake);
+    }
+
+    private _enter(candidate: TCandidate, stake: number) {
+        this.busy = true;
+        this.lastCandidate = candidate;
+        this._emit({
+            phase: 'entering',
+            symbol: candidate.symbol,
+            contract_type: candidate.contract_type,
+            label: candidate.label,
+            confidence: candidate.confidence,
+            stake,
+        });
+
+        const parameters = buildTradeParameters(candidate, stake, this.currency);
+        this.connection
+            .send({ buy: 1, price: stake, parameters })
+            .then(res => {
+                const contract_id = res?.buy?.contract_id;
+                if (!contract_id) throw new Error('Buy did not return a contract id');
+                this._watch(candidate, stake, contract_id);
+            })
+            .catch(err => {
+                this.busy = false;
+                this._emit({ phase: 'error', symbol: candidate.symbol, error: err?.message || 'Failed to place trade' });
+                this.stop('trade placement failed');
+            });
+    }
+
+    private _watch(candidate: TCandidate, stake: number, contract_id: string) {
+        const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id }, (data, err) => {
+            if (err) {
+                this.busy = false;
+                this._emit({ phase: 'error', symbol: candidate.symbol, error: err.message });
+                this.stop('lost track of an open contract');
+                return;
+            }
+            const contract = data?.proposal_open_contract;
+            if (!contract?.is_sold) return;
+
+            this.connection.unsubscribe(sub_id);
+            const profit = Number(contract.profit ?? 0);
+            const won = profit > 0;
+            this.total_profit = Number((this.total_profit + profit).toFixed(2));
+
+            this._emit({
+                phase: 'settled',
+                symbol: candidate.symbol,
+                contract_type: candidate.contract_type,
+                result: won ? 'win' : 'loss',
+                profit: Number(profit.toFixed(2)),
+            });
+
+            this.busy = false;
+            if (!this.running) return;
+
+            if (this.total_profit <= -Math.abs(this.config.stop_loss)) {
+                this.stop('stop loss reached');
+                return;
+            }
+            if (this.total_profit >= this.config.take_profit) {
+                this.stop('take profit reached');
+                return;
+            }
+
+            if (won) {
+                this.step = 1;
+                this._findAndEnter(this.config.stake);
+                return;
+            }
+
+            if (this.step >= this.config.max_steps) {
+                this.stop('max recovery steps reached');
+                return;
+            }
+
+            this.step += 1;
+            const next_stake = Number((stake * this.config.martingale_multiplier).toFixed(2));
+            const flip = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
+            this._enter(flip, next_stake);
+        });
+    }
+}
