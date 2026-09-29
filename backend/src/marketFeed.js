@@ -142,7 +142,7 @@ export class MarketFeed {
         if (!window || !priceWindow) return null;
         const stats = computeStats(window, symbol);
         const digit_signals = computeSignals(stats).map(s => ({ family: 'digits', ...s }));
-        const contract_signals = computeContractSignals(priceWindow, symbol);
+        const contract_signals = computeContractSignals(priceWindow, symbol, this.getPipSize(symbol));
         const signals = [...digit_signals, ...contract_signals].sort((a, b) => b.confidence - a.confidence);
         return { stats, signals };
     }

@@ -88,7 +88,7 @@ const bestMomentumWindow = (prices, sigma) => {
  * non-digit families the auto-pilot trades. Returns [] until
  * MIN_SAMPLE_FOR_CONTRACT_SIGNAL prices have been collected.
  */
-export function computeContractSignals(window, symbol) {
+export function computeContractSignals(window, symbol, decimals = 2) {
     const { prices } = window;
     if (prices.length < MIN_SAMPLE_FOR_CONTRACT_SIGNAL) return [];
 
@@ -188,7 +188,12 @@ export function computeContractSignals(window, symbol) {
         const baseline_sigma = baseline_sigma_raw;
         const vol_ratio = recent_sigma / baseline_sigma;
         const vol_conf = Math.round(clamp(Math.abs(vol_ratio - 1) * 140, 0, 100));
-        const barrier_offset = round2(1.5 * baseline_sigma * 100) / 100; // absolute price units
+        // Deriv rejects barriers with more decimal places than the symbol's own
+        // price precision, so round to exactly that many (and never below 3
+        // pips, since a barrier at ~spot is invalid anyway).
+        const pip = 10 ** -decimals;
+        const raw_offset = Math.max(1.5 * baseline_sigma, 3 * pip);
+        const barrier_offset = raw_offset.toFixed(decimals); // string, e.g. "0.35"
 
         if (vol_conf >= 15) {
             const expanding = vol_ratio > 1;
@@ -196,7 +201,7 @@ export function computeContractSignals(window, symbol) {
                 family: 'touch',
                 contract_type: expanding ? 'ONETOUCH' : 'NOTOUCH',
                 duration_ticks: 10,
-                prediction: expanding ? `+${barrier_offset}` : `+${barrier_offset}`, // offset magnitude; direction (touch either side) is symbol-agnostic
+                prediction: `+${barrier_offset}`,
                 label: expanding ? 'Touch' : 'No touch',
                 confidence: vol_conf,
                 basis: `Realized volatility is ${expanding ? 'expanding' : 'contracting'} (recent/baseline ratio ${round2(vol_ratio)}).`,
@@ -205,7 +210,7 @@ export function computeContractSignals(window, symbol) {
                 family: 'ends',
                 contract_type: expanding ? 'EXPIRYMISS' : 'EXPIRYRANGE',
                 duration_ticks: 10,
-                prediction: barrier_offset,
+                prediction: barrier_offset, // unsigned offset string; the frontend builds +/- barriers from it
                 label: expanding ? 'Ends outside' : 'Ends between',
                 confidence: Math.round(vol_conf * 0.95),
                 basis: `Same volatility read, applied to a symmetric range \u00b1${barrier_offset} around spot.`,
