@@ -12,6 +12,7 @@ import {
     TAutoPilotEvent,
     TRiskLevel,
 } from './autoPilotEngine';
+import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import './ai-agent-panel.scss';
 
 type TLadderRow = {
@@ -55,6 +56,9 @@ const AiAgentPanel = ({
     const [totalProfit, setTotalProfit] = useState(0);
     const [ladder, setLadder] = useState<TLadderRow[]>([]);
 
+    const [learnMode, setLearnMode] = useState<TLearningMode>('learn');
+    const [learnInfo, setLearnInfo] = useState<ReturnType<LearningEngine['summary']> | null>(null);
+    const learnerRef = useRef<LearningEngine | null>(null);
     const connectionRef = useRef<DerivClientConnection | null>(null);
     const engineRef = useRef<AutoPilotEngine | null>(null);
     const is_running = status === 'running';
@@ -142,6 +146,7 @@ const AiAgentPanel = ({
                 return next;
             });
             setTotalProfit(event.total_profit ?? 0);
+            if (learnerRef.current) setLearnInfo(learnerRef.current.summary());
         } else if (event.phase === 'stopped') {
             setStatus('stopped');
             setStopReason(event.reason);
@@ -179,7 +184,22 @@ const AiAgentPanel = ({
                 connectionRef.current = connection;
             }
 
-            const engine = new AutoPilotEngine(connection, currency, config, () => snapshotsRef.current, handleEngineEvent);
+            if (!learnerRef.current) {
+                const learner = new LearningEngine(await makeProfileId(activeLoginid || 'account'), learnMode);
+                await learner.syncFromBackend();
+                learnerRef.current = learner;
+            }
+            learnerRef.current.mode = learnMode;
+            setLearnInfo(learnerRef.current.summary());
+
+            const engine = new AutoPilotEngine(
+                connection,
+                currency,
+                config,
+                () => snapshotsRef.current,
+                handleEngineEvent,
+                learnerRef.current
+            );
             engineRef.current = engine;
             engine.start();
         } catch (err) {
@@ -302,6 +322,23 @@ const AiAgentPanel = ({
                         </div>
                     )}
 
+                    <label className='ai-agent-panel__hint'>
+                        {localize('Learning')}{' '}
+                        <select value={learnMode} onChange={e => setLearnMode(e.target.value as TLearningMode)}>
+                            <option value='learn'>{localize('Learn (explore with small stakes)')}</option>
+                            <option value='edge_gate'>{localize('Only trade a proven edge')}</option>
+                            <option value='off'>{localize('Off (signals only)')}</option>
+                        </select>
+                    </label>
+                    {learnInfo && learnInfo.total_trades > 0 && (
+                        <span className='ai-agent-panel__hint'>
+                            {localize('Learned from {{n}} trades across {{c}} market/contract/time-frame combinations; {{p}} show a proven edge.', {
+                                n: learnInfo.total_trades,
+                                c: learnInfo.combinations,
+                                p: learnInfo.proven,
+                            })}
+                        </span>
+                    )}
                     <button
                         type='button'
                         className='ai-agent-panel__start'

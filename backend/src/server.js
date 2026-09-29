@@ -5,6 +5,7 @@ import express from 'express';
 import { getSignalHistory, isPersistenceEnabled, logSignalSnapshot } from './db.js';
 import { DIGIT_SYMBOLS, MarketFeed } from './marketFeed.js';
 import { attachSignalHub } from './signalHub.js';
+import { getStats, isValidProfile, parseOutcome, recordOutcome } from './learning.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -70,6 +71,35 @@ app.get('/api/analysis/snapshot/:symbol', (req, res) => {
 app.get('/api/analysis/history/:symbol', async (req, res) => {
     const rows = await getSignalHistory(req.params.symbol, req.query.limit);
     res.json({ data: rows, persistence: isPersistenceEnabled() });
+});
+
+// Learning memory: the browser posts each settled trade's result (aggregates
+// only) and reads its own stats back on load. See learning.js.
+const outcome_calls = new Map(); // profile -> timestamps, crude flood guard
+app.post('/api/learning/outcome', async (req, res) => {
+    const outcome = parseOutcome(req.body);
+    if (!outcome) return res.status(400).json({ error: 'Invalid outcome' });
+    const now = Date.now();
+    const recent = (outcome_calls.get(outcome.profile) || []).filter(t => now - t < 60_000);
+    if (recent.length >= 120) return res.status(429).json({ error: 'Too many outcomes' });
+    outcome_calls.set(outcome.profile, [...recent, now]);
+    try {
+        await recordOutcome(outcome);
+        res.json({ ok: true });
+    } catch (err) {
+        console.error('[learning] record failed:', err.message);
+        res.status(500).json({ error: 'Could not record outcome' });
+    }
+});
+
+app.get('/api/learning/stats/:profile', async (req, res) => {
+    if (!isValidProfile(req.params.profile)) return res.status(400).json({ error: 'Invalid profile' });
+    try {
+        res.json({ data: await getStats(req.params.profile), persistence: isPersistenceEnabled() });
+    } catch (err) {
+        console.error('[learning] stats failed:', err.message);
+        res.status(500).json({ error: 'Could not read stats' });
+    }
 });
 
 // The AI auto-pilot (contract choice, duration, martingale ladder, flip on

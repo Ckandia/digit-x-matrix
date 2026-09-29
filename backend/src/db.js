@@ -158,3 +158,6 @@ export const getSignalHistory = async (symbol, limit = 100) => {
 };
 
 export const isPersistenceEnabled = () => ready;
+
+/** Shared pool for modules that need their own tables (e.g. learning.js). */
+export const getPool = () => (ready ? pool : null);

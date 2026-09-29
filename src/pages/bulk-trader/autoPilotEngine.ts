@@ -11,6 +11,7 @@
 // something looks right now, not the odds of winning the trade.
 import { DerivClientConnection } from './derivClient';
 import { TDigitSignal, TSnapshotMap } from './analysis-types';
+import { candidatesFromSnapshots, LearningEngine } from './learningEngine';
 
 export type TRiskLevel = 'conservative' | 'moderate' | 'aggressive';
 
@@ -194,9 +195,12 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
     return parameters;
 };
 
+const parameters_duration = (candidate: TCandidate, stake: number, currency: string) =>
+    (buildTradeParameters(candidate, stake, currency) as { duration: number }).duration;
+
 export type TAutoPilotEvent = {
     ts: number;
-    phase: 'started' | 'entering' | 'settled' | 'stopped' | 'error';
+    phase: 'started' | 'entering' | 'settled' | 'stopped' | 'error' | 'waiting';
     step?: number;
     symbol?: string;
     contract_type?: string;
@@ -222,14 +226,19 @@ export class AutoPilotEngine {
     private running = false;
     private busy = false;
     private lastCandidate: TCandidate | null = null;
+    private learner?: LearningEngine;
+    private ladder_spent = 0;
+    private last_wait_emit = 0;
 
     constructor(
         connection: DerivClientConnection,
         currency: string,
         config: TAutoPilotConfig,
         getSnapshots: () => TSnapshotMap,
-        onEvent: (event: TAutoPilotEvent) => void
+        onEvent: (event: TAutoPilotEvent) => void,
+        learner?: LearningEngine
     ) {
+        this.learner = learner;
         this.connection = connection;
         this.currency = currency;
         this.config = config;
@@ -263,8 +272,15 @@ export class AutoPilotEngine {
     private _findAndEnter(stake: number) {
         if (!this.running || this.busy) return;
 
-        const candidate = pickBestGlobalCandidate(this.getSnapshots());
+        const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
+        const candidate = learner
+            ? learner.pickBest(candidatesFromSnapshots<TDigitSignal>(this.getSnapshots(), AUTOPILOT_CONTRACT_TYPES) as TCandidate[])
+            : pickBestGlobalCandidate(this.getSnapshots());
         if (!candidate) {
+            if (learner?.mode === 'edge_gate' && Date.now() - this.last_wait_emit > 30_000) {
+                this.last_wait_emit = Date.now();
+                this._emit({ phase: 'waiting', reason: 'no market/contract/time frame has a proven edge yet' });
+            }
             // Nothing meets the bar right now — try again shortly rather than
             // erroring out; live signals come and go every second.
             setTimeout(() => this._findAndEnter(stake), 1500);
@@ -273,7 +289,10 @@ export class AutoPilotEngine {
         this._enter(candidate, stake);
     }
 
-    private _enter(candidate: TCandidate, stake: number) {
+    private _enter(candidate: TCandidate, wanted_stake: number) {
+        const stake = this.learner ? this.learner.governStake(wanted_stake, this.config.stake, candidate) : wanted_stake;
+        if (this.step === 1) this.ladder_spent = 0;
+        this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
         this.busy = true;
         this.lastCandidate = candidate;
         this._emit({
@@ -314,6 +333,16 @@ export class AutoPilotEngine {
             this.connection.unsubscribe(sub_id);
             const profit = Number(contract.profit ?? 0);
             const won = profit > 0;
+            if (this.learner && this.learner.mode !== 'off') {
+                this.learner.record({
+                    symbol: candidate.symbol,
+                    contract_type: candidate.contract_type,
+                    duration: Number(parameters_duration(candidate, stake, this.currency)),
+                    stake: Number(contract.buy_price ?? stake),
+                    profit,
+                    payout: Number(contract.payout ?? 0),
+                });
+            }
             this.total_profit = Number((this.total_profit + profit).toFixed(2));
 
             this._emit({
@@ -347,8 +376,13 @@ export class AutoPilotEngine {
                 return;
             }
 
-            this.step += 1;
             const next_stake = Number((stake * this.config.martingale_multiplier).toFixed(2));
+            // Ladder budget: the whole recovery run may risk at most stop_loss in total.
+            if (this.ladder_spent + next_stake > Math.abs(this.config.stop_loss)) {
+                this.stop('recovery ladder would exceed the stop-loss budget');
+                return;
+            }
+            this.step += 1;
             const flip = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
             this._enter(flip, next_stake);
         });
