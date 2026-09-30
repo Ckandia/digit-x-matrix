@@ -13,6 +13,7 @@ import {
     TRiskLevel,
 } from './autoPilotEngine';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
+import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
 
 type TLadderRow = {
@@ -58,7 +59,10 @@ const AiAgentPanel = ({
 
     const [learnMode, setLearnMode] = useState<TLearningMode>('learn');
     const [learnInfo, setLearnInfo] = useState<ReturnType<LearningEngine['summary']> | null>(null);
+    const [labRows, setLabRows] = useState<TLabRow[]>([]);
+    const [limitNote, setLimitNote] = useState('');
     const learnerRef = useRef<LearningEngine | null>(null);
+    const capStopLossRef = useRef(0);
     const connectionRef = useRef<DerivClientConnection | null>(null);
     const engineRef = useRef<AutoPilotEngine | null>(null);
     const is_running = status === 'running';
@@ -112,7 +116,9 @@ const AiAgentPanel = ({
     // manual edits, since picking a preset is "start over from here."
     useEffect(() => {
         if (is_running || balance == null) return;
-        setConfig(buildConfigFromPreset(riskLevel, balance));
+        const preset_config = buildConfigFromPreset(riskLevel, balance);
+        capStopLossRef.current = preset_config.stop_loss; // the hard cap the AI may never exceed
+        setConfig(preset_config);
     }, [riskLevel, balance, is_running]);
 
     const updateField = (key: keyof TAutoPilotConfig, value: number) => {
@@ -330,6 +336,39 @@ const AiAgentPanel = ({
                             <option value='off'>{localize('Off (signals only)')}</option>
                         </select>
                     </label>
+                    <button
+                        type='button'
+                        className='ai-agent-panel__hint'
+                        disabled={!config}
+                        onClick={async () => {
+                            if (!config) return;
+                            if (!learnerRef.current) {
+                                const created = new LearningEngine(await makeProfileId(activeLoginid || 'account'), learnMode);
+                                await created.syncFromBackend();
+                                learnerRef.current = created;
+                                setLearnInfo(created.summary());
+                            }
+                            const learner = learnerRef.current;
+                            const s = suggestLimits(learner, capStopLossRef.current || config.stop_loss);
+                            setConfig({ ...config, stop_loss: s.stop_loss, take_profit: s.take_profit });
+                            setLimitNote(s.reason);
+                            setLabRows(
+                                labReport(learner, s.take_profit / config.stake, s.stop_loss / config.stake, config.martingale_multiplier, config.max_steps)
+                            );
+                        }}
+                    >
+                        {localize('AI: set take profit / stop loss and test')}
+                    </button>
+                    {limitNote && <span className='ai-agent-panel__hint'>{limitNote}</span>}
+                    {labRows.map(r => (
+                        <span key={r.label} className='ai-agent-panel__hint'>
+                            {r.label}: {r.n} trades, TP hit {(r.tp_hit * 100).toFixed(0)}% vs SL hit {(r.sl_hit * 100).toFixed(0)}%, avg{' '}
+                            {r.expectancy.toFixed(2)} stakes/session
+                            {r.verdict === 'illusion' && ' (more TP than SL hits, but still losing on average)'}
+                            {r.verdict === 'proven_edge' && ' (proven edge)'}
+                            {r.verdict === 'not_enough_data' && ' (need 30+ trades)'}
+                        </span>
+                    ))}
                     {learnInfo && learnInfo.total_trades > 0 && (
                         <span className='ai-agent-panel__hint'>
                             {localize('Learned from {{n}} trades across {{c}} market/contract/time-frame combinations; {{p}} show a proven edge.', {

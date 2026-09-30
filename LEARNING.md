@@ -14,3 +14,8 @@
 **Important:** synthetic indices are fair random processes. Learning measures whether anything beats break-even; it cannot create an edge, and martingale does not change the expected result, it only raises the size of a bad run. Test on a demo account. Not run against a live Deriv account or built/type-checked here (no network); run `npm run type-check` and `npm run build` before deploying.
 
 **Deploy:** push, redeploy Render (no new env vars) and Vercel. Check `/health` shows `persistence: true` for Neon.
+
+## Strategy Lab (added)
+- `strategyLab.ts`: the "AI: set take profit / stop loss and test" button. It sets limits from evidence (no proven edge -> SL at 1/4 of your cap and TP equal to SL; proven edge -> full cap with TP at 1.5x), never above the cap from your risk preset.
+- It then replays 3,000 simulated sessions per learned market/contract/time frame using your observed win rate and payout, and shows TP-hit vs SL-hit vs average result. "More TP than SL hits but still losing" is flagged, because tiny TP with big SL always looks good on hit rate.
+- Combine with "Only trade a proven edge" so live trading waits for statistical proof.

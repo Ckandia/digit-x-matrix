@@ -191,6 +191,24 @@ export class LearningEngine {
         return Number(Math.min(stake, Math.max(0.35, baseStake * 0.25)).toFixed(2));
     }
 
+    /** Read-only copy of per-combination results, for the Strategy Lab. */
+    cellsSnapshot() {
+        return Object.entries(this.cells).map(([key, c]) => {
+            const [symbol, contract_type, d] = key.split('|');
+            const n = n_of(c);
+            return {
+                symbol,
+                contract_type,
+                duration: Number(d),
+                n,
+                win_rate: n ? c.wins / n : 0,
+                payout_mult: n && c.payout_ratio_sum > 0 ? c.payout_ratio_sum / n : this.globalPayoutMult(),
+                breakeven: this.breakeven(c),
+                proven_edge: n >= MIN_PROVEN && this.lowerBound(c) > this.breakeven(c),
+            };
+        });
+    }
+
     summary() {
         const rows = Object.entries(this.cells).map(([key, c]) => {
             const n = n_of(c);
