@@ -198,6 +198,13 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
 const parameters_duration = (candidate: TCandidate, stake: number, currency: string) =>
     (buildTradeParameters(candidate, stake, currency) as { duration: number }).duration;
 
+export type TAutoPilotHooks = {
+    /** Every proposal_open_contract update, in Deriv's own shape (for the Transactions/Summary tabs). */
+    onContract?: (contract: Record<string, unknown>) => void;
+    /** Human-readable lines for the Journal tab. */
+    onLog?: (kind: 'info' | 'success' | 'error', message: string) => void;
+};
+
 export type TAutoPilotEvent = {
     ts: number;
     phase: 'started' | 'entering' | 'settled' | 'stopped' | 'error' | 'waiting';
@@ -227,6 +234,8 @@ export class AutoPilotEngine {
     private busy = false;
     private lastCandidate: TCandidate | null = null;
     private learner?: LearningEngine;
+    private hooks?: TAutoPilotHooks;
+    private refused = 0;
     private ladder_spent = 0;
     private last_wait_emit = 0;
 
@@ -236,9 +245,11 @@ export class AutoPilotEngine {
         config: TAutoPilotConfig,
         getSnapshots: () => TSnapshotMap,
         onEvent: (event: TAutoPilotEvent) => void,
-        learner?: LearningEngine
+        learner?: LearningEngine,
+        hooks?: TAutoPilotHooks
     ) {
         this.learner = learner;
+        this.hooks = hooks;
         this.connection = connection;
         this.currency = currency;
         this.config = config;
@@ -305,6 +316,12 @@ export class AutoPilotEngine {
         });
 
         const parameters = buildTradeParameters(candidate, stake, this.currency);
+        const tried_duration = Number((parameters as { duration?: number }).duration);
+        this.hooks?.onLog?.(
+            'info',
+            `Buying ${candidate.contract_type} on ${candidate.symbol}, ${tried_duration} tick(s), stake ${stake} ${this.currency}` +
+                (candidate.prediction !== undefined ? `, prediction ${candidate.prediction}` : '')
+        );
         this.connection
             .send({ buy: '1', price: stake, parameters })
             .then(res => {
@@ -314,7 +331,19 @@ export class AutoPilotEngine {
             })
             .catch(err => {
                 this.busy = false;
-                this._emit({ phase: 'error', symbol: candidate.symbol, error: err?.message || 'Failed to place trade' });
+                const raw = String(err?.message || 'Failed to place trade');
+                const detail = `${candidate.contract_type} on ${candidate.symbol} for ${tried_duration} tick(s): ${raw}`;
+                this.hooks?.onLog?.('error', detail);
+                // "Trading is not offered for this duration": skip this combination and pick another
+                // instead of stopping the whole session. Give up only if it keeps happening.
+                if (/not offered|duration/i.test(raw) && this.learner && this.refused < 8) {
+                    this.refused += 1;
+                    this.learner.markUnavailable(candidate.symbol, candidate.contract_type, tried_duration);
+                    this.hooks?.onLog?.('info', `Skipping ${candidate.symbol} ${candidate.contract_type} ${tried_duration}t for 6 hours and trying another.`);
+                    if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+                    return;
+                }
+                this._emit({ phase: 'error', symbol: candidate.symbol, error: detail });
                 this.stop('trade placement failed');
             });
     }
@@ -328,11 +357,14 @@ export class AutoPilotEngine {
                 return;
             }
             const contract = data?.proposal_open_contract;
+            if (contract) this.hooks?.onContract?.(contract);
             if (!contract?.is_sold) return;
+            this.refused = 0;
 
             this.connection.unsubscribe(sub_id);
             const profit = Number(contract.profit ?? 0);
             const won = profit > 0;
+            this.hooks?.onLog?.(won ? 'success' : 'error', `${won ? 'Won' : 'Lost'} ${Math.abs(profit).toFixed(2)} ${this.currency} on ${candidate.symbol} ${candidate.contract_type}`);
             if (this.learner && this.learner.mode !== 'off') {
                 this.learner.record({
                     symbol: candidate.symbol,

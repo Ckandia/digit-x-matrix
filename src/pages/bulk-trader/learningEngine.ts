@@ -54,6 +54,7 @@ export class LearningEngine {
     mode: TLearningMode;
     private cells: Record<string, TCell> = {};
     private profile: string;
+    private unavailable: Record<string, number> = {}; // combos Deriv refused, with timestamp
 
     constructor(profile: string, mode: TLearningMode = 'learn') {
         this.profile = profile;
@@ -87,6 +88,16 @@ export class LearningEngine {
         } catch {
             /* offline backend: keep working from the browser copy */
         }
+    }
+
+    /** Deriv refused this symbol/contract/duration: skip it for the next 6 hours. */
+    markUnavailable(symbol: string, type: string, duration: number) {
+        this.unavailable[cellKey(symbol, type, duration)] = Date.now();
+    }
+
+    private isUnavailable(symbol: string, type: string, duration: number) {
+        const at = this.unavailable[cellKey(symbol, type, duration)];
+        return !!at && Date.now() - at < 6 * 3600_000;
     }
 
     private save() {
@@ -151,7 +162,9 @@ export class LearningEngine {
 
     /** Picks the time frame for a contract by sampling each allowed duration's posterior. */
     chooseDuration(symbol: string, type: string, suggested?: number): number {
-        const options = allowedDurations(type);
+        const all = allowedDurations(type);
+        const options = all.filter(d => !this.isUnavailable(symbol, type, d));
+        if (options.length === 0) return -1; // every duration was refused recently
         if (this.mode === 'off' || options.length === 1) return suggested && options.includes(suggested) ? suggested : options[0];
         let best = options[0];
         let bestScore = -Infinity;
@@ -171,6 +184,7 @@ export class LearningEngine {
         let bestScore = -Infinity;
         for (const cand of candidates) {
             const duration = this.chooseDuration(cand.symbol, cand.contract_type, cand.duration_ticks);
+            if (duration < 0) continue;
             const c = this.cells[cellKey(cand.symbol, cand.contract_type, duration)];
             if (this.mode === 'edge_gate' && !(n_of(c) >= MIN_PROVEN && this.lowerBound(c) > this.breakeven(c))) continue;
             // Signal confidence is only a tiny tie-breaker: it is a deviation score, not a win probability.

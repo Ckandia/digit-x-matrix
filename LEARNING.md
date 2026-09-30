@@ -19,3 +19,11 @@
 - `strategyLab.ts`: the "AI: set take profit / stop loss and test" button. It sets limits from evidence (no proven edge -> SL at 1/4 of your cap and TP equal to SL; proven edge -> full cap with TP at 1.5x), never above the cap from your risk preset.
 - It then replays 3,000 simulated sessions per learned market/contract/time frame using your observed win rate and payout, and shows TP-hit vs SL-hit vs average result. "More TP than SL hits but still losing" is flagged, because tiny TP with big SL always looks good on hit rate.
 - Combine with "Only trade a proven edge" so live trading waits for statistical proof.
+
+## Results in Summary / Transactions / Journal (added)
+Every AI trade now appears in the left-hand run panel tabs: contracts in Transactions (grouped under an `ai-<time>` run), totals in Summary, and each buy/win/loss/stop/error line in Journal.
+
+## "Trading is not offered for this duration"
+The Journal error now names the contract, market and duration, plus Deriv's own wording. With learning on, that combination is skipped for 6 hours and another is tried instead of stopping. With learning Off it still stops, but tells you which one failed.
+If it keeps happening for a contract, fix the allowed list `allowedDurations()` in `learningEngine.ts` for that contract.
+Errors elsewhere: read the Journal first (red lines), then the browser console, then Render logs for backend calls (`/api/learning/*`).

@@ -12,6 +12,8 @@ import {
     TAutoPilotEvent,
     TRiskLevel,
 } from './autoPilotEngine';
+import { useStore } from '@/hooks/useStore';
+import { MessageTypes } from '@/external/bot-skeleton';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
@@ -40,6 +42,7 @@ const AiAgentPanel = ({
     onNeedsRiskAccept: () => void;
 }) => {
     const { snapshots } = useDigitSignals();
+    const { run_panel, transactions, summary_card, journal } = useStore();
     const { isAuthorized, authData, activeLoginid } = useApiBase();
     const snapshotsRef = useRef(snapshots);
     useEffect(() => {
@@ -156,6 +159,7 @@ const AiAgentPanel = ({
         } else if (event.phase === 'stopped') {
             setStatus('stopped');
             setStopReason(event.reason);
+            journal.pushMessage(`AI auto-pilot stopped: ${event.reason ?? 'no reason given'}`, MessageTypes.NOTIFY);
         } else if (event.phase === 'error') {
             setStatus('error');
             setError(event.error || 'Something went wrong.');
@@ -204,8 +208,23 @@ const AiAgentPanel = ({
                 config,
                 () => snapshotsRef.current,
                 handleEngineEvent,
-                learnerRef.current
+                learnerRef.current,
+                {
+                    onContract: contract => {
+                        const c = { ...contract, id: contract.id ?? contract.contract_id };
+                        transactions.onBotContractEvent(c as never);
+                        summary_card.onBotContractEvent(c as never);
+                        run_panel.onBotContractEvent(c as never);
+                    },
+                    onLog: (kind, message) =>
+                        journal.pushMessage(
+                            message,
+                            kind === 'error' ? MessageTypes.ERROR : kind === 'success' ? MessageTypes.SUCCESS : MessageTypes.NOTIFY
+                        ),
+                }
             );
+            run_panel.run_id = `ai-${Date.now()}`;
+            journal.pushMessage('AI auto-pilot started', MessageTypes.NOTIFY);
             engineRef.current = engine;
             engine.start();
         } catch (err) {
