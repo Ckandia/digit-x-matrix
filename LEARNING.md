@@ -35,3 +35,6 @@ Files: `tradeHistory.ts`, `AiAgentPanel.tsx`, `ai-agent-panel.scss`.
 ## Bulk Trader tab results (added)
 Same treatment as the AI Trader: a persistent "Bulk trade results" section (`TradeResults.tsx`) with every trade (time, market, contract, ticks, stake, P/L), win/loss/net totals and an "Activity and errors" log that names the failing contract/market/duration. It stays after a run stops and survives switching tabs (`tradeBus.ts`). Trades also feed the left panel Summary, Transactions and Journal.
 Previously an engine error (e.g. a refused duration) silently hid the table; it is now logged.
+
+## Run panel on the AI Trader tab (fix)
+The Summary / Transactions / Journal tray is hidden by `show_run_panel` in `src/components/run-panel/run-panel.tsx` on any tab not in its list. Bulk Trades had been added earlier; AI Trader was missing, so the tray only appeared on Bulk Trades. AI_TRADER is now in the list.
