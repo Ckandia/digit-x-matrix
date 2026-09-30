@@ -14,6 +14,7 @@ import {
 } from './autoPilotEngine';
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
+import { getDurationTicks, mergeTradeRow, TTradeRow } from './tradeHistory';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
@@ -62,6 +63,8 @@ const AiAgentPanel = ({
 
     const [learnMode, setLearnMode] = useState<TLearningMode>('learn');
     const [learnInfo, setLearnInfo] = useState<ReturnType<LearningEngine['summary']> | null>(null);
+    const [history, setHistory] = useState<TTradeRow[]>([]);
+    const [activity, setActivity] = useState<{ ts: number; kind: string; text: string }[]>([]);
     const [labRows, setLabRows] = useState<TLabRow[]>([]);
     const [limitNote, setLimitNote] = useState('');
     const learnerRef = useRef<LearningEngine | null>(null);
@@ -211,19 +214,23 @@ const AiAgentPanel = ({
                 learnerRef.current,
                 {
                     onContract: contract => {
+                        setHistory(prev => mergeTradeRow(prev, contract));
                         const c = { ...contract, id: contract.id ?? contract.contract_id };
                         transactions.onBotContractEvent(c as never);
                         summary_card.onBotContractEvent(c as never);
                         run_panel.onBotContractEvent(c as never);
                     },
-                    onLog: (kind, message) =>
+                    onLog: (kind, message) => {
+                        setActivity(prev => [{ ts: Date.now(), kind, text: message }, ...prev].slice(0, 40));
                         journal.pushMessage(
                             message,
                             kind === 'error' ? MessageTypes.ERROR : kind === 'success' ? MessageTypes.SUCCESS : MessageTypes.NOTIFY
-                        ),
+                        );
+                    },
                 }
             );
             run_panel.run_id = `ai-${Date.now()}`;
+            run_panel.toggleDrawer(true);
             journal.pushMessage('AI auto-pilot started', MessageTypes.NOTIFY);
             engineRef.current = engine;
             engine.start();
@@ -241,6 +248,8 @@ const AiAgentPanel = ({
             connectionRef.current?.close();
         };
     }, []);
+
+    const closed = history.filter(r => !r.open);
 
     const bar = useMemo(() => {
         if (!config) return null;
@@ -507,6 +516,72 @@ const AiAgentPanel = ({
                     <button type='button' className='ai-agent-panel__stop' onClick={handleStop}>
                         {localize('Stop now')}
                     </button>
+                </div>
+            )}
+
+            {(history.length > 0 || activity.length > 0) && (
+                <div className='ai-agent-panel__history'>
+                    <div className='ai-agent-panel__history-head'>
+                        <strong>{localize('AI trade results')}</strong>
+                        <span>
+                            {localize('{{n}} trades, {{w}} won, {{l}} lost, net {{p}}', {
+                                n: closed.length,
+                                w: closed.filter(r => r.profit > 0).length,
+                                l: closed.filter(r => r.profit <= 0).length,
+                                p: closed.reduce((a, r) => a + r.profit, 0).toFixed(2),
+                            })}
+                        </span>
+                        <button
+                            type='button'
+                            className='ai-agent-panel__retry'
+                            onClick={() => {
+                                setHistory([]);
+                                setActivity([]);
+                            }}
+                        >
+                            {localize('Clear')}
+                        </button>
+                    </div>
+                    {history.length > 0 && (
+                        <div className='ai-agent-panel__history-scroll'>
+                            <table className='ai-agent-panel__history-table'>
+                                <thead>
+                                    <tr>
+                                        <th>{localize('Time')}</th>
+                                        <th>{localize('Market')}</th>
+                                        <th>{localize('Contract')}</th>
+                                        <th>{localize('Ticks')}</th>
+                                        <th>{localize('Stake')}</th>
+                                        <th>{localize('P/L')}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {history.map(r => (
+                                        <tr key={r.id}>
+                                            <td>{new Date(r.ts * 1000).toLocaleTimeString()}</td>
+                                            <td>{r.symbol}</td>
+                                            <td>{r.type}</td>
+                                            <td>{getDurationTicks(r) ?? '-'}</td>
+                                            <td>{r.stake.toFixed(2)}</td>
+                                            <td className={r.open ? '' : r.profit > 0 ? 'is-win' : 'is-loss'}>
+                                                {r.open ? localize('open') : r.profit.toFixed(2)}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                    {activity.length > 0 && (
+                        <div className='ai-agent-panel__activity'>
+                            <strong>{localize('Activity and errors')}</strong>
+                            {activity.map((a, i) => (
+                                <div key={`${a.ts}-${i}`} className={`ai-agent-panel__activity-line is-${a.kind}`}>
+                                    {new Date(a.ts).toLocaleTimeString()} {a.text}
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
         </section>

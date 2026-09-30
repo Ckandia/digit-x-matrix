@@ -15,6 +15,10 @@ import { TDigitSignal } from './analysis-types';
 import { TRunStatus, TStrategyConfig } from './types';
 import { useDigitSignals } from './useDigitSignals';
 import { getActiveToken } from './tokenStorage';
+import { useStore } from '@/hooks/useStore';
+import { MessageTypes } from '@/external/bot-skeleton';
+import TradeResults from './TradeResults';
+import { tradeBus } from './tradeBus';
 import './bulk-trader.scss';
 
 const STORAGE_KEY = 'bulk_trader_run_id';
@@ -150,6 +154,28 @@ const BulkTrader = () => {
     const [showAdvanced, setShowAdvanced] = useState(false);
 
     const [runStatus, setRunStatus] = useState<TRunStatus | null>(null);
+    const { run_panel, transactions, summary_card, journal } = useStore();
+    const [feed, setFeed] = useState(tradeBus.snapshot());
+    useEffect(() => {
+        const off_feed = tradeBus.subscribe(() => setFeed(tradeBus.snapshot()));
+        // Also mirror every bulk trade into the left run panel (Summary / Transactions).
+        const off_contract = tradeBus.onContract(contract => {
+            const c = { ...contract, id: contract.id ?? contract.contract_id };
+            transactions.onBotContractEvent(c as never);
+            summary_card.onBotContractEvent(c as never);
+        });
+        const off_log = tradeBus.onLog((kind, text) =>
+            journal.pushMessage(
+                text,
+                kind === 'error' ? MessageTypes.ERROR : kind === 'success' ? MessageTypes.SUCCESS : MessageTypes.NOTIFY
+            )
+        );
+        return () => {
+            off_feed();
+            off_contract();
+            off_log();
+        };
+    }, [transactions, summary_card, journal]);
     const [runId, setRunId] = useState<string | null>(() => sessionStorage.getItem(STORAGE_KEY));
     const [hasAcceptedRisk, setHasAcceptedRisk] = useState(false);
     const [isStarting, setIsStarting] = useState(false);
@@ -326,6 +352,8 @@ const BulkTrader = () => {
         }
         setIsStarting(true);
         try {
+            run_panel.run_id = `bulk-${Date.now()}`;
+            run_panel.toggleDrawer(true);
             const response = await startBulkRun(token, strategies);
             sessionStorage.setItem(STORAGE_KEY, response.run_id);
             setRunId(response.run_id);
@@ -804,6 +832,7 @@ const BulkTrader = () => {
                 </div>
             )}
 
+            <TradeResults rows={feed.rows} activity={feed.activity} onClear={() => tradeBus.clear()} />
         </div>
     );
 };

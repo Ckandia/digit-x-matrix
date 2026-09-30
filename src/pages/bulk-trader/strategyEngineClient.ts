@@ -5,6 +5,7 @@
 // anything server-specific.
 import { v4 as uuidv4 } from 'uuid';
 import { DerivClientConnection } from './derivClient';
+import { tradeBus } from './tradeBus';
 import { TStrategyConfig, TStrategyStatus } from './types';
 
 const TRADE_COOLDOWN_MS = 1000;
@@ -78,6 +79,7 @@ export class StrategyEngine {
 
     start() {
         this.status = 'running';
+        tradeBus.log('info', `${this.label}: started on ${this.config.symbol}`);
         this._placeNextTrade();
     }
 
@@ -86,6 +88,7 @@ export class StrategyEngine {
         if (this.status === 'running') {
             this.status = 'stopped';
             this.stop_reason = reason;
+            tradeBus.log('info', `${this.label}: stopped (${reason})`);
         }
         if (this._active_poc_sub != null) {
             this.connection.unsubscribe(this._active_poc_sub);
@@ -127,6 +130,7 @@ export class StrategyEngine {
         if (stop_reason) {
             this.status = 'stopped';
             this.stop_reason = stop_reason;
+            tradeBus.log('info', `${this.label}: stopped (${stop_reason}), net ${this.total_profit.toFixed(2)}`);
             return;
         }
 
@@ -143,6 +147,12 @@ export class StrategyEngine {
             parameters.barrier = String(this.config.prediction);
         }
 
+        const tried = Number(parameters.duration);
+        tradeBus.log(
+            'info',
+            `${this.label}: buying ${this.current_contract_type} on ${this.config.symbol}, ${tried} tick(s), stake ${this.current_stake}` +
+                (NEEDS_BARRIER.has(this.current_contract_type) ? `, prediction ${this.config.prediction}` : '')
+        );
         try {
             const buy_response = await this.connection.send({
                 buy: '1',
@@ -155,6 +165,10 @@ export class StrategyEngine {
         } catch (err: any) {
             this.status = 'error';
             this.error = err?.message || 'Failed to place trade';
+            tradeBus.log(
+                'error',
+                `${this.label}: ${this.current_contract_type} on ${this.config.symbol} for ${tried} tick(s) failed: ${this.error}`
+            );
         }
     }
 
@@ -165,9 +179,11 @@ export class StrategyEngine {
                 if (err) {
                     this.status = 'error';
                     this.error = err.message;
+                    tradeBus.log('error', `${this.label}: lost track of contract ${contract_id}: ${err.message}`);
                     return;
                 }
                 const contract = data?.proposal_open_contract;
+                if (contract) tradeBus.contract(contract);
                 if (!contract?.is_sold) return; // still open — wait for settlement
 
                 if (this._active_poc_sub != null) this.connection.unsubscribe(this._active_poc_sub);
@@ -175,6 +191,7 @@ export class StrategyEngine {
 
                 const profit = Number(contract.profit ?? 0);
                 const won = profit > 0;
+                tradeBus.log(won ? 'success' : 'error', `${this.label}: ${won ? 'won' : 'lost'} ${Math.abs(profit).toFixed(2)} on ${this.config.symbol}`);
                 this.trades += 1;
                 this.total_profit += profit;
                 this.last_result = won ? 'win' : 'loss';

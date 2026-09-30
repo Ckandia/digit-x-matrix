@@ -326,3 +326,63 @@
         cursor: pointer;
     }
 }
+
+.ai-agent-panel__history {
+    margin-top: 16px;
+    padding: 12px;
+    border: 1px solid #2a2f3a;
+    border-radius: 8px;
+    font-size: 12px;
+
+    &-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+    }
+
+    &-scroll {
+        max-height: 260px;
+        overflow: auto;
+    }
+
+    &-table {
+        width: 100%;
+        border-collapse: collapse;
+
+        th,
+        td {
+            padding: 4px 8px;
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        .is-win {
+            color: #5dcaa5;
+        }
+
+        .is-loss {
+            color: #d85a30;
+        }
+    }
+}
+
+.ai-agent-panel__activity {
+    margin-top: 10px;
+    max-height: 160px;
+    overflow: auto;
+
+    &-line {
+        padding: 2px 0;
+        color: #8b93a1;
+
+        &.is-error {
+            color: #d85a30;
+        }
+
+        &.is-success {
+            color: #5dcaa5;
+        }
+    }
+}

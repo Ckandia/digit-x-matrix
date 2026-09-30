@@ -27,3 +27,11 @@ Every AI trade now appears in the left-hand run panel tabs: contracts in Transac
 The Journal error now names the contract, market and duration, plus Deriv's own wording. With learning on, that combination is skipped for 6 hours and another is tried instead of stopping. With learning Off it still stops, but tells you which one failed.
 If it keeps happening for a contract, fix the allowed list `allowedDurations()` in `learningEngine.ts` for that contract.
 Errors elsewhere: read the Journal first (red lines), then the browser console, then Render logs for backend calls (`/api/learning/*`).
+
+## AI Trader tab results (added)
+The AI Trader tab now has its own "AI trade results" section (stays after a run stops): every trade with time, market, contract, ticks, stake and P/L, running win/loss/net totals, and an "Activity and errors" log (errors in red, including which duration Deriv refused). "Clear" empties it. The same trades also go to the left run panel (Summary, Transactions, Journal).
+Files: `tradeHistory.ts`, `AiAgentPanel.tsx`, `ai-agent-panel.scss`.
+
+## Bulk Trader tab results (added)
+Same treatment as the AI Trader: a persistent "Bulk trade results" section (`TradeResults.tsx`) with every trade (time, market, contract, ticks, stake, P/L), win/loss/net totals and an "Activity and errors" log that names the failing contract/market/duration. It stays after a run stops and survives switching tabs (`tradeBus.ts`). Trades also feed the left panel Summary, Transactions and Journal.
+Previously an engine error (e.g. a refused duration) silently hid the table; it is now logged.
