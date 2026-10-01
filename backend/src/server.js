@@ -51,6 +51,18 @@ app.get('/health', (_req, res) => {
 // frontend should prefer the /ws/signals WebSocket for live updates and use
 // this only for a first paint before the socket opens, or if sockets are
 // blocked on the client's network.
+// What Deriv really allows per contract type for a symbol (tick-duration ranges), so the
+// frontend never has to guess. { rules: null } means Deriv did not answer: use the built-in table.
+app.get('/api/contracts/:symbol', async (req, res) => {
+    if (!/^[A-Za-z0-9_]{2,20}$/.test(req.params.symbol)) return res.status(400).json({ error: 'Invalid symbol' });
+    try {
+        res.json({ symbol: req.params.symbol, rules: await marketFeed.getContractRules(req.params.symbol) });
+    } catch (err) {
+        console.error('[contracts] failed:', err.message);
+        res.json({ symbol: req.params.symbol, rules: null });
+    }
+});
+
 app.get('/api/analysis/symbols', (_req, res) => {
     res.json({ symbols: DIGIT_SYMBOLS });
 });

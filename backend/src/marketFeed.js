@@ -195,6 +195,36 @@ export class MarketFeed {
         });
     }
 
+    /**
+     * What Deriv actually offers for a symbol: for every contract type, the tick-duration range
+     * (or null when it is not offered in ticks, e.g. only minutes/days). Cached for 6 hours.
+     * Resolves to null if Deriv does not answer, so callers can fall back to their own table.
+     */
+    getContractRules(symbol) {
+        const cached = this.contract_rules?.get(symbol);
+        if (cached && Date.now() - cached.at < 6 * 3600_000) return Promise.resolve(cached.rules);
+        if (!this.ws || this.ws.readyState !== 1) return Promise.resolve(null);
+        this.contract_rules ||= new Map();
+        this.rules_waiters ||= new Map();
+        return new Promise(resolve => {
+            const waiters = this.rules_waiters.get(symbol) || [];
+            waiters.push(resolve);
+            this.rules_waiters.set(symbol, waiters);
+            if (waiters.length === 1) {
+                this._send({ contracts_for: symbol, currency: 'USD' });
+                setTimeout(() => this._resolveRules(symbol, null), 6000);
+            }
+        });
+    }
+
+    _resolveRules(symbol, rules) {
+        const waiters = this.rules_waiters?.get(symbol);
+        if (!waiters) return;
+        this.rules_waiters.delete(symbol);
+        if (rules) this.contract_rules.set(symbol, { at: Date.now(), rules });
+        for (const resolve of waiters) resolve(rules);
+    }
+
     _send(request) {
         const req_id = this._nextReqId();
         this.ws.send(JSON.stringify({ ...request, req_id }));
@@ -224,6 +254,7 @@ export class MarketFeed {
         if (data.error) {
             // eslint-disable-next-line no-console
             console.error('[marketFeed] Deriv error:', data.error.message);
+            if (data.echo_req?.contracts_for) this._resolveRules(data.echo_req.contracts_for, null);
             return;
         }
 
@@ -249,6 +280,30 @@ export class MarketFeed {
                 this._rebuildWindow(symbol, prices);
             }
             this._pending_history.clear();
+            return;
+        }
+
+        if (data.msg_type === 'contracts_for' && data.echo_req?.contracts_for) {
+            const list = data.contracts_for?.available || data.contracts_for?.contracts || [];
+            const parse = v => {
+                const m = /^(\d+)([tsmhd])$/.exec(String(v ?? ''));
+                return m ? { value: Number(m[1]), unit: m[2] } : null;
+            };
+            const rules = {};
+            for (const c of list) {
+                const type = c.contract_type;
+                if (!type) continue;
+                const min = parse(c.min_contract_duration);
+                const max = parse(c.max_contract_duration);
+                if (min?.unit === 't') {
+                    const hi = max?.unit === 't' ? max.value : 10;
+                    const prev = rules[type];
+                    rules[type] = { min: prev ? Math.min(prev.min, min.value) : min.value, max: prev ? Math.max(prev.max, hi) : hi };
+                } else if (!(type in rules)) {
+                    rules[type] = null; // offered, but not in ticks
+                }
+            }
+            this._resolveRules(data.echo_req.contracts_for, Object.keys(rules).length ? rules : null);
             return;
         }
 

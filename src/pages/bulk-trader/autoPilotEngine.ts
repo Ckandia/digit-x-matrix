@@ -12,6 +12,7 @@
 import { DerivClientConnection } from './derivClient';
 import { TDigitSignal, TSnapshotMap } from './analysis-types';
 import { candidatesFromSnapshots, LearningEngine } from './learningEngine';
+import { clampTicks, isTickTradable } from './contractRules';
 
 export type TRiskLevel = 'conservative' | 'moderate' | 'aggressive';
 
@@ -106,6 +107,7 @@ export const pickBestGlobalCandidate = (snapshots: TSnapshotMap): TCandidate | n
         for (const signal of snapshot.signals) {
             if (!AUTOPILOT_CONTRACT_TYPES.includes(signal.contract_type as (typeof AUTOPILOT_CONTRACT_TYPES)[number]))
                 continue;
+            if (!isTickTradable(symbol, signal.contract_type)) continue; // e.g. Ends Between/Outside has no tick durations
             if (!best || signal.confidence > best.confidence) best = { symbol, ...signal };
         }
     }
@@ -151,12 +153,8 @@ const NEEDS_SINGLE_BARRIER = new Set(['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'D
 /** Deriv rejects durations outside a contract's allowed tick range, so clamp
  *  whatever the analysis suggests: most non-digit contracts need at least 5
  *  ticks, Only Ups/Downs allows 2-5, digits allow 1-10. */
-const clampDuration = (contract_type: string, ticks: number | undefined): number => {
-    const wanted = Number(ticks) || 1;
-    if (contract_type === 'RUNHIGH' || contract_type === 'RUNLOW') return Math.min(5, Math.max(2, wanted));
-    if (contract_type === 'DIGITEVEN' || contract_type === 'DIGITODD') return Math.min(10, Math.max(1, wanted));
-    return Math.min(10, Math.max(5, wanted));
-};
+const clampDuration = (symbol: string, contract_type: string, ticks: number | undefined): number =>
+    clampTicks(symbol, contract_type, ticks);
 
 /** Builds Deriv `buy` parameters for any of the families this engine trades. */
 export const buildTradeParameters = (candidate: TCandidate, stake: number, currency: string) => {
@@ -177,7 +175,7 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
         const offset = Math.abs(Number(candidate.prediction) || 0);
         return {
             ...base,
-            duration: clampDuration(candidate.contract_type, candidate.duration_ticks),
+            duration: clampDuration(candidate.symbol, candidate.contract_type, candidate.duration_ticks),
             duration_unit: 't',
             barrier: `+${offset}`,
             barrier2: `-${offset}`,
@@ -186,7 +184,7 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
 
     const parameters: Record<string, unknown> = {
         ...base,
-        duration: clampDuration(candidate.contract_type, candidate.duration_ticks),
+        duration: clampDuration(candidate.symbol, candidate.contract_type, candidate.duration_ticks),
         duration_unit: 't',
     };
     if (NEEDS_SINGLE_BARRIER.has(candidate.contract_type)) {
@@ -368,7 +366,7 @@ export class AutoPilotEngine {
             if (this.learner && this.learner.mode !== 'off') {
                 this.learner.record({
                     symbol: candidate.symbol,
-                    contract_type: candidate.contract_type,
+                    contract_type: candidate.contract_type + ((candidate as { bucket?: string }).bucket ? `@${(candidate as { bucket?: string }).bucket}` : ''),
                     duration: Number(parameters_duration(candidate, stake, this.currency)),
                     stake: Number(contract.buy_price ?? stake),
                     profit,

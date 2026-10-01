@@ -16,6 +16,7 @@ import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow, TTradeRow } from './tradeHistory';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
+import { loadLiveRules } from './contractRules';
 import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
 
@@ -197,6 +198,7 @@ const AiAgentPanel = ({
                 connectionRef.current = connection;
             }
 
+            await loadLiveRules(Object.keys(snapshotsRef.current));
             if (!learnerRef.current) {
                 const learner = new LearningEngine(await makeProfileId(activeLoginid || 'account'), learnMode);
                 await learner.syncFromBackend();

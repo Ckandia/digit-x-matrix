@@ -10,7 +10,7 @@ import { getPool } from './db.js';
 const memory = new Map(); // profile -> Map(cellKey -> cell)
 const PROFILE_RE = /^[A-Za-z0-9_-]{8,80}$/;
 const SYMBOL_RE = /^[A-Za-z0-9_]{2,20}$/;
-const TYPE_RE = /^[A-Z]{3,16}$/;
+const TYPE_RE = /^[A-Z]{3,16}(@[a-z]{3,8})?$/; // optional @bucket suffix, e.g. DIGITEVEN@strong
 let tableReady = false;
 
 export const isValidProfile = p => PROFILE_RE.test(String(p || ''));

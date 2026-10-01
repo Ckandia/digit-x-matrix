@@ -38,3 +38,9 @@ Previously an engine error (e.g. a refused duration) silently hid the table; it 
 
 ## Run panel on the AI Trader tab (fix)
 The Summary / Transactions / Journal tray is hidden by `show_run_panel` in `src/components/run-panel/run-panel.tsx` on any tab not in its list. Bulk Trades had been added earlier; AI Trader was missing, so the tray only appeared on Bulk Trades. AI_TRADER is now in the list.
+
+## Contract rules + percentage-guided learning (added)
+- `contractRules.ts` documents how each contract works in ticks and holds a built-in duration table (Ends Between/Outside = not offered in ticks, so the AI no longer picks it; Only Ups/Downs 2-5; Asians 5-10; digits 1-10; High/Low Tick fixed 5).
+- The backend now asks Deriv what is really offered per market (`GET /api/contracts/:symbol`, cached 6h) and the AI uses that live answer over the built-in table. If Deriv doesn't answer, the built-in table is used, and any refused duration is still skipped for 6h.
+- The backend collects ticks itself (public feed, 500-tick window) and now also reports the last 25/50/100 ticks (even/odd/over/under %). For digit contracts the AI records results per skew bucket of the last 50 ticks (min <50%, flat 50-60, lean 60-70, strong 70+; stored as e.g. DIGITEVEN@strong), so it finds out from real results whether following or fading a skew pays. The percentages describe what happened; they do not predict the next digit, and the learner will say so if they don't pay.
+- Redeploy the backend (Render) as well as the frontend. Still to do: Only Ups/Downs both-side option, auto-flip as a selectable recovery mode, small-balance stake handling, cooldown / daily-limit / journal CSV.
