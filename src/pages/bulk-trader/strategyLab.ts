@@ -79,7 +79,7 @@ export const labReport = (learner: LearningEngine, tp_units: number, sl_units: n
                       : sim.tp_hit > sim.sl_hit && sim.expectancy <= 0
                         ? 'illusion'
                         : 'negative';
-            return { label: `${c.symbol} ${c.contract_type} ${c.duration}t`, n: c.n, win_rate: c.win_rate, ...sim, verdict };
+            return { label: `${c.contract_type} ${c.duration}t (all markets)`, n: c.n, win_rate: c.win_rate, ...sim, verdict };
         });
 
 /** AI-chosen limits, always at or below the user's cap (in currency). */
@@ -95,6 +95,6 @@ export const suggestLimits = (learner: LearningEngine, cap_stop_loss: number) =>
     return {
         stop_loss,
         take_profit,
-        reason: `Proven edge on ${best.symbol} ${best.contract_type} ${best.duration}t: full cap, 1.5x reward.`,
+        reason: `Proven edge on ${best.contract_type} ${best.duration}t: full cap, 1.5x reward.`,
     };
 };

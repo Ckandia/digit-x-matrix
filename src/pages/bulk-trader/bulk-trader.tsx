@@ -18,6 +18,7 @@ import { getActiveToken } from './tokenStorage';
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import TradeResults from './TradeResults';
+import { keepScreenAwake } from './wakeLock';
 import { tradeBus } from './tradeBus';
 import './bulk-trader.scss';
 
@@ -185,6 +186,10 @@ const BulkTrader = () => {
 
     const backend_configured = Boolean(process.env.NEXT_PUBLIC_BULK_TRADER_API_URL);
     const is_running = Boolean(runStatus?.is_active);
+    useEffect(() => {
+        keepScreenAwake('bulk', is_running);
+        return () => keepScreenAwake('bulk', false);
+    }, [is_running]);
 
     // Reasons the start buttons are currently disabled, in priority order —
     // shown to the user instead of leaving them to guess at a plain

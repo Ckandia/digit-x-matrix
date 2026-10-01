@@ -29,7 +29,30 @@ const rest_base = (process.env.NEXT_PUBLIC_BULK_TRADER_API_URL || '').trim().rep
 
 
 const randn = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
-const cellKey = (symbol: string, type: string, duration: number) => `${symbol}|${type}|${duration}`;
+// Every synthetic index is an independent random process, so results are POOLED across markets
+// ("ALL"): splitting them per market spread a few hundred trades over 150+ cells, none of which
+// could ever reach the 30 trades needed to prove or disprove an edge.
+const POOL = 'ALL';
+const cellKey = (_symbol: string, type: string, duration: number) => `${POOL}|${type}|${duration}`;
+const symKey = (symbol: string, type: string, duration: number) => `${symbol}|${type}|${duration}`;
+const emptyCell = (): TCell => ({ wins: 0, losses: 0, staked: 0, profit: 0, payout_ratio_sum: 0 });
+const addInto = (a: TCell, b: TCell) => {
+    a.wins += b.wins;
+    a.losses += b.losses;
+    a.staked += b.staked;
+    a.profit += b.profit;
+    a.payout_ratio_sum += b.payout_ratio_sum;
+};
+/** Folds old per-market cells (key `SYMBOL|type|duration`) into the pooled `ALL|type|duration` cells. */
+const poolCells = (cells: Record<string, TCell>): Record<string, TCell> => {
+    const out: Record<string, TCell> = {};
+    for (const [key, c] of Object.entries(cells)) {
+        const [, type, duration] = key.split('|');
+        const pk = `${POOL}|${type}|${duration}`;
+        addInto((out[pk] ||= emptyCell()), c);
+    }
+    return out;
+};
 const n_of = (c?: TCell) => (c ? c.wins + c.losses : 0);
 
 export const makeProfileId = async (loginid: string): Promise<string> => {
@@ -59,6 +82,7 @@ export class LearningEngine {
         } catch {
             this.cells = {};
         }
+        this.cells = poolCells(this.cells);
     }
 
     /** Merges what the backend remembers (Neon) with the browser's copy: whichever has more trades wins per cell. */
@@ -68,16 +92,19 @@ export class LearningEngine {
             const res = await fetch(`${rest_base}/api/learning/stats/${this.profile}`);
             if (!res.ok) return;
             const { data } = await res.json();
+            const remote: Record<string, TCell> = {};
             for (const r of data || []) {
                 const key = cellKey(r.symbol, r.contract_type, r.duration);
-                const remote: TCell = {
+                addInto((remote[key] ||= emptyCell()), {
                     wins: r.wins,
                     losses: r.losses,
                     staked: r.staked,
                     profit: r.profit,
                     payout_ratio_sum: r.payout_ratio_sum,
-                };
-                if (n_of(remote) > n_of(this.cells[key])) this.cells[key] = remote;
+                });
+            }
+            for (const [key, cell] of Object.entries(remote)) {
+                if (n_of(cell) > n_of(this.cells[key])) this.cells[key] = cell;
             }
             this.save();
         } catch {
@@ -87,11 +114,11 @@ export class LearningEngine {
 
     /** Deriv refused this symbol/contract/duration: skip it for the next 6 hours. */
     markUnavailable(symbol: string, type: string, duration: number) {
-        this.unavailable[cellKey(symbol, type, duration)] = Date.now();
+        this.unavailable[symKey(symbol, type, duration)] = Date.now();
     }
 
     private isUnavailable(symbol: string, type: string, duration: number) {
-        const at = this.unavailable[cellKey(symbol, type, duration)];
+        const at = this.unavailable[symKey(symbol, type, duration)];
         return !!at && Date.now() - at < 6 * 3600_000;
     }
 
@@ -117,7 +144,7 @@ export class LearningEngine {
         fetch(`${rest_base}/api/learning/outcome`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profile: this.profile, ...o, payout: o.payout ?? 0 }),
+            body: JSON.stringify({ profile: this.profile, ...o, symbol: POOL, payout: o.payout ?? 0 }),
         }).catch(() => undefined);
     }
 

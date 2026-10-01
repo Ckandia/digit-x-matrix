@@ -16,6 +16,7 @@ import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow, TTradeRow } from './tradeHistory';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
+import { keepScreenAwake } from './wakeLock';
 import { loadLiveRules } from './contractRules';
 import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
@@ -135,6 +136,7 @@ const AiAgentPanel = ({
     const handleEngineEvent = (event: TAutoPilotEvent) => {
         if (event.phase === 'started') {
             setStatus('running');
+            keepScreenAwake('ai', true);
             setLadder([]);
             setTotalProfit(0);
         } else if (event.phase === 'entering' && event.symbol && event.contract_type) {
@@ -162,10 +164,12 @@ const AiAgentPanel = ({
             if (learnerRef.current) setLearnInfo(learnerRef.current.summary());
         } else if (event.phase === 'stopped') {
             setStatus('stopped');
+            keepScreenAwake('ai', false);
             setStopReason(event.reason);
             journal.pushMessage(`AI auto-pilot stopped: ${event.reason ?? 'no reason given'}`, MessageTypes.NOTIFY);
         } else if (event.phase === 'error') {
             setStatus('error');
+            keepScreenAwake('ai', false);
             setError(event.error || 'Something went wrong.');
         }
     };

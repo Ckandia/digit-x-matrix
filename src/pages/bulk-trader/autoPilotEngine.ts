@@ -254,6 +254,9 @@ export class AutoPilotEngine {
         this.getSnapshots = getSnapshots;
         this.onEvent = onEvent;
         this.connection.onFatalError = () => this._emit({ phase: 'error', error: 'Lost connection to Deriv' });
+        this.connection.onReconnecting = () => this.hooks?.onLog?.('info', 'Connection to Deriv dropped; reconnecting...');
+        this.connection.onReconnect = () =>
+            this.hooks?.onLog?.('success', 'Reconnected to Deriv. Any open contract is being re-checked.');
     }
 
     start() {
@@ -330,6 +333,7 @@ export class AutoPilotEngine {
             .catch(err => {
                 this.busy = false;
                 const raw = String(err?.message || 'Failed to place trade');
+                if (/dropped/i.test(raw)) this.hooks?.onLog?.('error', 'The connection dropped while buying. Check Transactions: that contract may still be open.');
                 const detail = `${candidate.contract_type} on ${candidate.symbol} for ${tried_duration} tick(s): ${raw}`;
                 this.hooks?.onLog?.('error', detail);
                 // "Trading is not offered for this duration": skip this combination and pick another

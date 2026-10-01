@@ -44,3 +44,10 @@ The Summary / Transactions / Journal tray is hidden by `show_run_panel` in `src/
 - The backend now asks Deriv what is really offered per market (`GET /api/contracts/:symbol`, cached 6h) and the AI uses that live answer over the built-in table. If Deriv doesn't answer, the built-in table is used, and any refused duration is still skipped for 6h.
 - The backend collects ticks itself (public feed, 500-tick window) and now also reports the last 25/50/100 ticks (even/odd/over/under %). For digit contracts the AI records results per skew bucket of the last 50 ticks (min <50%, flat 50-60, lean 60-70, strong 70+; stored as e.g. DIGITEVEN@strong), so it finds out from real results whether following or fading a skew pays. The percentages describe what happened; they do not predict the next digit, and the learner will say so if they don't pay.
 - Redeploy the backend (Render) as well as the frontend. Still to do: Only Ups/Downs both-side option, auto-flip as a selectable recovery mode, small-balance stake handling, cooldown / daily-limit / journal CSV.
+
+## Connection, phones and pooling (added)
+- `derivClient.ts`: 25s keep-alive ping, automatic reconnect (5 tries, fresh login URL each time) and re-subscription of live feeds/open contracts. A contract that settled during a drop is reported again as sold. If a buy was in flight when the socket dropped, the Journal says to check Transactions. "Lost connection" now shows only if all reconnects fail.
+- `wakeLock.ts`: keeps the phone screen on while an AI or bulk run is active (Android Chrome, iOS Safari 16.4+). Strategies run inside the browser tab, so a locked phone can still pause them: keep the tab open and in front.
+- Add to home screen: `public/manifest.webmanifest`, icons in `public/assets/`, tags in `index.html`. Android Chrome: menu > Install app. iOS Safari: Share > Add to Home Screen.
+- Learning is pooled across markets (`ALL|contract|duration`), old per-market data is merged automatically.
+- Not tested on real phones or against live Deriv; run `npm run type-check` and `npm run build`.

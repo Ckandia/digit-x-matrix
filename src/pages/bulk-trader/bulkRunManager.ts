@@ -4,6 +4,7 @@
 // one DerivClientConnection, opened with the token the user pasted into the
 // header, shared by every StrategyEngine in the run. Nothing here is sent
 // over the network to anything except Deriv itself.
+import { tradeBus } from './tradeBus';
 import { v4 as uuidv4 } from 'uuid';
 import { DerivClientConnection } from './derivClient';
 import { StrategyEngine } from './strategyEngineClient';
@@ -66,7 +67,10 @@ export const startBulkRun = async (
         engines.set(engine.id, engine);
     }
 
+    connection.onReconnecting = () => tradeBus.log('info', 'Connection to Deriv dropped; reconnecting...');
+    connection.onReconnect = () => tradeBus.log('success', 'Reconnected to Deriv. Open contracts are being re-checked.');
     connection.onFatalError = () => {
+        tradeBus.log('error', 'Lost connection to Deriv and could not reconnect.');
         for (const engine of engines.values()) {
             if (engine.status === 'running') {
                 engine.status = 'error';
