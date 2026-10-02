@@ -57,3 +57,8 @@ The Summary / Transactions / Journal tray is hidden by `show_run_panel` in `src/
 - Both Sides starts both bursts in the same instant. Note: Even + Odd (or Rise + Fall) on the same tick always has exactly one winner, so the pair loses the house margin each time.
 - AI Trader "After a loss": Martingale (same side, bigger stake, default), Auto-flip (opposite side, bigger stake) or Flat (no recovery). Auto-flip is no longer hard-coded.
 - Still to do: small-balance handling, cooldown / daily limit / journal CSV, Only Ups/Downs pair option.
+
+## Martingale fix + fixed time frame (added)
+- Bug: the small-stake exploration cap in Learn mode (25% of base stake until 20 results) was applied to every trade, including recovery steps, so the stake never grew and the martingale looked broken. It now applies only to the first trade of a ladder, and the Journal says when it is used.
+- Recovery trades always stay on the same market (and, in Martingale mode, the same contract) until the ladder ends; the AI only picks a new market after a win or when the ladder stops.
+- New "Time frame" selector in the AI Trader: Auto (the AI explores 1-10 ticks, which is why durations vary from trade to trade) or a fixed 1/2/3/5/10 ticks, clamped to what each contract allows.

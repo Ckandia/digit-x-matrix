@@ -70,6 +70,7 @@ export const makeProfileId = async (loginid: string): Promise<string> => {
 
 export class LearningEngine {
     mode: TLearningMode;
+    fixed_duration?: number; // set from the panel: scores only this time frame instead of exploring
     private cells: Record<string, TCell> = {};
     private profile: string;
     private unavailable: Record<string, number> = {}; // combos Deriv refused, with timestamp
@@ -185,7 +186,11 @@ export class LearningEngine {
     /** Picks the time frame for a contract by sampling each allowed duration's posterior. */
     chooseDuration(symbol: string, type: string, suggested?: number, bucket?: string): number {
         const all = tickDurations(symbol, type);
-        const options = all.filter(d => !this.isUnavailable(symbol, type, d));
+        let options = all.filter(d => !this.isUnavailable(symbol, type, d));
+        if (this.fixed_duration && options.length) {
+            const f = this.fixed_duration;
+            options = [options.reduce((a, b) => (Math.abs(b - f) < Math.abs(a - f) ? b : a))];
+        }
         if (options.length === 0) return -1; // every duration was refused recently
         if (this.mode === 'off' || options.length === 1) return suggested && options.includes(suggested) ? suggested : options[0];
         let best = options[0];

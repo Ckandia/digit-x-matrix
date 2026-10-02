@@ -35,6 +35,8 @@ export type TRecoveryMode = 'martingale' | 'flip' | 'flat';
 
 export type TAutoPilotConfig = {
     recovery_mode?: TRecoveryMode;
+    /** Fixed tick duration for every trade (clamped to what each contract allows); undefined = the AI chooses. */
+    fixed_duration?: number;
     stake: number;
     martingale_multiplier: number;
     max_steps: number;
@@ -306,8 +308,18 @@ export class AutoPilotEngine {
         this._enter(candidate, stake);
     }
 
-    private _enter(candidate: TCandidate, wanted_stake: number) {
-        const stake = this.learner ? this.learner.governStake(wanted_stake, this.config.stake, candidate) : wanted_stake;
+    private _enter(candidate_in: TCandidate, wanted_stake: number) {
+        // A fixed time frame set in the panel overrides whatever the AI would have picked.
+        const candidate: TCandidate = this.config.fixed_duration
+            ? { ...candidate_in, duration_ticks: this.config.fixed_duration }
+            : candidate_in;
+        // The small-stake exploration cap applies ONLY to the first trade of a ladder. It used to
+        // clamp recovery steps too, which silently turned the martingale into a flat stake.
+        const governed = this.learner && this.step === 1 ? this.learner.governStake(wanted_stake, this.config.stake, candidate) : wanted_stake;
+        const stake = governed;
+        if (governed < wanted_stake) {
+            this.hooks?.onLog?.('info', `Exploring ${candidate.contract_type} ${candidate.duration_ticks ?? ''}t: first stake capped at ${governed} (25% of base) until 20 results are in.`);
+        }
         if (this.step === 1) this.ladder_spent = 0;
         this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
         this.busy = true;

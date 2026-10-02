@@ -210,6 +210,7 @@ const AiAgentPanel = ({
                 learnerRef.current = learner;
             }
             learnerRef.current.mode = learnMode;
+            learnerRef.current.fixed_duration = config?.fixed_duration;
             setLearnInfo(learnerRef.current.summary());
 
             const engine = new AutoPilotEngine(
@@ -373,6 +374,21 @@ const AiAgentPanel = ({
                             <option value='martingale'>{localize('Martingale: same side, bigger stake')}</option>
                             <option value='flip'>{localize('Auto-flip: opposite side, bigger stake')}</option>
                             <option value='flat'>{localize('Flat: same stake, no recovery')}</option>
+                        </select>
+                    </label>
+                    <label className='ai-agent-panel__hint'>
+                        {localize('Time frame')}{' '}
+                        <select
+                            value={config?.fixed_duration ?? 0}
+                            disabled={!config}
+                            onChange={e => config && setConfig({ ...config, fixed_duration: Number(e.target.value) || undefined })}
+                        >
+                            <option value={0}>{localize('Auto (AI explores 1-10 ticks)')}</option>
+                            {[1, 2, 3, 5, 10].map(t => (
+                                <option key={t} value={t}>
+                                    {localize('{{t}} tick(s) where the contract allows', { t })}
+                                </option>
+                            ))}
                         </select>
                     </label>
                     <label className='ai-agent-panel__hint'>
