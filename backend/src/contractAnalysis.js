@@ -1,19 +1,20 @@
-// Pure, stateless statistics helpers over a rolling window of raw prices for one
-// symbol — the counterpart to digitAnalysis.js, but for the contract families
-// that depend on price movement rather than last-digit frequency: Rise/Fall,
-// Only Ups/Only Downs, Touch/No Touch, Ends Between/Ends Outside, Asians,
-// High Tick/Low Tick, and Reset Call/Reset Put.
+// Pure, stateless statistics helpers over a rolling window of raw prices for one symbol:
+// the counterpart to digitAnalysis.js for the contracts that depend on price movement.
 //
-// Every signal here is, like digitAnalysis.js's, a *statistical deviation or
-// momentum score* — not a validated trading edge or a win-probability
-// estimate. Deriv's synthetic indices are designed as fair random-walk
-// processes; a strong recent drift or streak is a real, measurable thing
-// about the last N ticks, but it does not change the odds of the next one.
-// Two families here (Touch/No Touch, Ends Between/Ends Outside) also need a
-// barrier price, computed from recent volatility — this is the part most
-// likely to need adjustment once tested against Deriv's live barrier
-// validation, since the exact accepted format can be pickier than the
-// general shape used here.
+// ONE-TICK ANALYSIS. The auto-pilot buys every contract for 1 tick (barrier contracts excepted),
+// so the question asked here is "what does the NEXT tick do?", not "where is the drift over the
+// last N ticks?". Families kept:
+//   - Rise/Fall (CALL/PUT): next-tick direction from the tick-to-tick transition table.
+//   - Touch/No Touch and Ends Between/Outside: barrier contracts, the only ones that run longer.
+// Dropped because Deriv does not sell them at 1 tick (it rejects the buy): Asians (min 5 ticks),
+// Only Ups/Downs (min 2), High/Low Tick (fixed 5), Reset Call/Put (min 5).
+//
+// Every signal is a statistical deviation score, NOT a validated edge or a win probability.
+// Deriv's synthetic indices are designed as fair random processes; the numbers describe what the
+// last few hundred ticks did, and the learner (frontend) is what checks whether acting on them
+// actually paid. Barrier distances are the part most likely to need adjusting against Deriv's
+// live validation; the engine now asks Deriv for a price first, so a bad barrier is skipped
+// instead of bought.
 
 export const PRICE_WINDOW_SIZE = 300;
 export const MIN_SAMPLE_FOR_CONTRACT_SIGNAL = 60;
@@ -47,45 +48,31 @@ const stddev = arr => {
     return Math.sqrt(variance);
 };
 
-/** Net drift over the last `n` ticks, in units of the recent return stddev. */
-const driftZScore = (prices, n, sigma) => {
-    if (prices.length < n + 1 || sigma <= 0) return 0;
-    const drift = prices[prices.length - 1] - prices[prices.length - 1 - n];
-    return drift / (sigma * Math.sqrt(n));
-};
+const TOUCH_TICKS = 5; // shortest duration Deriv offers for Touch/No Touch and Ends Between/Outside
+const MIN_TRANSITIONS = 40; // minimum observations behind the "what follows an up/down tick" row
 
-/** Trailing run of consecutive same-direction ticks (up or down), and its sign. */
-const trailingRun = prices => {
-    if (prices.length < 2) return { length: 0, direction: 0 };
-    let length = 0;
-    let direction = 0;
-    for (let i = prices.length - 1; i > 0; i--) {
-        const d = Math.sign(prices[i] - prices[i - 1]);
-        if (d === 0) break;
-        if (direction === 0) direction = d;
-        if (d !== direction) break;
-        length += 1;
+/**
+ * For every tick that followed an up tick (and every tick that followed a down tick): did the next
+ * tick go up, down, or stay flat? A flat tick matters: it loses BOTH Rise and Fall.
+ */
+const transitionTable = prices => {
+    const row = () => ({ n: 0, up: 0, down: 0, flat: 0 });
+    const table = { up: row(), down: row() };
+    for (let i = 2; i < prices.length; i++) {
+        const prev = Math.sign(prices[i - 1] - prices[i - 2]);
+        if (prev === 0) continue;
+        const next = Math.sign(prices[i] - prices[i - 1]);
+        const r = prev > 0 ? table.up : table.down;
+        r.n += 1;
+        if (next > 0) r.up += 1;
+        else if (next < 0) r.down += 1;
+        else r.flat += 1;
     }
-    return { length, direction };
-};
-
-const DURATION_CANDIDATES = [2, 3, 5, 10]; // the AI trades from 2 ticks up
-
-/** Picks whichever lookback (from DURATION_CANDIDATES) has the strongest drift
- *  z-score, on the assumption that a lookback where momentum was most
- *  pronounced is the most informative window size to also use forward. */
-const bestMomentumWindow = (prices, sigma) => {
-    let best = { n: DURATION_CANDIDATES[0], z: 0 };
-    for (const n of DURATION_CANDIDATES) {
-        const z = driftZScore(prices, n, sigma);
-        if (Math.abs(z) > Math.abs(best.z)) best = { n, z };
-    }
-    return best;
+    return table;
 };
 
 /**
- * Turns a price window into a ranked list of candidate signals across the 8
- * non-digit families the auto-pilot trades. Returns [] until
+ * Turns a price window into a ranked list of candidate signals. Returns [] until
  * MIN_SAMPLE_FOR_CONTRACT_SIGNAL prices have been collected.
  */
 export function computeContractSignals(window, symbol, decimals = 2) {
@@ -93,106 +80,51 @@ export function computeContractSignals(window, symbol, decimals = 2) {
     if (prices.length < MIN_SAMPLE_FOR_CONTRACT_SIGNAL) return [];
 
     const rets = returns(prices.slice(-100));
-    const sigma = stddev(rets) || prices[prices.length - 1] * 0.0001; // avoid div-by-zero on a flat window
     const signals = [];
 
-    // --- Rise/Fall (CALL/PUT) — direction of the strongest recent drift ---
-    const momentum = bestMomentumWindow(prices, sigma);
-    const momentum_conf = Math.round(clamp(Math.abs(momentum.z) * 18, 0, 100));
-    if (momentum_conf >= 15) {
-        const rising = momentum.z > 0;
-        signals.push({
-            family: 'rise_fall',
-            contract_type: rising ? 'CALL' : 'PUT',
-            duration_ticks: momentum.n,
-            label: rising ? 'Rise' : 'Fall',
-            confidence: momentum_conf,
-            basis: `Net drift over the last ${momentum.n} ticks is ${round2(Math.abs(momentum.z))}\u03c3 ${rising ? 'up' : 'down'} on ${symbol}.`,
-        });
-
-        // --- Reset Call/Reset Put — same directional read, different contract ---
-        signals.push({
-            family: 'reset',
-            contract_type: rising ? 'RESETCALL' : 'RESETPUT',
-            duration_ticks: momentum.n,
-            label: rising ? 'Reset call' : 'Reset put',
-            confidence: Math.round(momentum_conf * 0.9), // barrier reset gives some cushion — slightly lower stated confidence
-            basis: `Same ${round2(Math.abs(momentum.z))}\u03c3 drift as Rise/Fall, with a mid-contract barrier reset.`,
-        });
-
-        // --- Asian Up/Down — payout follows the average vs entry, same directional bias ---
-        signals.push({
-            family: 'asians',
-            contract_type: rising ? 'ASIANU' : 'ASIAND',
-            duration_ticks: clamp(momentum.n, 5, 10),
-            label: rising ? 'Asian up' : 'Asian down',
-            confidence: Math.round(momentum_conf * 0.85),
-            basis: `Recent drift suggests the tick average is more likely to land ${rising ? 'above' : 'below'} entry.`,
-        });
-    }
-
-    // --- Only Ups/Only Downs (RUNHIGH/RUNLOW) — trailing consecutive-tick run ---
-    const run = trailingRun(prices.slice(-40));
-    if (run.length >= 2) {
-        // Frequency of runs of this length actually continuing one more tick,
-        // measured in this window, vs the 0.5^n fair-coin baseline.
-        let continued = 0;
-        let occurrences = 0;
-        for (let i = run.length; i < prices.length - 1; i++) {
-            let matches = true;
-            for (let k = 0; k < run.length; k++) {
-                if (Math.sign(prices[i - k] - prices[i - k - 1]) !== run.direction) {
-                    matches = false;
-                    break;
-                }
+    // --- Rise/Fall (CALL/PUT), 1 tick: which way did the tick AFTER a tick like the last one go? ---
+    const last_move = Math.sign(prices[prices.length - 1] - prices[prices.length - 2]);
+    if (last_move !== 0) {
+        const table = transitionTable(prices);
+        const row = last_move > 0 ? table.up : table.down;
+        if (row.n >= MIN_TRANSITIONS) {
+            const p_up = row.up / row.n;
+            const p_down = row.down / row.n;
+            const flat_rate = row.flat / row.n;
+            const rising = p_up >= p_down;
+            const p_side = rising ? p_up : p_down;
+            // Fair chance for either side once flat ticks (which lose both) are taken out.
+            const fair = (1 - flat_rate) / 2;
+            const z = (p_side - fair) / Math.sqrt((fair * (1 - fair)) / row.n);
+            const conf = Math.round(clamp(z * 20, 0, 100));
+            if (conf >= 15) {
+                signals.push({
+                    family: 'rise_fall',
+                    contract_type: rising ? 'CALL' : 'PUT',
+                    duration_ticks: 1,
+                    label: rising ? 'Rise' : 'Fall',
+                    confidence: conf,
+                    basis: `After ${last_move > 0 ? 'an up' : 'a down'} tick, the next tick went ${rising ? 'up' : 'down'} ${Math.round(p_side * 100)}% of the time (n=${row.n}, ${Math.round(flat_rate * 100)}% flat, fair ${Math.round(fair * 100)}%) on ${symbol}.`,
+                });
             }
-            if (matches) {
-                occurrences += 1;
-                if (Math.sign(prices[i + 1] - prices[i]) === run.direction) continued += 1;
-            }
-        }
-        // Require a real sample before trusting this rate at all — with only a
-        // handful of occurrences, "continued 5/6 times" is noise, not signal.
-        // MIN_OCCURRENCES_FOR_RUN_SIGNAL below is deliberately high because a
-        // continuation *rate* is a much higher-variance statistic than a
-        // simple frequency count (digitAnalysis.js's deviationConfidence
-        // equivalent): each occurrence is only a single win/lose data point.
-        const MIN_OCCURRENCES_FOR_RUN_SIGNAL = 25;
-        const observed_rate = occurrences > 0 ? continued / occurrences : 0.5;
-        const baseline_rate = 0.5;
-        const sample_factor = clamp(occurrences / MIN_OCCURRENCES_FOR_RUN_SIGNAL, 0, 1.5);
-        const run_conf = Math.round(clamp(Math.abs(observed_rate - baseline_rate) * 300 * sample_factor, 0, 100));
-        if (occurrences >= MIN_OCCURRENCES_FOR_RUN_SIGNAL && run_conf >= 15) {
-            signals.push({
-                family: 'only_up_down',
-                contract_type: run.direction > 0 ? 'RUNHIGH' : 'RUNLOW',
-                duration_ticks: clamp(run.length, 2, 5),
-                label: run.direction > 0 ? 'Only ups' : 'Only downs',
-                confidence: run_conf,
-                basis: `A ${run.length}-tick ${run.direction > 0 ? 'up' : 'down'} run has continued ${Math.round(observed_rate * 100)}% of the time recently (n=${occurrences}) vs a 50% fair baseline.`,
-            });
         }
     }
 
-    // --- Touch/No Touch and Ends Between/Ends Outside — volatility regime ---
-    // Barrier offset scales with recent realized volatility; which side gets
-    // the signal depends on whether volatility is currently expanding
-    // (favours Touch / Ends Outside) or contracting (favours No Touch / Ends
-    // Between) relative to its own longer-run average.
+    // --- Touch/No Touch and Ends Between/Ends Outside — barrier contracts, volatility regime ---
+    // Which side gets the signal depends on whether volatility is currently expanding (favours
+    // Touch / Ends Outside) or contracting (favours No Touch / Ends Between) against its own
+    // longer-run average. These run TOUCH_TICKS ticks, so the barrier scales with sqrt(TOUCH_TICKS).
     const baseline_sigma_raw = stddev(rets);
-    // A genuinely flat/stale feed (baseline volatility ~0) has nothing
-    // meaningful to say about volatility expanding or contracting — skip
-    // rather than let a near-zero denominator produce a false maximal ratio.
+    // A genuinely flat/stale feed (baseline volatility ~0) has nothing meaningful to say.
     if (rets.length >= 40 && baseline_sigma_raw > prices[prices.length - 1] * 1e-6) {
         const recent_sigma = stddev(rets.slice(-15));
         const baseline_sigma = baseline_sigma_raw;
         const vol_ratio = recent_sigma / baseline_sigma;
         const vol_conf = Math.round(clamp(Math.abs(vol_ratio - 1) * 140, 0, 100));
-        // Deriv rejects barriers with more decimal places than the symbol's own
-        // price precision, so round to exactly that many (and never below 3
-        // pips, since a barrier at ~spot is invalid anyway).
+        // Deriv rejects barriers with more decimal places than the symbol's own price precision, so
+        // round to exactly that many (and never below 3 pips, since a barrier at ~spot is invalid).
         const pip = 10 ** -decimals;
-        const raw_offset = Math.max(1.5 * baseline_sigma, 3 * pip);
+        const raw_offset = Math.max(1.5 * baseline_sigma * Math.sqrt(TOUCH_TICKS), 3 * pip);
         const barrier_offset = raw_offset.toFixed(decimals); // string, e.g. "0.35"
 
         if (vol_conf >= 15) {
@@ -200,7 +132,7 @@ export function computeContractSignals(window, symbol, decimals = 2) {
             signals.push({
                 family: 'touch',
                 contract_type: expanding ? 'ONETOUCH' : 'NOTOUCH',
-                duration_ticks: 10,
+                duration_ticks: TOUCH_TICKS,
                 prediction: `+${barrier_offset}`,
                 label: expanding ? 'Touch' : 'No touch',
                 confidence: vol_conf,
@@ -209,31 +141,13 @@ export function computeContractSignals(window, symbol, decimals = 2) {
             signals.push({
                 family: 'ends',
                 contract_type: expanding ? 'EXPIRYMISS' : 'EXPIRYRANGE',
-                duration_ticks: 10,
+                duration_ticks: TOUCH_TICKS,
                 prediction: barrier_offset, // unsigned offset string; the frontend builds +/- barriers from it
                 label: expanding ? 'Ends outside' : 'Ends between',
                 confidence: Math.round(vol_conf * 0.95),
                 basis: `Same volatility read, applied to a symmetric range \u00b1${barrier_offset} around spot.`,
             });
         }
-    }
-
-    // --- High Tick/Low Tick — which of the next 5 ticks is likely the extreme ---
-    // Deriv fixes this contract's duration at 5 ticks with a selected_tick 1-5.
-    // Strong momentum makes the *last* tick the plausible new high (uptrend)
-    // or low (downtrend); this is the weakest-evidence family here since it's
-    // a single-tick pick rather than a distributional read.
-    if (Math.abs(momentum.z) >= 1.2) {
-        const rising = momentum.z > 0;
-        signals.push({
-            family: 'high_low_tick',
-            contract_type: rising ? 'TICKHIGH' : 'TICKLOW',
-            duration_ticks: 5,
-            prediction: 5, // selected_tick — the 5th (final) tick of the contract
-            label: rising ? 'High tick' : 'Low tick',
-            confidence: Math.round(clamp((Math.abs(momentum.z) - 1) * 25, 0, 100)),
-            basis: `Strong ${round2(Math.abs(momentum.z))}\u03c3 momentum makes the final tick the plausible extreme.`,
-        });
     }
 
     return signals.sort((a, b) => b.confidence - a.confidence);

@@ -210,7 +210,6 @@ const AiAgentPanel = ({
                 learnerRef.current = learner;
             }
             learnerRef.current.mode = learnMode;
-            learnerRef.current.fixed_duration = config?.fixed_duration;
             setLearnInfo(learnerRef.current.summary());
 
             const engine = new AutoPilotEngine(
@@ -273,7 +272,7 @@ const AiAgentPanel = ({
                 <h3>{localize('AI auto-trader')}</h3>
                 <p>
                     {localize(
-                        'Reads your balance, picks the stake and martingale from a risk level, and scans Even/Odd, Rise/Fall, Only Ups/Downs, Touch/No Touch, Ends Between/Outside, Asians, High/Low Tick and Reset Call/Put for the strongest signal. On a loss it flips to the opposite side and escalates stake to recover — this is a statistical deviation score, not a win-probability estimate.'
+                        'Reads your balance, picks the stake and martingale from a risk level, and scans every market for Even/Odd and Rise/Fall on the next tick (plus Touch/No Touch, which needs a barrier) and picks the market and contract with the strongest signal, all on 1 tick. Every trade is priced with Deriv first, so a contract Deriv would reject is skipped before any money is spent. On a loss it flips to the opposite side and escalates stake to recover — this is a statistical deviation score, not a win-probability estimate.'
                     )}
                 </p>
             </header>
@@ -376,21 +375,11 @@ const AiAgentPanel = ({
                             <option value='flat'>{localize('Flat: same stake, no recovery')}</option>
                         </select>
                     </label>
-                    <label className='ai-agent-panel__hint'>
-                        {localize('Time frame')}{' '}
-                        <select
-                            value={config?.fixed_duration ?? 0}
-                            disabled={!config}
-                            onChange={e => config && setConfig({ ...config, fixed_duration: Number(e.target.value) || undefined })}
-                        >
-                            <option value={0}>{localize('Auto (AI picks 2-10 ticks)')}</option>
-                            {[2, 3, 5, 10].map(t => (
-                                <option key={t} value={t}>
-                                    {localize('{{t}} tick(s) where the contract allows', { t })}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
+                    <p className='ai-agent-panel__hint'>
+                        {localize(
+                            'Time frame: 1 tick. Touch/No Touch (barrier contracts) use the shortest duration Deriv offers; contracts Deriv does not sell at 1 tick are skipped.'
+                        )}
+                    </p>
                     <label className='ai-agent-panel__hint'>
                         {localize('Learning')}{' '}
                         <select value={learnMode} onChange={e => setLearnMode(e.target.value as TLearningMode)}>

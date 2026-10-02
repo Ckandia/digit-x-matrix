@@ -6,6 +6,12 @@
 //  2. BUILT-IN table below, used until live rules arrive or if Deriv doesn't answer.
 // `null` means "not offered in ticks" (only minutes/days): the auto-pilot never picks it.
 //
+// TRADING RULE (tradeTicks below): every contract is bought for exactly 1 tick, except the
+// barrier contracts (Touch/No Touch, Ends Between/Outside), which use the shortest duration
+// Deriv offers for them. A non-barrier contract Deriv does not offer at 1 tick (Asians, Only
+// Ups/Downs, High/Low Tick, Reset) is never traded: Deriv would reject it, and stretching it to
+// a longer duration would break the 1-tick rule.
+//
 // Contract mechanics the AI trades (all payout fixed at purchase):
 //  CALL/PUT        Rise/Fall: exit above/below entry. 1-10 ticks.
 //  DIGITEVEN/ODD   parity of the last digit of the exit tick. 1-10 ticks.
@@ -66,24 +72,35 @@ export const tickRange = (symbol: string, type: string): TTickRange => {
     return type in BUILT_IN ? BUILT_IN[type] : null; // unknown contract: never guess a duration
 };
 
-/** The AI never trades 1-tick contracts: its shortest time frame is 2 ticks (where the contract allows it). */
-export const AI_MIN_TICKS = 2;
+/** Contracts that need a price barrier. They are the only ones allowed to run longer than 1 tick. */
+export const BARRIER_CONTRACTS = new Set(['ONETOUCH', 'NOTOUCH', 'EXPIRYRANGE', 'EXPIRYMISS']);
 
-export const isTickTradable = (symbol: string, type: string) => tickRange(symbol, type) !== null;
-
-/** Every whole tick duration Deriv accepts for this contract on this market. */
-export const tickDurations = (symbol: string, type: string, floor = 1): number[] => {
-    const r = tickRange(symbol, type);
-    if (!r) return [];
-    const start = Math.max(r.min, Math.min(floor, r.max)); // contracts fixed below the floor (none today) keep their only value
-    return Array.from({ length: r.max - start + 1 }, (_, i) => start + i);
+// Combinations Deriv refused at runtime (symbol|type -> when). Shared by the learner and by the
+// engine in every learning mode, so a refused combination is skipped for 6 hours.
+const refused: Record<string, number> = {};
+const REFUSED_MS = 6 * 3600_000;
+export const markRefused = (symbol: string, type: string) => {
+    refused[`${symbol}|${type}`] = Date.now();
+};
+const isRefused = (symbol: string, type: string) => {
+    const at = refused[`${symbol}|${type}`];
+    return !!at && Date.now() - at < REFUSED_MS;
 };
 
-export const clampTicks = (symbol: string, type: string, wanted: number | undefined, floor = 1): number => {
+/**
+ * THE duration the AI trades this contract for, in ticks, or null if it must not be traded:
+ *  - barrier contracts: the shortest tick duration Deriv offers (null if not offered in ticks);
+ *  - every other contract: exactly 1 tick, only if Deriv offers 1 tick for it on this market.
+ * Null also while the combination is in the 6-hour refused list.
+ */
+export const tradeTicks = (symbol: string, type: string): number | null => {
     const r = tickRange(symbol, type);
-    const w = Math.max(floor, Number(wanted) || floor);
-    return r ? Math.min(r.max, Math.max(r.min, w)) : w;
+    if (!r || isRefused(symbol, type)) return null;
+    if (BARRIER_CONTRACTS.has(type)) return r.min;
+    return r.min <= 1 && r.max >= 1 ? 1 : null;
 };
+
+export const isTickTradable = (symbol: string, type: string) => tradeTicks(symbol, type) !== null;
 
 /**
  * How lopsided the last 50 ticks were for the side a digit contract bets on. This is observed

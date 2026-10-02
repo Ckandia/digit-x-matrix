@@ -1,6 +1,7 @@
 // The auto-pilot's memory. It remembers how every (symbol, contract, duration)
 // combination has actually performed on THIS account, and uses that to choose
-// which market, contract and time frame (1/2/5 ticks etc.) to try next.
+// which market and contract to try next. The time frame is not explored any more: every
+// contract trades for 1 tick (barrier contracts: Deriv's shortest), see contractRules.tradeTicks.
 //
 // How it learns: each combination keeps wins/losses. Its win rate is a Beta
 // posterior, compared against the break-even rate implied by the real payout
@@ -13,7 +14,7 @@
 // combinations, and that is the correct, useful answer. 'edge_gate' mode
 // refuses to trade until an edge is statistically demonstrated.
 import { TSnapshotMap } from './analysis-types';
-import { AI_MIN_TICKS, isTickTradable, loadLiveRules, skewBucket, tickDurations } from './contractRules';
+import { isTickTradable, loadLiveRules, markRefused, skewBucket, tradeTicks } from './contractRules';
 
 export type TLearningMode = 'off' | 'learn' | 'edge_gate';
 type TCell = { wins: number; losses: number; staked: number; profit: number; payout_ratio_sum: number };
@@ -34,7 +35,6 @@ const randn = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * M
 // could ever reach the 30 trades needed to prove or disprove an edge.
 const POOL = 'ALL';
 const cellKey = (_symbol: string, type: string, duration: number) => `${POOL}|${type}|${duration}`;
-const symKey = (symbol: string, type: string, duration: number) => `${symbol}|${type}|${duration}`;
 const emptyCell = (): TCell => ({ wins: 0, losses: 0, staked: 0, profit: 0, payout_ratio_sum: 0 });
 const addInto = (a: TCell, b: TCell) => {
     a.wins += b.wins;
@@ -70,10 +70,8 @@ export const makeProfileId = async (loginid: string): Promise<string> => {
 
 export class LearningEngine {
     mode: TLearningMode;
-    fixed_duration?: number; // set from the panel: scores only this time frame instead of exploring
     private cells: Record<string, TCell> = {};
     private profile: string;
-    private unavailable: Record<string, number> = {}; // combos Deriv refused, with timestamp
 
     constructor(profile: string, mode: TLearningMode = 'learn') {
         this.profile = profile;
@@ -113,14 +111,9 @@ export class LearningEngine {
         }
     }
 
-    /** Deriv refused this symbol/contract/duration: skip it for the next 6 hours. */
-    markUnavailable(symbol: string, type: string, duration: number) {
-        this.unavailable[symKey(symbol, type, duration)] = Date.now();
-    }
-
-    private isUnavailable(symbol: string, type: string, duration: number) {
-        const at = this.unavailable[symKey(symbol, type, duration)];
-        return !!at && Date.now() - at < 6 * 3600_000;
+    /** Deriv refused this symbol/contract: skip it for the next 6 hours (shared list, see contractRules). */
+    markUnavailable(symbol: string, type: string, _duration?: number) {
+        markRefused(symbol, type);
     }
 
     private save() {
@@ -183,26 +176,9 @@ export class LearningEngine {
         return mean + sd * randn() - this.breakeven(c);
     }
 
-    /** Picks the time frame for a contract by sampling each allowed duration's posterior. */
-    chooseDuration(symbol: string, type: string, suggested?: number, bucket?: string): number {
-        const all = tickDurations(symbol, type, AI_MIN_TICKS); // 2-10 ticks; the AI skips 1-tick contracts
-        let options = all.filter(d => !this.isUnavailable(symbol, type, d));
-        if (this.fixed_duration && options.length) {
-            const f = this.fixed_duration;
-            options = [options.reduce((a, b) => (Math.abs(b - f) < Math.abs(a - f) ? b : a))];
-        }
-        if (options.length === 0) return -1; // every duration was refused recently
-        if (this.mode === 'off' || options.length === 1) return suggested && options.includes(suggested) ? suggested : options[0];
-        let best = options[0];
-        let bestScore = -Infinity;
-        for (const d of options) {
-            const s = this.sampleEdge(this.cells[cellKey(symbol, statType(type, bucket), d)]) + (d === suggested ? 0.02 : 0) // analysis-suggested time frame gets a small head start;
-            if (s > bestScore) {
-                bestScore = s;
-                best = d;
-            }
-        }
-        return best;
+    /** The one duration this contract trades for (1 tick; barrier contracts: Deriv's shortest), or -1 if it must be skipped. */
+    chooseDuration(symbol: string, type: string): number {
+        return tradeTicks(symbol, type) ?? -1;
     }
 
     /** Chooses the next trade from the live candidates, or null if nothing qualifies right now. */
@@ -210,7 +186,7 @@ export class LearningEngine {
         let best: T | null = null;
         let bestScore = -Infinity;
         for (const cand of candidates) {
-            const duration = this.chooseDuration(cand.symbol, cand.contract_type, cand.duration_ticks, cand.bucket);
+            const duration = this.chooseDuration(cand.symbol, cand.contract_type);
             if (duration < 0) continue;
             const c = this.cells[cellKey(cand.symbol, statType(cand.contract_type, cand.bucket), duration)];
             if (this.mode === 'edge_gate' && !(n_of(c) >= MIN_PROVEN && this.lowerBound(c) > this.breakeven(c))) continue;

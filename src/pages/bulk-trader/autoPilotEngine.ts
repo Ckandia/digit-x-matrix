@@ -12,7 +12,7 @@
 import { DerivClientConnection } from './derivClient';
 import { TDigitSignal, TSnapshotMap } from './analysis-types';
 import { candidatesFromSnapshots, LearningEngine } from './learningEngine';
-import { AI_MIN_TICKS, clampTicks, isTickTradable } from './contractRules';
+import { markRefused, tradeTicks } from './contractRules';
 
 export type TRiskLevel = 'conservative' | 'moderate' | 'aggressive';
 
@@ -35,8 +35,6 @@ export type TRecoveryMode = 'martingale' | 'flip' | 'flat';
 
 export type TAutoPilotConfig = {
     recovery_mode?: TRecoveryMode;
-    /** Fixed tick duration for every trade (clamped to what each contract allows); undefined = the AI chooses. */
-    fixed_duration?: number;
     stake: number;
     martingale_multiplier: number;
     max_steps: number;
@@ -59,9 +57,13 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
     };
 };
 
-// Only contracts that run on a TICK duration are traded (Ends Between/Outside only exist in
-// minutes/days, so they were removed). Digit contracts + chart/price-based contracts.
-// The contract families in this pass — Matches dropped (too hard to
+// Duration rule (see contractRules.tradeTicks): every contract is traded for exactly 1 tick,
+// except the barrier contracts (Touch/No Touch, Ends Between/Outside), which use the shortest
+// duration Deriv offers. Contracts Deriv does not sell at 1 tick (Asians, Only Ups/Downs,
+// High/Low Tick, Reset) stay in this list but are filtered out by tradeTicks() === null, so
+// they are never bought, instead of being rejected by Deriv or stretched past 1 tick.
+//
+// The 8 contract families in this pass — Matches dropped (too hard to
 // program per the user), Multiplier and Accumulators deferred (they're
 // open-position contracts needing a different execution/monitoring model
 // than every fixed-duration contract here).
@@ -74,6 +76,8 @@ const AUTOPILOT_CONTRACT_TYPES = [
     'RUNLOW',
     'ONETOUCH',
     'NOTOUCH',
+    'EXPIRYRANGE',
+    'EXPIRYMISS',
     'ASIANU',
     'ASIAND',
     'TICKHIGH',
@@ -103,6 +107,11 @@ const FLIP_PARTNER: Record<string, string> = {
     RESETPUT: 'RESETCALL',
 };
 
+/** A quote whose payout is below this multiple of the stake is a guaranteed-loss trade: never buy it. */
+const MIN_PAYOUT_RATIO = 1.05;
+/** Deriv wording for "this contract itself is not available right now" (as opposed to balance/stake/connection errors). */
+const REFUSAL_PATTERN = /not offered|duration|barrier|not available|unavailable|suspended|market is closed|no longer offered|selected tick/i;
+
 export type TCandidate = TDigitSignal & { symbol: string };
 
 /** Best-confidence signal across every symbol, restricted to the families the
@@ -114,8 +123,9 @@ export const pickBestGlobalCandidate = (snapshots: TSnapshotMap): TCandidate | n
         for (const signal of snapshot.signals) {
             if (!AUTOPILOT_CONTRACT_TYPES.includes(signal.contract_type as (typeof AUTOPILOT_CONTRACT_TYPES)[number]))
                 continue;
-            if (!isTickTradable(symbol, signal.contract_type)) continue; // e.g. Ends Between/Outside has no tick durations
-            if (!best || signal.confidence > best.confidence) best = { symbol, ...signal };
+            const ticks = tradeTicks(symbol, signal.contract_type);
+            if (ticks === null) continue; // not offered at 1 tick (or not in ticks at all): never traded
+            if (!best || signal.confidence > best.confidence) best = { symbol, ...signal, duration_ticks: ticks };
         }
     }
     return best;
@@ -131,13 +141,14 @@ export const pickFlipCandidate = (snapshots: TSnapshotMap, symbol: string, previ
     const flip_type = FLIP_PARTNER[previous.contract_type];
     const snapshot = snapshots[symbol];
     const live = snapshot?.signals.find(s => s.contract_type === flip_type);
-    if (live) return { symbol, ...live };
+    const flip_ticks = tradeTicks(symbol, flip_type) ?? undefined;
+    if (live) return { symbol, ...live, duration_ticks: flip_ticks };
 
     return {
         symbol,
         family: previous.family,
         contract_type: flip_type as TDigitSignal['contract_type'],
-        duration_ticks: previous.duration_ticks,
+        duration_ticks: flip_ticks,
         prediction: flipPrediction(previous),
         label: `${previous.label} (flipped)`,
         confidence: 0,
@@ -157,11 +168,12 @@ const flipPrediction = (previous: TCandidate): TDigitSignal['prediction'] => {
 
 const NEEDS_SINGLE_BARRIER = new Set(['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER', 'ONETOUCH', 'NOTOUCH']);
 
-/** Deriv rejects durations outside a contract's allowed tick range, so clamp
- *  whatever the analysis suggests: most non-digit contracts need at least 5
- *  ticks, Only Ups/Downs allows 2-5, digits allow 1-10. */
-const clampDuration = (symbol: string, contract_type: string, ticks: number | undefined): number =>
-    clampTicks(symbol, contract_type, ticks, AI_MIN_TICKS);
+/** The duration to send to Deriv. Throws if this contract may not be traded (see tradeTicks). */
+const dutyTicks = (symbol: string, contract_type: string): number => {
+    const ticks = tradeTicks(symbol, contract_type);
+    if (ticks === null) throw new Error(`${contract_type} on ${symbol} is not offered at 1 tick (or is temporarily refused)`);
+    return ticks;
+};
 
 /** Builds Deriv `buy` parameters for any of the families this engine trades. */
 export const buildTradeParameters = (candidate: TCandidate, stake: number, currency: string) => {
@@ -182,7 +194,7 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
         const offset = Math.abs(Number(candidate.prediction) || 0);
         return {
             ...base,
-            duration: clampDuration(candidate.symbol, candidate.contract_type, candidate.duration_ticks),
+            duration: dutyTicks(candidate.symbol, candidate.contract_type),
             duration_unit: 't',
             barrier: `+${offset}`,
             barrier2: `-${offset}`,
@@ -191,7 +203,7 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
 
     const parameters: Record<string, unknown> = {
         ...base,
-        duration: clampDuration(candidate.symbol, candidate.contract_type, candidate.duration_ticks),
+        duration: dutyTicks(candidate.symbol, candidate.contract_type),
         duration_unit: 't',
     };
     if (NEEDS_SINGLE_BARRIER.has(candidate.contract_type)) {
@@ -199,9 +211,6 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
     }
     return parameters;
 };
-
-const parameters_duration = (candidate: TCandidate, stake: number, currency: string) =>
-    (buildTradeParameters(candidate, stake, currency) as { duration: number }).duration;
 
 export type TAutoPilotHooks = {
     /** Every proposal_open_contract update, in Deriv's own shape (for the Transactions/Summary tabs). */
@@ -296,9 +305,15 @@ export class AutoPilotEngine {
             ? learner.pickBest(candidatesFromSnapshots<TDigitSignal>(this.getSnapshots(), AUTOPILOT_CONTRACT_TYPES) as TCandidate[])
             : pickBestGlobalCandidate(this.getSnapshots());
         if (!candidate) {
-            if (learner?.mode === 'edge_gate' && Date.now() - this.last_wait_emit > 30_000) {
+            if (Date.now() - this.last_wait_emit > 30_000) {
                 this.last_wait_emit = Date.now();
-                this._emit({ phase: 'waiting', reason: 'no market/contract/time frame has a proven edge yet' });
+                this._emit({
+                    phase: 'waiting',
+                    reason:
+                        learner?.mode === 'edge_gate'
+                            ? 'no market/contract has a proven edge yet'
+                            : 'no market has a tradable 1-tick signal right now (contracts Deriv refused or priced too low are skipped)',
+                });
             }
             // Nothing meets the bar right now — try again shortly rather than
             // erroring out; live signals come and go every second.
@@ -309,10 +324,7 @@ export class AutoPilotEngine {
     }
 
     private _enter(candidate_in: TCandidate, wanted_stake: number) {
-        // A fixed time frame set in the panel overrides whatever the AI would have picked.
-        const candidate: TCandidate = this.config.fixed_duration
-            ? { ...candidate_in, duration_ticks: this.config.fixed_duration }
-            : candidate_in;
+        const candidate: TCandidate = candidate_in;
         // The small-stake exploration cap applies ONLY to the first trade of a ladder. It used to
         // clamp recovery steps too, which silently turned the martingale into a flat stake.
         const governed = this.learner && this.step === 1 ? this.learner.governStake(wanted_stake, this.config.stake, candidate) : wanted_stake;
@@ -333,19 +345,44 @@ export class AutoPilotEngine {
             stake,
         });
 
-        const parameters = buildTradeParameters(candidate, stake, this.currency);
-        const tried_duration = Number((parameters as { duration?: number }).duration);
+        let parameters: Record<string, unknown>;
+        try {
+            parameters = buildTradeParameters(candidate, stake, this.currency);
+        } catch (err) {
+            // Nothing was sent to Deriv, so nothing can be lost: look for another contract.
+            this.busy = false;
+            const detail = err instanceof Error ? err.message : 'Could not build the trade';
+            this.hooks?.onLog?.('error', detail);
+            markRefused(candidate.symbol, candidate.contract_type);
+            if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+            setTimeout(() => this._findAndEnter(wanted_stake), 500);
+            return;
+        }
+        const tried_duration = Number(parameters.duration);
         this.hooks?.onLog?.(
             'info',
             `Buying ${candidate.contract_type} on ${candidate.symbol}, ${tried_duration} tick(s), stake ${stake} ${this.currency}` +
                 (candidate.prediction !== undefined ? `, prediction ${candidate.prediction}` : '')
         );
+        // Ask Deriv for a price first (the documented contracts_for -> proposal -> buy flow). A proposal
+        // costs nothing, so a bad duration/barrier/stake is caught here instead of as a failed buy, and a
+        // payout that cannot even cover the stake is never bought.
         this.connection
-            .send({ buy: '1', price: stake, parameters })
+            .send({ proposal: 1, ...parameters })
+            .then(res => {
+                const quote = res?.proposal;
+                if (!quote) throw new Error('Deriv returned no price for this contract');
+                const ask = Number(quote.ask_price);
+                const payout = Number(quote.payout);
+                if (ask > 0 && payout > 0 && payout / ask < MIN_PAYOUT_RATIO) {
+                    throw Object.assign(new Error(`payout is only ${(payout / ask).toFixed(2)}x the stake`), { skip: true });
+                }
+                return this.connection.send({ buy: '1', price: stake, parameters });
+            })
             .then(res => {
                 const contract_id = res?.buy?.contract_id;
                 if (!contract_id) throw new Error('Buy did not return a contract id');
-                this._watch(candidate, stake, contract_id);
+                this._watch(candidate, stake, contract_id, tried_duration);
             })
             .catch(err => {
                 this.busy = false;
@@ -353,13 +390,16 @@ export class AutoPilotEngine {
                 if (/dropped/i.test(raw)) this.hooks?.onLog?.('error', 'The connection dropped while buying. Check Transactions: that contract may still be open.');
                 const detail = `${candidate.contract_type} on ${candidate.symbol} for ${tried_duration} tick(s): ${raw}`;
                 this.hooks?.onLog?.('error', detail);
-                // "Trading is not offered for this duration": skip this combination and pick another
-                // instead of stopping the whole session. Give up only if it keeps happening.
-                if (/not offered|duration/i.test(raw) && this.learner && this.refused < 8) {
+                // A refusal about this contract itself (duration, barrier, market closed, low payout): skip
+                // the combination for 6 hours and search again. Anything else (balance, stake limits, a
+                // dropped connection) stops the session so it cannot keep failing or trading blind.
+                if ((err?.skip === true || REFUSAL_PATTERN.test(raw)) && this.refused < 8) {
                     this.refused += 1;
-                    this.learner.markUnavailable(candidate.symbol, candidate.contract_type, tried_duration);
-                    this.hooks?.onLog?.('info', `Skipping ${candidate.symbol} ${candidate.contract_type} ${tried_duration}t for 6 hours and trying another.`);
+                    markRefused(candidate.symbol, candidate.contract_type);
+                    this.hooks?.onLog?.('info', `Skipping ${candidate.symbol} ${candidate.contract_type} for 6 hours and trying another.`);
                     if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+                    // Search again. (Before this, the engine marked the combination and then went idle.)
+                    setTimeout(() => this._findAndEnter(wanted_stake), 500);
                     return;
                 }
                 this._emit({ phase: 'error', symbol: candidate.symbol, error: detail });
@@ -367,7 +407,7 @@ export class AutoPilotEngine {
             });
     }
 
-    private _watch(candidate: TCandidate, stake: number, contract_id: string) {
+    private _watch(candidate: TCandidate, stake: number, contract_id: string, duration: number) {
         const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id }, (data, err) => {
             if (err) {
                 this.busy = false;
@@ -388,7 +428,7 @@ export class AutoPilotEngine {
                 this.learner.record({
                     symbol: candidate.symbol,
                     contract_type: candidate.contract_type + ((candidate as { bucket?: string }).bucket ? `@${(candidate as { bucket?: string }).bucket}` : ''),
-                    duration: Number(parameters_duration(candidate, stake, this.currency)),
+                    duration,
                     stake: Number(contract.buy_price ?? stake),
                     profit,
                     payout: Number(contract.payout ?? 0),
