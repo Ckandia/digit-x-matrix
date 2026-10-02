@@ -9,7 +9,7 @@ const RECONNECT_DELAY_MS = 3000;
 const explicit_ws_url = (process.env.NEXT_PUBLIC_ANALYSIS_WS_URL || '').trim();
 const rest_base = (process.env.NEXT_PUBLIC_BULK_TRADER_API_URL || '').trim().replace(/\/$/, '');
 
-const deriveWsUrl = () => {
+export const deriveWsUrl = () => {
     if (explicit_ws_url) return explicit_ws_url;
     if (!rest_base) return '';
     return `${rest_base.replace(/^http/, 'ws')}/ws/signals`;

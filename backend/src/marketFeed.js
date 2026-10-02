@@ -1,24 +1,28 @@
 import WebSocket from 'ws';
 import { computeSignals, computeStats, createDigitWindow, pushDigit } from './digitAnalysis.js';
+import { computeContractSignals, createPriceWindow, pushPrice } from './contractAnalysis.js';
 
-// Deriv migrated its trading API to this gateway; the old ws.derivws.com/websockets/v3
-// endpoint still accepts connections but no longer serves synthetic-index data through
-// it. Public market data needs no app_id or auth at all on the new gateway.
-// This file speaks the Deriv v3 message protocol (ticks_history, active_symbols,
-// msg_type responses). The documented endpoint for that protocol is
-// ws.derivws.com/websockets/v3, which requires a NUMERIC app_id registered at
-// api.deriv.com — that is a different credential from the alphanumeric OAuth
-// client ID used for login. Set DERIV_WS_APP_ID to your numeric app_id.
+// Deriv's current documentation ("Use ONLY this API") and live testing both
+// confirm ws.derivws.com/websockets/v3 (legacy v3) is now unreliable —
+// connections there are dropping with HTTP 520s. The New Options API's public
+// gateway serves the same active_symbols / ticks_history / tick messages this
+// file needs, unauthenticated, no app_id required:
+//   wss://api.derivws.com/trading/v1/options/ws/public
+// It renames a few response fields (active_symbols: symbol -> underlying_symbol;
+// see the entry.symbol/entry.underlying_symbol fallback below) but the tick and
+// ticks_history/history messages this file relies on are unchanged.
 //
-// Endpoints are tried in order and the first one that delivers a valid response
-// wins, so a wrong guess degrades to a retry instead of a silent dead feed.
+// The legacy endpoint is kept as a second candidate only as a safety net if the
+// new gateway ever has its own outage — endpoints are tried in order and the
+// first one that delivers a valid response wins, so a bad guess degrades to a
+// retry instead of a silent dead feed.
 const WS_APP_ID = (process.env.DERIV_WS_APP_ID || '1089').trim();
 const DERIV_WS_ENDPOINTS = (
     process.env.DERIV_WS_URL
         ? [process.env.DERIV_WS_URL.trim()]
         : [
-              `wss://ws.derivws.com/websockets/v3?app_id=${WS_APP_ID}`,
               'wss://api.derivws.com/trading/v1/options/ws/public',
+              `wss://ws.derivws.com/websockets/v3?app_id=${WS_APP_ID}`,
           ]
 ).filter(Boolean);
 const HISTORY_COUNT = 500; // ticks_history backfill so the window isn't empty on boot
@@ -85,6 +89,7 @@ export class MarketFeed {
     constructor() {
         this.ws = null;
         this.windows = new Map(); // symbol -> digit window
+        this.priceWindows = new Map(); // symbol -> raw price window (rise/fall, touch, asians, etc.)
         this.req_id_counter = 1;
         this.pending = new Map();
         this.listeners = new Set();
@@ -95,7 +100,10 @@ export class MarketFeed {
         // the authoritative values from active_symbols as soon as they arrive.
         this.pip_sizes = new Map(Object.entries(FALLBACK_PIP_SIZE));
         this._pending_history = new Map(); // symbol -> raw prices awaiting pip size
-        for (const { symbol } of DIGIT_SYMBOLS) this.windows.set(symbol, createDigitWindow());
+        for (const { symbol } of DIGIT_SYMBOLS) {
+            this.windows.set(symbol, createDigitWindow());
+            this.priceWindows.set(symbol, createPriceWindow());
+        }
     }
 
     onUpdate(fn) {
@@ -120,17 +128,23 @@ export class MarketFeed {
     getAllSnapshots() {
         const out = {};
         for (const { symbol } of DIGIT_SYMBOLS) {
-            const stats = computeStats(this.windows.get(symbol), symbol);
-            out[symbol] = { stats, signals: computeSignals(stats) };
+            out[symbol] = this.getSnapshot(symbol);
         }
         return out;
     }
 
+    /** Combines digit signals (family: 'digits') with the price-based
+     *  Rise/Fall, Only Ups/Downs, Touch/No Touch, Ends Between/Outside,
+     *  Asians, High/Low Tick and Reset Call/Put signals into one ranked list. */
     getSnapshot(symbol) {
         const window = this.windows.get(symbol);
-        if (!window) return null;
+        const priceWindow = this.priceWindows.get(symbol);
+        if (!window || !priceWindow) return null;
         const stats = computeStats(window, symbol);
-        return { stats, signals: computeSignals(stats) };
+        const digit_signals = computeSignals(stats).map(s => ({ family: 'digits', ...s }));
+        const contract_signals = computeContractSignals(priceWindow, symbol, this.getPipSize(symbol));
+        const signals = [...digit_signals, ...contract_signals].sort((a, b) => b.confidence - a.confidence);
+        return { stats, signals };
     }
 
     _nextReqId() {
@@ -152,7 +166,9 @@ export class MarketFeed {
             // eslint-disable-next-line no-console
             console.log('[marketFeed] connected to Deriv, resolving pip sizes…');
             // Ask for real precision FIRST. Digit stats are meaningless without it.
-            this._send({ active_symbols: 'brief', product_type: 'basic' });
+            // product_type is a legacy-only filter param, removed in the New API —
+            // dropping it works on both gateways.
+            this._send({ active_symbols: 'brief' });
             for (const { symbol } of DIGIT_SYMBOLS) {
                 this._backfillAndSubscribe(symbol);
             }
@@ -177,6 +193,36 @@ export class MarketFeed {
             console.warn('[marketFeed] connection closed, reconnecting in', RECONNECT_DELAY_MS, 'ms');
             this._reconnectTimer = setTimeout(() => this._connect(), RECONNECT_DELAY_MS);
         });
+    }
+
+    /**
+     * What Deriv actually offers for a symbol: for every contract type, the tick-duration range
+     * (or null when it is not offered in ticks, e.g. only minutes/days). Cached for 6 hours.
+     * Resolves to null if Deriv does not answer, so callers can fall back to their own table.
+     */
+    getContractRules(symbol) {
+        const cached = this.contract_rules?.get(symbol);
+        if (cached && Date.now() - cached.at < 6 * 3600_000) return Promise.resolve(cached.rules);
+        if (!this.ws || this.ws.readyState !== 1) return Promise.resolve(null);
+        this.contract_rules ||= new Map();
+        this.rules_waiters ||= new Map();
+        return new Promise(resolve => {
+            const waiters = this.rules_waiters.get(symbol) || [];
+            waiters.push(resolve);
+            this.rules_waiters.set(symbol, waiters);
+            if (waiters.length === 1) {
+                this._send({ contracts_for: symbol, currency: 'USD' });
+                setTimeout(() => this._resolveRules(symbol, null), 6000);
+            }
+        });
+    }
+
+    _resolveRules(symbol, rules) {
+        const waiters = this.rules_waiters?.get(symbol);
+        if (!waiters) return;
+        this.rules_waiters.delete(symbol);
+        if (rules) this.contract_rules.set(symbol, { at: Date.now(), rules });
+        for (const resolve of waiters) resolve(rules);
     }
 
     _send(request) {
@@ -208,6 +254,7 @@ export class MarketFeed {
         if (data.error) {
             // eslint-disable-next-line no-console
             console.error('[marketFeed] Deriv error:', data.error.message);
+            if (data.echo_req?.contracts_for) this._resolveRules(data.echo_req.contracts_for, null);
             return;
         }
 
@@ -215,13 +262,16 @@ export class MarketFeed {
 
         if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
             for (const entry of data.active_symbols) {
+                // The New API renamed this response field symbol -> underlying_symbol;
+                // legacy still sends `symbol`. Accept either.
+                const entry_symbol = entry.symbol || entry.underlying_symbol;
                 // Deriv exposes precision as `pip` (e.g. 0.0001) and/or `pip_size` (e.g. 4).
                 let dp = entry.pip_size;
                 if (!Number.isInteger(dp) && typeof entry.pip === 'number' && entry.pip > 0) {
                     dp = Math.round(Math.log10(1 / entry.pip));
                 }
-                if (Number.isInteger(dp) && dp >= 0 && dp <= 8) {
-                    this.pip_sizes.set(entry.symbol, dp);
+                if (entry_symbol && Number.isInteger(dp) && dp >= 0 && dp <= 8) {
+                    this.pip_sizes.set(entry_symbol, dp);
                 }
             }
             // Any history that landed before we knew the precision was parsed with a
@@ -230,6 +280,30 @@ export class MarketFeed {
                 this._rebuildWindow(symbol, prices);
             }
             this._pending_history.clear();
+            return;
+        }
+
+        if (data.msg_type === 'contracts_for' && data.echo_req?.contracts_for) {
+            const list = data.contracts_for?.available || data.contracts_for?.contracts || [];
+            const parse = v => {
+                const m = /^(\d+)([tsmhd])$/.exec(String(v ?? ''));
+                return m ? { value: Number(m[1]), unit: m[2] } : null;
+            };
+            const rules = {};
+            for (const c of list) {
+                const type = c.contract_type;
+                if (!type) continue;
+                const min = parse(c.min_contract_duration);
+                const max = parse(c.max_contract_duration);
+                if (min?.unit === 't') {
+                    const hi = max?.unit === 't' ? max.value : 10;
+                    const prev = rules[type];
+                    rules[type] = { min: prev ? Math.min(prev.min, min.value) : min.value, max: prev ? Math.max(prev.max, hi) : hi };
+                } else if (!(type in rules)) {
+                    rules[type] = null; // offered, but not in ticks
+                }
+            }
+            this._resolveRules(data.echo_req.contracts_for, Object.keys(rules).length ? rules : null);
             return;
         }
 
@@ -246,10 +320,12 @@ export class MarketFeed {
         if (data.msg_type === 'tick' && data.tick) {
             const { symbol, quote, pip_size } = data.tick;
             const window = this.windows.get(symbol);
-            if (!window) return;
+            const priceWindow = this.priceWindows.get(symbol);
+            if (!window || !priceWindow) return;
             // The tick frame is the most authoritative source when present.
             if (Number.isInteger(pip_size)) this.pip_sizes.set(symbol, pip_size);
             pushDigit(window, lastDigitOf(quote, this.pip_sizes.get(symbol)));
+            pushPrice(priceWindow, quote);
             this._emit(symbol);
         }
     }
@@ -259,12 +335,19 @@ export class MarketFeed {
         return this.pip_sizes.get(symbol) ?? 2;
     }
 
-    /** (Re)builds a symbol's rolling window from raw history at current precision. */
+
+
+    /** (Re)builds a symbol's rolling digit + price windows from raw history at current precision. */
     _rebuildWindow(symbol, prices) {
         const dp = this.getPipSize(symbol);
         const window = createDigitWindow();
-        for (const price of prices) pushDigit(window, lastDigitOf(price, dp));
+        const priceWindow = createPriceWindow();
+        for (const price of prices) {
+            pushDigit(window, lastDigitOf(price, dp));
+            pushPrice(priceWindow, price);
+        }
         this.windows.set(symbol, window);
+        this.priceWindows.set(symbol, priceWindow);
         this._emit(symbol);
     }
 

@@ -2,10 +2,10 @@ import 'dotenv/config';
 import http from 'http';
 import cors from 'cors';
 import express from 'express';
-import { getRunStatus, startBulkRun, stopStrategy } from './runner.js';
 import { getSignalHistory, isPersistenceEnabled, logSignalSnapshot } from './db.js';
 import { DIGIT_SYMBOLS, MarketFeed } from './marketFeed.js';
 import { attachSignalHub } from './signalHub.js';
+import { getStats, isValidProfile, parseOutcome, recordOutcome } from './learning.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -51,6 +51,18 @@ app.get('/health', (_req, res) => {
 // frontend should prefer the /ws/signals WebSocket for live updates and use
 // this only for a first paint before the socket opens, or if sockets are
 // blocked on the client's network.
+// What Deriv really allows per contract type for a symbol (tick-duration ranges), so the
+// frontend never has to guess. { rules: null } means Deriv did not answer: use the built-in table.
+app.get('/api/contracts/:symbol', async (req, res) => {
+    if (!/^[A-Za-z0-9_]{2,20}$/.test(req.params.symbol)) return res.status(400).json({ error: 'Invalid symbol' });
+    try {
+        res.json({ symbol: req.params.symbol, rules: await marketFeed.getContractRules(req.params.symbol) });
+    } catch (err) {
+        console.error('[contracts] failed:', err.message);
+        res.json({ symbol: req.params.symbol, rules: null });
+    }
+});
+
 app.get('/api/analysis/symbols', (_req, res) => {
     res.json({ symbols: DIGIT_SYMBOLS });
 });
@@ -73,38 +85,49 @@ app.get('/api/analysis/history/:symbol', async (req, res) => {
     res.json({ data: rows, persistence: isPersistenceEnabled() });
 });
 
-app.post('/api/bulk/start', async (req, res) => {
-    const { token, strategies } = req.body || {};
-    if (!token) return res.status(400).json({ error: 'Missing token' });
+// Learning memory: the browser posts each settled trade's result (aggregates
+// only) and reads its own stats back on load. See learning.js.
+const outcome_calls = new Map(); // profile -> timestamps, crude flood guard
+app.post('/api/learning/outcome', async (req, res) => {
+    const outcome = parseOutcome(req.body);
+    if (!outcome) return res.status(400).json({ error: 'Invalid outcome' });
+    const now = Date.now();
+    const recent = (outcome_calls.get(outcome.profile) || []).filter(t => now - t < 60_000);
+    if (recent.length >= 120) return res.status(429).json({ error: 'Too many outcomes' });
+    outcome_calls.set(outcome.profile, [...recent, now]);
     try {
-        const result = await startBulkRun(token, strategies);
-        res.json(result);
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    }
-});
-
-app.get('/api/bulk/status/:run_id', (req, res) => {
-    const status = getRunStatus(req.params.run_id);
-    if (!status) return res.status(404).json({ error: 'Run not found' });
-    res.json(status);
-});
-
-app.post('/api/bulk/stop', (req, res) => {
-    const { run_id, strategy_id } = req.body || {};
-    if (!run_id) return res.status(400).json({ error: 'Missing run_id' });
-    try {
-        stopStrategy(run_id, strategy_id);
+        await recordOutcome(outcome);
         res.json({ ok: true });
     } catch (err) {
-        res.status(400).json({ error: err.message });
+        console.error('[learning] record failed:', err.message);
+        res.status(500).json({ error: 'Could not record outcome' });
     }
 });
+
+app.get('/api/learning/stats/:profile', async (req, res) => {
+    if (!isValidProfile(req.params.profile)) return res.status(400).json({ error: 'Invalid profile' });
+    try {
+        res.json({ data: await getStats(req.params.profile), persistence: isPersistenceEnabled() });
+    } catch (err) {
+        console.error('[learning] stats failed:', err.message);
+        res.status(500).json({ error: 'Could not read stats' });
+    }
+});
+
+// The AI auto-pilot (contract choice, duration, martingale ladder, flip on
+// loss, stop-loss/take-profit) runs entirely in the browser — see
+// src/pages/bulk-trader/autoPilotEngine.ts. It reads its signals straight off
+// this same /ws/signals feed (now covering 8 additional contract families
+// alongside digits — see contractAnalysis.js), so there is nothing left for
+// the backend to start/stop/status on its behalf.
 
 // Use a raw HTTP server so Express (REST) and the ws WebSocketServer (live
 // signals) can share one port — this is what Render exposes for the service.
 const httpServer = http.createServer(app);
-attachSignalHub(httpServer, marketFeed, { path: '/ws/signals', allowedOrigins: allowed_origins });
+attachSignalHub(httpServer, marketFeed, {
+    path: '/ws/signals',
+    allowedOrigins: allowed_origins,
+});
 
 httpServer.listen(PORT, () => {
     // eslint-disable-next-line no-console

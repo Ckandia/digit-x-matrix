@@ -23,6 +23,10 @@ export type TStrategyConfig = {
     take_profit?: number;
     stop_loss?: number;
     max_trades?: number;
+    /** 2+ = burst mode: buy this many contracts all at once instead of one after another. */
+    burst_count?: number;
+    /** Burst slippage cap: stop sending once this many ticks have passed (default 3). */
+    max_entry_ticks?: number;
 };
 
 export type TStrategyStatus = {

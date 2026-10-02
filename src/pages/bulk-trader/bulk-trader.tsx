@@ -14,6 +14,12 @@ import {
 import { TDigitSignal } from './analysis-types';
 import { TRunStatus, TStrategyConfig } from './types';
 import { useDigitSignals } from './useDigitSignals';
+import { getActiveToken } from './tokenStorage';
+import { useStore } from '@/hooks/useStore';
+import { MessageTypes } from '@/external/bot-skeleton';
+import TradeResults from './TradeResults';
+import { keepScreenAwake } from './wakeLock';
+import { tradeBus } from './tradeBus';
 import './bulk-trader.scss';
 
 const STORAGE_KEY = 'bulk_trader_run_id';
@@ -21,26 +27,6 @@ const POLL_INTERVAL_MS = 3000;
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
-// Bulk Trader prefers a manually-pasted, longer-lived API token (saved via
-// the "Bulk Trader API token" field in the header) when one is set, since
-// that's a stable credential meant for exactly this. It only falls back to
-// the OAuth2 browser-session token (Ory-issued, in localStorage.auth_info)
-// if no manual token has been saved — that one is short-lived by design and
-// not ideal for a backend run, but better than nothing.
-const MANUAL_TOKEN_STORAGE_KEY = 'deriv_manual_api_token';
-
-const getActiveToken = (): string => {
-    const manual = localStorage.getItem(MANUAL_TOKEN_STORAGE_KEY);
-    if (manual && manual.trim()) return manual.trim();
-    try {
-        const raw = localStorage.getItem('auth_info');
-        if (!raw) return '';
-        const parsed = JSON.parse(raw);
-        return parsed?.access_token ?? '';
-    } catch {
-        return '';
-    }
-};
 
 // --- Digit percentage grid (the 0-9 boxes) -------------------------------
 
@@ -165,10 +151,34 @@ const BulkTrader = () => {
     const [autoFlip, setAutoFlip] = useState(DEFAULT_STRATEGY.auto_flip);
     const [stopWin, setStopWin] = useState(true);
     const [bothSides, setBothSides] = useState(false);
+    const [burstMode, setBurstMode] = useState(true);
+    const [maxEntryTicks, setMaxEntryTicks] = useState(3);
     const [fastExecution, setFastExecution] = useState(DEFAULT_STRATEGY.fast_execution);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
     const [runStatus, setRunStatus] = useState<TRunStatus | null>(null);
+    const { run_panel, transactions, summary_card, journal } = useStore();
+    const [feed, setFeed] = useState(tradeBus.snapshot());
+    useEffect(() => {
+        const off_feed = tradeBus.subscribe(() => setFeed(tradeBus.snapshot()));
+        // Also mirror every bulk trade into the left run panel (Summary / Transactions).
+        const off_contract = tradeBus.onContract(contract => {
+            const c = { ...contract, id: contract.id ?? contract.contract_id };
+            transactions.onBotContractEvent(c as never);
+            summary_card.onBotContractEvent(c as never);
+        });
+        const off_log = tradeBus.onLog((kind, text) =>
+            journal.pushMessage(
+                text,
+                kind === 'error' ? MessageTypes.ERROR : kind === 'success' ? MessageTypes.SUCCESS : MessageTypes.NOTIFY
+            )
+        );
+        return () => {
+            off_feed();
+            off_contract();
+            off_log();
+        };
+    }, [transactions, summary_card, journal]);
     const [runId, setRunId] = useState<string | null>(() => sessionStorage.getItem(STORAGE_KEY));
     const [hasAcceptedRisk, setHasAcceptedRisk] = useState(false);
     const [isStarting, setIsStarting] = useState(false);
@@ -178,13 +188,16 @@ const BulkTrader = () => {
 
     const backend_configured = Boolean(process.env.NEXT_PUBLIC_BULK_TRADER_API_URL);
     const is_running = Boolean(runStatus?.is_active);
+    useEffect(() => {
+        keepScreenAwake('bulk', is_running);
+        return () => keepScreenAwake('bulk', false);
+    }, [is_running]);
 
     // Reasons the start buttons are currently disabled, in priority order —
     // shown to the user instead of leaving them to guess at a plain
     // not-allowed cursor.
     const start_disabled_reasons: string[] = [];
     if (!isAuthorized) start_disabled_reasons.push(localize('log in to your Deriv account'));
-    if (!backend_configured) start_disabled_reasons.push(localize('the Bulk Trader backend is not configured for this deployment'));
     if (!hasAcceptedRisk) start_disabled_reasons.push(localize('tick the risk checkbox above'));
     const start_disabled = isStarting;
     const start_not_ready = start_disabled_reasons.length > 0;
@@ -298,6 +311,8 @@ const BulkTrader = () => {
                 take_profit: stopWin ? takeProfit : undefined,
                 stop_loss: stopLoss,
                 max_trades: maxTrades,
+                burst_count: burstMode && maxTrades > 1 ? maxTrades : undefined,
+                max_entry_ticks: maxEntryTicks,
             };
             const primary_type = override_contract_type ?? contractType;
 
@@ -346,6 +361,8 @@ const BulkTrader = () => {
         }
         setIsStarting(true);
         try {
+            run_panel.run_id = `bulk-${Date.now()}`;
+            run_panel.toggleDrawer(true);
             const response = await startBulkRun(token, strategies);
             sessionStorage.setItem(STORAGE_KEY, response.run_id);
             setRunId(response.run_id);
@@ -380,7 +397,11 @@ const BulkTrader = () => {
     };
 
     const applySignal = (signal: TDigitSignal) => {
-        setContractType(signal.contract_type);
+        // Safe: relevant_contract_types (above) only ever contains digit
+        // contract type strings, so a signal reaching here via topSignal is
+        // always a digit-family one even though TDigitSignal's type is now
+        // shared with the AI auto-pilot's other contract families.
+        setContractType(signal.contract_type as TStrategyConfig['contract_type']);
         if (typeof signal.prediction === 'number') setPrediction(signal.prediction);
     };
 
@@ -409,7 +430,7 @@ const BulkTrader = () => {
             {!backend_configured && (
                 <div className='bulk-trader__notice bulk-trader__notice--warning'>
                     {localize(
-                        'The backend is not configured yet. Set NEXT_PUBLIC_BULK_TRADER_API_URL to your deployed Render backend URL.'
+                        'The live signal feed is not configured (NEXT_PUBLIC_BULK_TRADER_API_URL). You can still place trades manually, but the digit grid and signals will stay empty.'
                     )}
                 </div>
             )}
@@ -519,6 +540,31 @@ const BulkTrader = () => {
                                 disabled={is_running}
                             />
                         </label>
+
+                        <label className='bulk-trader__field'>
+                            <span>{localize('FIRE ALL AT ONCE (BURST)')}</span>
+                            <input type='checkbox' checked={burstMode} onChange={e => setBurstMode(e.target.checked)} disabled={is_running} />
+                        </label>
+
+                        {burstMode && (
+                            <label className='bulk-trader__field'>
+                                <span>{localize('MAX ENTRY TICKS (SLIPPAGE CAP)')}</span>
+                                <input
+                                    type='number'
+                                    min={1}
+                                    max={5}
+                                    step={1}
+                                    value={maxEntryTicks}
+                                    onChange={e => setMaxEntryTicks(Number(e.target.value))}
+                                    disabled={is_running}
+                                />
+                                <small>
+                                    {localize('Total stake this burst: {{t}}', {
+                                        t: (stake * Math.max(1, maxTrades) * (bothSides ? 2 : 1)).toFixed(2),
+                                    })}
+                                </small>
+                            </label>
+                        )}
                     </div>
 
                     <div className='bulk-trader__toggle-row'>
@@ -819,6 +865,8 @@ const BulkTrader = () => {
                     </table>
                 </div>
             )}
+
+            <TradeResults rows={feed.rows} activity={feed.activity} onClear={() => tradeBus.clear()} />
         </div>
     );
 };

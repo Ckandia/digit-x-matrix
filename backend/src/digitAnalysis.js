@@ -62,6 +62,23 @@ export function computeStats(window, symbol) {
 
     const last_digits = window.digits.slice(-30);
 
+    // Shorter, most-recent windows. These DESCRIBE what just happened (e.g. "even was 80% of
+    // the last 25 ticks"); they do not predict the next digit. The frontend learner records
+    // whether acting on such skews has actually paid, so the numbers are judged on results.
+    const recent = {};
+    for (const n of [25, 50, 100]) {
+        const slice = window.digits.slice(-n);
+        const m = slice.length;
+        const pct = c => (m ? Number(((c / m) * 100).toFixed(1)) : 0);
+        recent[`n${n}`] = {
+            n: m,
+            even_pct: pct(slice.filter(d => d % 2 === 0).length),
+            odd_pct: pct(slice.filter(d => d % 2 !== 0).length),
+            over5_pct: pct(slice.filter(d => d > 5).length),
+            under5_pct: pct(slice.filter(d => d < 5).length),
+        };
+    }
+
     return {
         symbol,
         total_ticks: total,
@@ -69,6 +86,7 @@ export function computeStats(window, symbol) {
         last_updated: window.last_updated,
         last_digit: total ? window.digits[total - 1] : null,
         last_digits,
+        recent,
         digit_counts: [...window.counts],
         digit_percentages: percentages,
         expected_pct,

@@ -1,9 +1,5 @@
 import { TRunStatus, TStartBulkRunResponse, TStrategyConfig } from './types';
-
-// Injected at build time via rsbuild's source.define (see rsbuild.config.ts).
-// Falls back to '' so calls fail loudly/obviously in dev if it isn't configured,
-// instead of silently hitting the wrong host.
-const BASE_URL = (process.env.NEXT_PUBLIC_BULK_TRADER_API_URL || '').replace(/\/$/, '');
+import * as bulkRunManager from './bulkRunManager';
 
 class BulkTraderApiError extends Error {
     status?: number;
@@ -14,39 +10,29 @@ class BulkTraderApiError extends Error {
     }
 }
 
-const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
-    if (!BASE_URL) {
-        throw new BulkTraderApiError(
-            'Bulk Trader backend URL is not configured. Set NEXT_PUBLIC_BULK_TRADER_API_URL in your deployment environment.'
-        );
-    }
-    const response = await fetch(`${BASE_URL}${path}`, {
-        ...init,
-        headers: {
-            'Content-Type': 'application/json',
-            ...(init?.headers ?? {}),
-        },
-    });
-    const is_json = response.headers.get('content-type')?.includes('application/json');
-    const body = is_json ? await response.json().catch(() => null) : null;
-    if (!response.ok) {
-        throw new BulkTraderApiError(body?.error || `Request failed with status ${response.status}`, response.status);
-    }
-    return body as T;
+// --- Bulk Trades ------------------------------------------------------------
+// These run entirely in this browser tab (see bulkRunManager.ts /
+// derivClient.ts / strategyEngineClient.ts) — the token never leaves the
+// browser and our own backend never sees it. Kept as async functions with
+// the same shape as before so the rest of the UI didn't need to change.
+
+const wrapManagerError = (err: unknown): never => {
+    throw err instanceof Error ? new BulkTraderApiError(err.message) : new BulkTraderApiError('Something went wrong.');
 };
 
-export const startBulkRun = (token: string, strategies: TStrategyConfig[]) =>
-    request<TStartBulkRunResponse>('/api/bulk/start', {
-        method: 'POST',
-        body: JSON.stringify({ token, strategies }),
-    });
+export const startBulkRun = (token: string, strategies: TStrategyConfig[]): Promise<TStartBulkRunResponse> =>
+    bulkRunManager.startBulkRun(token, strategies).catch(wrapManagerError);
 
-export const getBulkRunStatus = (runId: string) => request<TRunStatus>(`/api/bulk/status/${runId}`);
+export const getBulkRunStatus = (runId: string): Promise<TRunStatus> =>
+    bulkRunManager.getBulkRunStatus(runId).catch(wrapManagerError);
 
-export const stopBulkRun = (runId: string, strategyId?: string) =>
-    request<{ ok: boolean }>('/api/bulk/stop', {
-        method: 'POST',
-        body: JSON.stringify({ run_id: runId, strategy_id: strategyId }),
-    });
+export const stopBulkRun = (runId: string, strategyId?: string): Promise<{ ok: boolean }> =>
+    bulkRunManager.stopBulkRun(runId, strategyId).catch(wrapManagerError);
+
+// The AI auto-pilot (see autoPilotEngine.ts + AiAgentPanel.tsx) has no REST
+// calls of its own anymore — the backend only ever computes and broadcasts
+// signals over /ws/signals (already consumed by useDigitSignals for the
+// Digit Matrix grid), and every trading decision is made and executed
+// entirely in this browser tab.
 
 export { BulkTraderApiError };

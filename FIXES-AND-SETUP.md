@@ -22,30 +22,43 @@ Verified on this build: `tsc --noEmit` clean, `npm run build` succeeds,
 | `ALLOWED_ORIGIN` | Currently unset, so CORS is open to every origin. Set it to your Vercel domain before going live. |
 | `DATABASE_URL` | Optional. Without it the backend runs fine, just without persistence. |
 | `SIGNAL_RETENTION_HOURS` | Optional, defaults to 24, hard-capped at 24. See section 4. |
+| `AI_AGENT_MAX_STAKE` | Optional, defaults to 25. Hard ceiling on the AI agent's per-trade stake — the frontend cannot request higher, whatever it sends is clamped. |
+| `AI_AGENT_MAX_TRADES_CEILING` | Optional, defaults to 200. Hard ceiling on the AI agent's max-trades setting. |
 
 ---
 
-## 2. The websocket endpoint needs your attention
+## 2. The websocket endpoint — corrected 2026-09-15
 
-`backend/src/marketFeed.js` speaks the Deriv **v3** message protocol —
-`ticks_history`, `active_symbols`, `msg_type` responses. The documented
-endpoint for that protocol is:
+**Update: this section previously recommended pointing `marketFeed.js` at the
+legacy `ws.derivws.com/websockets/v3` endpoint. That guidance was wrong and
+has been reversed.** As of September 2026, Deriv's own current documentation
+(developers.deriv.com) states plainly to "Use ONLY" the New Options API, and
+in live testing the legacy v3 gateway is returning HTTP 520s and connection
+timeouts — it appears to be in the process of being sunset, alongside a
+separate `legacy-api.deriv.com` / `legacy-docs.deriv.com` split that Deriv has
+stood up for whatever legacy traffic still exists.
+
+`backend/src/marketFeed.js` now tries, in order:
 
 ```
-wss://ws.derivws.com/websockets/v3?app_id={NUMERIC_APP_ID}
+wss://api.derivws.com/trading/v1/options/ws/public   (New API, tried first)
+wss://ws.derivws.com/websockets/v3?app_id={NUMERIC_APP_ID}   (legacy, fallback only)
 ```
 
-The original code pointed at `wss://api.derivws.com/trading/v1/options/ws/public`
-instead, which belongs to the newer Options API — a different gateway that
-authenticates via an OTP obtained from a REST call, not a `/public` path.
+The New API's public gateway needs no app_id and no auth, and serves the same
+`active_symbols` / `ticks_history` / `tick` messages this file relies on — it
+just renames `active_symbols`' `symbol` field to `underlying_symbol`, which
+`marketFeed.js` now reads with a fallback for either name. The `ticks` and
+`ticks_history` messages are unchanged field-for-field.
 
-Two credentials are involved and they are easy to confuse:
+`DERIV_WS_APP_ID` (a numeric app_id, separate from the alphanumeric
+`NEXT_PUBLIC_DERIV_APP_ID` OAuth client ID used for login) is now only needed
+if the legacy fallback is ever actually reached — harmless to leave unset.
 
-- `NEXT_PUBLIC_DERIV_APP_ID=34o9mFaY1HjSSSXyE5DuL` — alphanumeric OAuth client
-  ID, used for **login**. Correct as-is.
-- `DERIV_WS_APP_ID` — a **numeric** app_id you register at api.deriv.com, used
-  for the **v3 websocket**. Not yet set; currently falls back to `1089`, which
-  is Deriv's shared public test ID. Register your own before real use.
+**Not yet verified:** these fixes were made by reading Deriv's current docs
+and the code, not by running the app end-to-end (no live network in this
+tool's sandbox). Redeploy and check the Render logs / browser console; paste
+back anything that still errors.
 
 The feed now tries endpoints in order and rotates to the next if one delivers
 no usable data, logging which URL it dialled. If the digit grid is empty,
@@ -120,19 +133,88 @@ which matters if you scale up symbol subscriptions.
 
 ---
 
-## 5. Not done
+## 5. The AI agent (now implemented)
 
-The AI agent backend and its network animation are still just the approved
-concept — no code written for them yet. The honest-labelling point from that
-concept still stands: digits on these indices are independent draws, so past
-frequency doesn't shift the odds of the next tick. Build the agent as a fast,
-legible execution instrument with hard caps that actually halt a run, and label
-its output as deviation rather than win probability.
+Implemented end to end, backend and frontend, not just the approved concept.
 
-## 6. What "error-free" means here
+**Backend** — `backend/src/aiAgent.js` (new), plus additions to `runner.js`,
+`signalHub.js`, `server.js`:
+
+- Scores every allowed symbol's top signal once a second using the existing
+  `computeSignals()` deviation math from `digitAnalysis.js` — no new scoring
+  model, same honest numbers already in the Digit Matrix.
+- **The confidence gate is enforced server-side, not just shown in the UI.**
+  `buildAgentConfig()` clamps whatever the client sends: stake is capped at
+  `AI_AGENT_MAX_STAKE` (env var, default 25), the minimum deviation threshold
+  can never go below a floor of 40 no matter what's requested, max trades is
+  capped at 200, and **starting without a `stop_loss` throws** — the agent
+  will not run unattended without a hard exit.
+- A 6-second per-symbol cooldown and a 2-second global cooldown between any
+  two trades, so it can't hammer one market or overlap trades.
+- Every decision the agent makes — scored, gate-passed, gate-rejected,
+  executing, settled, error — is broadcast immediately on the existing
+  `/ws/signals` socket as an `agent_event` frame.
+- New endpoints, same token-authenticated pattern as `/api/bulk/*`:
+  `POST /api/ai/start`, `GET /api/ai/status/:run_id`, `POST /api/ai/stop`.
+
+**Frontend** — new files under `src/pages/bulk-trader/`:
+
+- `AiAgentPanel.tsx` — config (symbols, stake, threshold, required stop loss,
+  optional take profit, max trades), start/stop, live stats.
+- `AiAgentPipeline.tsx` — the pipeline diagram, driven only by real
+  `agent_event` frames. When the agent is idle the diagram is static, not
+  animated, because nothing is actually happening yet.
+- `useAiAgentEvents.ts` — subscribes to `agent_event` frames on the shared
+  signals socket.
+- `aiAgentTypes.ts` — shared types for config/status/events.
+- `tokenStorage.ts` — the token-lookup logic, pulled out of `bulk-trader.tsx`
+  so both the manual strategy builder and the AI agent read the same saved
+  credential instead of each having their own copy.
+
+Mounted at the bottom of the Bulk Trades tab, gated behind the same risk
+checkbox the manual strategy builder uses.
+
+**Verified, not assumed:**
+
+- A standalone test of `aiAgent.js`'s logic, run against fake
+  connections/market feeds (not the real Deriv API), passed all 7 assertions:
+  a config with no `stop_loss` is rejected outright; stake, minimum
+  confidence, and max trades are all clamped to their hard caps even when the
+  input tries to exceed them; a low-confidence signal is gate-rejected; a
+  high-confidence one is gate-passed, executed, and settled with the correct
+  profit.
+- Full project `tsc --noEmit`, `npm run build`, and `npx jest` (42/42 suites,
+  420 passing tests, 1 todo) all pass with the agent code included.
+- The backend boots cleanly with the agent wired in.
+
+**Labelling stayed honest**, per the condition attached when the concept was
+approved: the panel's own copy states the deviation score is not a
+win-probability estimate, and the pipeline log says "deviation," never
+"accurate signal" or similar.
+
+**Not verified:** actual trade placement against a live Deriv account. This
+sandbox cannot reach derivws.com, so the executor's `buy` call has only been
+exercised against a fake connection in the standalone test, never the real
+API. Test on a **demo account** first, and watch the pipeline log for
+`gate_rejected` events with reasonable reasons before trusting `gate_passed`
+ones.
+
+---
+
+## 6. Known pre-existing gap, not introduced by these changes
+
+`npx eslint` fails across the whole project — `.eslintrc.js` references
+`eslint-plugin-react`, which isn't listed in `package.json`'s dependencies.
+Confirmed this predates every change in this document by running it against
+an untouched clone of the original repo, where it fails identically.
+`tsc --noEmit` and the production build are unaffected by this and remain the
+authoritative checks used throughout this document.
+
+## 7. What "error-free" means here
 
 This build compiles, type-checks and passes its tests. It has **not** been run
 against a live Deriv socket — this environment blocks derivws.com, so every
 connection attempt returned 403 from the proxy. Anything that only executes
 with a real token and a live feed is unverified. Test on a **demo account**
 first.
+
