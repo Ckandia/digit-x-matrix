@@ -5,6 +5,7 @@
 // anything server-specific.
 import { v4 as uuidv4 } from 'uuid';
 import { DerivClientConnection } from './derivClient';
+import { tradeBus } from './tradeBus';
 import { TStrategyConfig, TStrategyStatus } from './types';
 
 const TRADE_COOLDOWN_MS = 1000;
@@ -44,6 +45,7 @@ export class StrategyEngine {
 
     private _stopRequested = false;
     private _active_poc_sub: number | null = null;
+    private _burst_subs: number[] = [];
 
     constructor(connection: DerivClientConnection, config: TStrategyConfig, currency?: string) {
         this.id = uuidv4();
@@ -78,6 +80,11 @@ export class StrategyEngine {
 
     start() {
         this.status = 'running';
+        tradeBus.log('info', `${this.label}: started on ${this.config.symbol}`);
+        if ((this.config.burst_count ?? 1) > 1) {
+            void this._runBurst();
+            return;
+        }
         this._placeNextTrade();
     }
 
@@ -86,10 +93,123 @@ export class StrategyEngine {
         if (this.status === 'running') {
             this.status = 'stopped';
             this.stop_reason = reason;
+            tradeBus.log('info', `${this.label}: stopped (${reason})`);
         }
         if (this._active_poc_sub != null) {
             this.connection.unsubscribe(this._active_poc_sub);
             this._active_poc_sub = null;
+        }
+        for (const sub of this._burst_subs) this.connection.unsubscribe(sub);
+        this._burst_subs = [];
+    }
+
+    /**
+     * Burst mode: fire all the buys together, on the tick when Start is pressed, instead of one
+     * trade after another. Buys go out in concurrent chunks of 10; before each later chunk the
+     * tick counter is checked, and if more than `max_entry_ticks` ticks have already passed the
+     * remaining buys are NOT sent (slippage cap). So every contract enters within at most that
+     * many ticks, and for tick contracts the results carry at most that many different last digits.
+     */
+    private async _runBurst() {
+        const CHUNK = 10;
+        const cap = Math.max(1, Math.min(5, Math.floor(this.config.max_entry_ticks ?? 3)));
+        const stake = this.config.stake;
+        let count = Math.floor(this.config.burst_count ?? 1);
+        const balance = this.connection.accountInfo?.balance;
+        if (typeof balance === 'number' && stake * count > balance) {
+            const affordable = Math.floor(balance / stake);
+            tradeBus.log('error', `${this.label}: balance ${balance} cannot cover ${count} x ${stake}; sending ${affordable} instead`);
+            count = affordable;
+        }
+        if (count < 1) {
+            this.status = 'error';
+            this.error = 'Balance is too small for even one trade at this stake';
+            return;
+        }
+
+        const parameters: Record<string, unknown> = {
+            amount: stake,
+            basis: 'stake',
+            contract_type: this.current_contract_type,
+            currency: this.currency,
+            duration: Math.max(1, Number(this.config.duration_ticks) || 1),
+            duration_unit: 't',
+            underlying_symbol: this.config.symbol,
+        };
+        if (NEEDS_BARRIER.has(this.current_contract_type)) parameters.barrier = String(this.config.prediction);
+
+        let ticks_seen = -1; // the first push is the current tick, not a new one
+        this._burst_subs.push(
+            this.connection.subscribe({ ticks: this.config.symbol }, data => {
+                if (data?.tick) ticks_seen += 1;
+            })
+        );
+
+        tradeBus.log('info', `${this.label}: burst of ${count} x ${this.current_contract_type} (${parameters.duration} tick(s), stake ${stake}) on ${this.config.symbol}`);
+        const ids: string[] = [];
+        let rejected = 0;
+        let first_error = '';
+        let skipped = 0;
+        for (let sent = 0; sent < count && !this._stopRequested; sent += CHUNK) {
+            if (sent > 0 && ticks_seen >= cap) {
+                skipped = count - sent;
+                tradeBus.log('error', `${this.label}: slippage cap reached (${cap} ticks); ${skipped} buys were not sent`);
+                break;
+            }
+            const n = Math.min(CHUNK, count - sent);
+            // All n requests leave in the same instant; Promise.allSettled only waits for the replies.
+            const replies = await Promise.allSettled(
+                Array.from({ length: n }, () => this.connection.send({ buy: '1', price: stake, parameters }))
+            );
+            for (const r of replies) {
+                const id = r.status === 'fulfilled' ? r.value?.buy?.contract_id : undefined;
+                if (id) ids.push(String(id));
+                else {
+                    rejected += 1;
+                    if (!first_error) first_error = r.status === 'rejected' ? String(r.reason?.message ?? r.reason) : 'no contract id';
+                }
+            }
+        }
+        if (rejected > 0) {
+            tradeBus.log('error', `${this.label}: ${rejected} buys rejected on ${this.config.symbol} for ${parameters.duration} tick(s): ${first_error}`);
+        }
+        if (ids.length === 0) {
+            this.status = 'error';
+            this.error = first_error || 'No buys were accepted';
+            return;
+        }
+
+        const entry_ticks = new Set<string>();
+        const exit_digits = new Set<string>();
+        let open = ids.length;
+        for (const contract_id of ids) {
+            const sub = this.connection.subscribe({ proposal_open_contract: 1, contract_id }, (data, err) => {
+                if (err) return;
+                const contract = data?.proposal_open_contract;
+                if (contract) tradeBus.contract(contract);
+                if (!contract?.is_sold) return;
+                const profit = Number(contract.profit ?? 0);
+                this.trades += 1;
+                this.total_profit += profit;
+                if (profit > 0) this.wins += 1;
+                else this.losses += 1;
+                this.last_result = profit > 0 ? 'win' : 'loss';
+                entry_ticks.add(String(contract.entry_tick_time ?? contract.date_start ?? ''));
+                exit_digits.add(String(contract.exit_tick_display_value ?? contract.exit_tick ?? '').slice(-1));
+                open -= 1;
+                if (open > 0) return;
+                this.status = 'stopped';
+                this.stop_reason = 'burst complete';
+                tradeBus.log(
+                    this.total_profit >= 0 ? 'success' : 'error',
+                    `${this.label}: burst done. ${this.wins} won, ${this.losses} lost, net ${this.total_profit.toFixed(2)}. ` +
+                        `Entry ticks: ${entry_ticks.size}, last digits: ${[...exit_digits].join(',')}` +
+                        (skipped ? `, ${skipped} not sent (slippage cap)` : '')
+                );
+                for (const s of this._burst_subs) this.connection.unsubscribe(s);
+                this._burst_subs = [];
+            });
+            this._burst_subs.push(sub);
         }
     }
 
@@ -127,6 +247,7 @@ export class StrategyEngine {
         if (stop_reason) {
             this.status = 'stopped';
             this.stop_reason = stop_reason;
+            tradeBus.log('info', `${this.label}: stopped (${stop_reason}), net ${this.total_profit.toFixed(2)}`);
             return;
         }
 
@@ -143,6 +264,12 @@ export class StrategyEngine {
             parameters.barrier = String(this.config.prediction);
         }
 
+        const tried = Number(parameters.duration);
+        tradeBus.log(
+            'info',
+            `${this.label}: buying ${this.current_contract_type} on ${this.config.symbol}, ${tried} tick(s), stake ${this.current_stake}` +
+                (NEEDS_BARRIER.has(this.current_contract_type) ? `, prediction ${this.config.prediction}` : '')
+        );
         try {
             const buy_response = await this.connection.send({
                 buy: '1',
@@ -155,6 +282,10 @@ export class StrategyEngine {
         } catch (err: any) {
             this.status = 'error';
             this.error = err?.message || 'Failed to place trade';
+            tradeBus.log(
+                'error',
+                `${this.label}: ${this.current_contract_type} on ${this.config.symbol} for ${tried} tick(s) failed: ${this.error}`
+            );
         }
     }
 
@@ -165,9 +296,11 @@ export class StrategyEngine {
                 if (err) {
                     this.status = 'error';
                     this.error = err.message;
+                    tradeBus.log('error', `${this.label}: lost track of contract ${contract_id}: ${err.message}`);
                     return;
                 }
                 const contract = data?.proposal_open_contract;
+                if (contract) tradeBus.contract(contract);
                 if (!contract?.is_sold) return; // still open — wait for settlement
 
                 if (this._active_poc_sub != null) this.connection.unsubscribe(this._active_poc_sub);
@@ -175,6 +308,7 @@ export class StrategyEngine {
 
                 const profit = Number(contract.profit ?? 0);
                 const won = profit > 0;
+                tradeBus.log(won ? 'success' : 'error', `${this.label}: ${won ? 'won' : 'lost'} ${Math.abs(profit).toFixed(2)} on ${this.config.symbol}`);
                 this.trades += 1;
                 this.total_profit += profit;
                 this.last_result = won ? 'win' : 'loss';

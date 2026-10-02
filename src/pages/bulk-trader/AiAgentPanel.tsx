@@ -12,7 +12,14 @@ import {
     TAutoPilotEvent,
     TRiskLevel,
 } from './autoPilotEngine';
+import { useStore } from '@/hooks/useStore';
+import { MessageTypes } from '@/external/bot-skeleton';
+import { getDurationTicks, mergeTradeRow, TTradeRow } from './tradeHistory';
+import type { TRecoveryMode } from './autoPilotEngine';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
+import { keepScreenAwake } from './wakeLock';
+import { loadLiveRules } from './contractRules';
+import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
 
 type TLadderRow = {
@@ -39,6 +46,7 @@ const AiAgentPanel = ({
     onNeedsRiskAccept: () => void;
 }) => {
     const { snapshots } = useDigitSignals();
+    const { run_panel, transactions, summary_card, journal } = useStore();
     const { isAuthorized, authData, activeLoginid } = useApiBase();
     const snapshotsRef = useRef(snapshots);
     useEffect(() => {
@@ -58,7 +66,12 @@ const AiAgentPanel = ({
 
     const [learnMode, setLearnMode] = useState<TLearningMode>('learn');
     const [learnInfo, setLearnInfo] = useState<ReturnType<LearningEngine['summary']> | null>(null);
+    const [history, setHistory] = useState<TTradeRow[]>([]);
+    const [activity, setActivity] = useState<{ ts: number; kind: string; text: string }[]>([]);
+    const [labRows, setLabRows] = useState<TLabRow[]>([]);
+    const [limitNote, setLimitNote] = useState('');
     const learnerRef = useRef<LearningEngine | null>(null);
+    const capStopLossRef = useRef(0);
     const connectionRef = useRef<DerivClientConnection | null>(null);
     const engineRef = useRef<AutoPilotEngine | null>(null);
     const is_running = status === 'running';
@@ -112,7 +125,9 @@ const AiAgentPanel = ({
     // manual edits, since picking a preset is "start over from here."
     useEffect(() => {
         if (is_running || balance == null) return;
-        setConfig(buildConfigFromPreset(riskLevel, balance));
+        const preset_config = buildConfigFromPreset(riskLevel, balance);
+        capStopLossRef.current = preset_config.stop_loss; // the hard cap the AI may never exceed
+        setConfig(preset_config);
     }, [riskLevel, balance, is_running]);
 
     const updateField = (key: keyof TAutoPilotConfig, value: number) => {
@@ -122,6 +137,7 @@ const AiAgentPanel = ({
     const handleEngineEvent = (event: TAutoPilotEvent) => {
         if (event.phase === 'started') {
             setStatus('running');
+            keepScreenAwake('ai', true);
             setLadder([]);
             setTotalProfit(0);
         } else if (event.phase === 'entering' && event.symbol && event.contract_type) {
@@ -149,9 +165,12 @@ const AiAgentPanel = ({
             if (learnerRef.current) setLearnInfo(learnerRef.current.summary());
         } else if (event.phase === 'stopped') {
             setStatus('stopped');
+            keepScreenAwake('ai', false);
             setStopReason(event.reason);
+            journal.pushMessage(`AI auto-pilot stopped: ${event.reason ?? 'no reason given'}`, MessageTypes.NOTIFY);
         } else if (event.phase === 'error') {
             setStatus('error');
+            keepScreenAwake('ai', false);
             setError(event.error || 'Something went wrong.');
         }
     };
@@ -184,12 +203,14 @@ const AiAgentPanel = ({
                 connectionRef.current = connection;
             }
 
+            await loadLiveRules(Object.keys(snapshotsRef.current));
             if (!learnerRef.current) {
                 const learner = new LearningEngine(await makeProfileId(activeLoginid || 'account'), learnMode);
                 await learner.syncFromBackend();
                 learnerRef.current = learner;
             }
             learnerRef.current.mode = learnMode;
+            learnerRef.current.fixed_duration = config?.fixed_duration;
             setLearnInfo(learnerRef.current.summary());
 
             const engine = new AutoPilotEngine(
@@ -198,8 +219,27 @@ const AiAgentPanel = ({
                 config,
                 () => snapshotsRef.current,
                 handleEngineEvent,
-                learnerRef.current
+                learnerRef.current,
+                {
+                    onContract: contract => {
+                        setHistory(prev => mergeTradeRow(prev, contract));
+                        const c = { ...contract, id: contract.id ?? contract.contract_id };
+                        transactions.onBotContractEvent(c as never);
+                        summary_card.onBotContractEvent(c as never);
+                        run_panel.onBotContractEvent(c as never);
+                    },
+                    onLog: (kind, message) => {
+                        setActivity(prev => [{ ts: Date.now(), kind, text: message }, ...prev].slice(0, 40));
+                        journal.pushMessage(
+                            message,
+                            kind === 'error' ? MessageTypes.ERROR : kind === 'success' ? MessageTypes.SUCCESS : MessageTypes.NOTIFY
+                        );
+                    },
+                }
             );
+            run_panel.run_id = `ai-${Date.now()}`;
+            run_panel.toggleDrawer(true);
+            journal.pushMessage('AI auto-pilot started', MessageTypes.NOTIFY);
             engineRef.current = engine;
             engine.start();
         } catch (err) {
@@ -216,6 +256,8 @@ const AiAgentPanel = ({
             connectionRef.current?.close();
         };
     }, []);
+
+    const closed = history.filter(r => !r.open);
 
     const bar = useMemo(() => {
         if (!config) return null;
@@ -323,6 +365,33 @@ const AiAgentPanel = ({
                     )}
 
                     <label className='ai-agent-panel__hint'>
+                        {localize('After a loss')}{' '}
+                        <select
+                            value={config?.recovery_mode ?? 'martingale'}
+                            disabled={!config}
+                            onChange={e => config && setConfig({ ...config, recovery_mode: e.target.value as TRecoveryMode })}
+                        >
+                            <option value='martingale'>{localize('Martingale: same side, bigger stake')}</option>
+                            <option value='flip'>{localize('Auto-flip: opposite side, bigger stake')}</option>
+                            <option value='flat'>{localize('Flat: same stake, no recovery')}</option>
+                        </select>
+                    </label>
+                    <label className='ai-agent-panel__hint'>
+                        {localize('Time frame')}{' '}
+                        <select
+                            value={config?.fixed_duration ?? 0}
+                            disabled={!config}
+                            onChange={e => config && setConfig({ ...config, fixed_duration: Number(e.target.value) || undefined })}
+                        >
+                            <option value={0}>{localize('Auto (AI explores 1-10 ticks)')}</option>
+                            {[1, 2, 3, 5, 10].map(t => (
+                                <option key={t} value={t}>
+                                    {localize('{{t}} tick(s) where the contract allows', { t })}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
+                    <label className='ai-agent-panel__hint'>
                         {localize('Learning')}{' '}
                         <select value={learnMode} onChange={e => setLearnMode(e.target.value as TLearningMode)}>
                             <option value='learn'>{localize('Learn (explore with small stakes)')}</option>
@@ -330,6 +399,39 @@ const AiAgentPanel = ({
                             <option value='off'>{localize('Off (signals only)')}</option>
                         </select>
                     </label>
+                    <button
+                        type='button'
+                        className='ai-agent-panel__hint'
+                        disabled={!config}
+                        onClick={async () => {
+                            if (!config) return;
+                            if (!learnerRef.current) {
+                                const created = new LearningEngine(await makeProfileId(activeLoginid || 'account'), learnMode);
+                                await created.syncFromBackend();
+                                learnerRef.current = created;
+                                setLearnInfo(created.summary());
+                            }
+                            const learner = learnerRef.current;
+                            const s = suggestLimits(learner, capStopLossRef.current || config.stop_loss);
+                            setConfig({ ...config, stop_loss: s.stop_loss, take_profit: s.take_profit });
+                            setLimitNote(s.reason);
+                            setLabRows(
+                                labReport(learner, s.take_profit / config.stake, s.stop_loss / config.stake, config.martingale_multiplier, config.max_steps)
+                            );
+                        }}
+                    >
+                        {localize('AI: set take profit / stop loss and test')}
+                    </button>
+                    {limitNote && <span className='ai-agent-panel__hint'>{limitNote}</span>}
+                    {labRows.map(r => (
+                        <span key={r.label} className='ai-agent-panel__hint'>
+                            {r.label}: {r.n} trades, TP hit {(r.tp_hit * 100).toFixed(0)}% vs SL hit {(r.sl_hit * 100).toFixed(0)}%, avg{' '}
+                            {r.expectancy.toFixed(2)} stakes/session
+                            {r.verdict === 'illusion' && ' (more TP than SL hits, but still losing on average)'}
+                            {r.verdict === 'proven_edge' && ' (proven edge)'}
+                            {r.verdict === 'not_enough_data' && ' (need 30+ trades)'}
+                        </span>
+                    ))}
                     {learnInfo && learnInfo.total_trades > 0 && (
                         <span className='ai-agent-panel__hint'>
                             {localize('Learned from {{n}} trades across {{c}} market/contract/time-frame combinations; {{p}} show a proven edge.', {
@@ -449,6 +551,72 @@ const AiAgentPanel = ({
                     <button type='button' className='ai-agent-panel__stop' onClick={handleStop}>
                         {localize('Stop now')}
                     </button>
+                </div>
+            )}
+
+            {(history.length > 0 || activity.length > 0) && (
+                <div className='ai-agent-panel__history'>
+                    <div className='ai-agent-panel__history-head'>
+                        <strong>{localize('AI trade results')}</strong>
+                        <span>
+                            {localize('{{n}} trades, {{w}} won, {{l}} lost, net {{p}}', {
+                                n: closed.length,
+                                w: closed.filter(r => r.profit > 0).length,
+                                l: closed.filter(r => r.profit <= 0).length,
+                                p: closed.reduce((a, r) => a + r.profit, 0).toFixed(2),
+                            })}
+                        </span>
+                        <button
+                            type='button'
+                            className='ai-agent-panel__retry'
+                            onClick={() => {
+                                setHistory([]);
+                                setActivity([]);
+                            }}
+                        >
+                            {localize('Clear')}
+                        </button>
+                    </div>
+                    {history.length > 0 && (
+                        <div className='ai-agent-panel__history-scroll'>
+                            <table className='ai-agent-panel__history-table'>
+                                <thead>
+                                    <tr>
+                                        <th>{localize('Time')}</th>
+                                        <th>{localize('Market')}</th>
+                                        <th>{localize('Contract')}</th>
+                                        <th>{localize('Ticks')}</th>
+                                        <th>{localize('Stake')}</th>
+                                        <th>{localize('P/L')}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {history.map(r => (
+                                        <tr key={r.id}>
+                                            <td>{new Date(r.ts * 1000).toLocaleTimeString()}</td>
+                                            <td>{r.symbol}</td>
+                                            <td>{r.type}</td>
+                                            <td>{getDurationTicks(r) ?? '-'}</td>
+                                            <td>{r.stake.toFixed(2)}</td>
+                                            <td className={r.open ? '' : r.profit > 0 ? 'is-win' : 'is-loss'}>
+                                                {r.open ? localize('open') : r.profit.toFixed(2)}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                    {activity.length > 0 && (
+                        <div className='ai-agent-panel__activity'>
+                            <strong>{localize('Activity and errors')}</strong>
+                            {activity.map((a, i) => (
+                                <div key={`${a.ts}-${i}`} className={`ai-agent-panel__activity-line is-${a.kind}`}>
+                                    {new Date(a.ts).toLocaleTimeString()} {a.text}
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
         </section>

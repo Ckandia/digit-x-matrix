@@ -15,6 +15,11 @@ import { TDigitSignal } from './analysis-types';
 import { TRunStatus, TStrategyConfig } from './types';
 import { useDigitSignals } from './useDigitSignals';
 import { getActiveToken } from './tokenStorage';
+import { useStore } from '@/hooks/useStore';
+import { MessageTypes } from '@/external/bot-skeleton';
+import TradeResults from './TradeResults';
+import { keepScreenAwake } from './wakeLock';
+import { tradeBus } from './tradeBus';
 import './bulk-trader.scss';
 
 const STORAGE_KEY = 'bulk_trader_run_id';
@@ -146,10 +151,34 @@ const BulkTrader = () => {
     const [autoFlip, setAutoFlip] = useState(DEFAULT_STRATEGY.auto_flip);
     const [stopWin, setStopWin] = useState(true);
     const [bothSides, setBothSides] = useState(false);
+    const [burstMode, setBurstMode] = useState(true);
+    const [maxEntryTicks, setMaxEntryTicks] = useState(3);
     const [fastExecution, setFastExecution] = useState(DEFAULT_STRATEGY.fast_execution);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
     const [runStatus, setRunStatus] = useState<TRunStatus | null>(null);
+    const { run_panel, transactions, summary_card, journal } = useStore();
+    const [feed, setFeed] = useState(tradeBus.snapshot());
+    useEffect(() => {
+        const off_feed = tradeBus.subscribe(() => setFeed(tradeBus.snapshot()));
+        // Also mirror every bulk trade into the left run panel (Summary / Transactions).
+        const off_contract = tradeBus.onContract(contract => {
+            const c = { ...contract, id: contract.id ?? contract.contract_id };
+            transactions.onBotContractEvent(c as never);
+            summary_card.onBotContractEvent(c as never);
+        });
+        const off_log = tradeBus.onLog((kind, text) =>
+            journal.pushMessage(
+                text,
+                kind === 'error' ? MessageTypes.ERROR : kind === 'success' ? MessageTypes.SUCCESS : MessageTypes.NOTIFY
+            )
+        );
+        return () => {
+            off_feed();
+            off_contract();
+            off_log();
+        };
+    }, [transactions, summary_card, journal]);
     const [runId, setRunId] = useState<string | null>(() => sessionStorage.getItem(STORAGE_KEY));
     const [hasAcceptedRisk, setHasAcceptedRisk] = useState(false);
     const [isStarting, setIsStarting] = useState(false);
@@ -159,6 +188,10 @@ const BulkTrader = () => {
 
     const backend_configured = Boolean(process.env.NEXT_PUBLIC_BULK_TRADER_API_URL);
     const is_running = Boolean(runStatus?.is_active);
+    useEffect(() => {
+        keepScreenAwake('bulk', is_running);
+        return () => keepScreenAwake('bulk', false);
+    }, [is_running]);
 
     // Reasons the start buttons are currently disabled, in priority order —
     // shown to the user instead of leaving them to guess at a plain
@@ -278,6 +311,8 @@ const BulkTrader = () => {
                 take_profit: stopWin ? takeProfit : undefined,
                 stop_loss: stopLoss,
                 max_trades: maxTrades,
+                burst_count: burstMode && maxTrades > 1 ? maxTrades : undefined,
+                max_entry_ticks: maxEntryTicks,
             };
             const primary_type = override_contract_type ?? contractType;
 
@@ -326,6 +361,8 @@ const BulkTrader = () => {
         }
         setIsStarting(true);
         try {
+            run_panel.run_id = `bulk-${Date.now()}`;
+            run_panel.toggleDrawer(true);
             const response = await startBulkRun(token, strategies);
             sessionStorage.setItem(STORAGE_KEY, response.run_id);
             setRunId(response.run_id);
@@ -503,6 +540,31 @@ const BulkTrader = () => {
                                 disabled={is_running}
                             />
                         </label>
+
+                        <label className='bulk-trader__field'>
+                            <span>{localize('FIRE ALL AT ONCE (BURST)')}</span>
+                            <input type='checkbox' checked={burstMode} onChange={e => setBurstMode(e.target.checked)} disabled={is_running} />
+                        </label>
+
+                        {burstMode && (
+                            <label className='bulk-trader__field'>
+                                <span>{localize('MAX ENTRY TICKS (SLIPPAGE CAP)')}</span>
+                                <input
+                                    type='number'
+                                    min={1}
+                                    max={5}
+                                    step={1}
+                                    value={maxEntryTicks}
+                                    onChange={e => setMaxEntryTicks(Number(e.target.value))}
+                                    disabled={is_running}
+                                />
+                                <small>
+                                    {localize('Total stake this burst: {{t}}', {
+                                        t: (stake * Math.max(1, maxTrades) * (bothSides ? 2 : 1)).toFixed(2),
+                                    })}
+                                </small>
+                            </label>
+                        )}
                     </div>
 
                     <div className='bulk-trader__toggle-row'>
@@ -804,6 +866,7 @@ const BulkTrader = () => {
                 </div>
             )}
 
+            <TradeResults rows={feed.rows} activity={feed.activity} onClear={() => tradeBus.clear()} />
         </div>
     );
 };

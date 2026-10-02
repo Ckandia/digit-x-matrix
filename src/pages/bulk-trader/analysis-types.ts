@@ -37,6 +37,7 @@ export type TDigitStats = {
     last_updated: string | null;
     last_digit: number | null;
     last_digits: number[];
+    recent?: Record<string, { n: number; even_pct: number; odd_pct: number; over5_pct: number; under5_pct: number }>;
     digit_counts: number[];
     digit_percentages: number[];
     expected_pct: number;

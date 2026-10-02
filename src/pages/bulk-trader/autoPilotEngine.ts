@@ -12,6 +12,7 @@
 import { DerivClientConnection } from './derivClient';
 import { TDigitSignal, TSnapshotMap } from './analysis-types';
 import { candidatesFromSnapshots, LearningEngine } from './learningEngine';
+import { clampTicks, isTickTradable } from './contractRules';
 
 export type TRiskLevel = 'conservative' | 'moderate' | 'aggressive';
 
@@ -29,7 +30,13 @@ export const RISK_PRESETS: Record<TRiskLevel, TRiskPreset> = {
     aggressive: { stake_pct: 3, martingale_multiplier: 2.5, max_steps: 6, stop_loss_pct: 25, take_profit_pct: 30 },
 };
 
+/** What happens after a loss: 'martingale' = same contract again with a bigger stake, 'flip' = the opposite side with a bigger stake, 'flat' = same base stake, no recovery. */
+export type TRecoveryMode = 'martingale' | 'flip' | 'flat';
+
 export type TAutoPilotConfig = {
+    recovery_mode?: TRecoveryMode;
+    /** Fixed tick duration for every trade (clamped to what each contract allows); undefined = the AI chooses. */
+    fixed_duration?: number;
     stake: number;
     martingale_multiplier: number;
     max_steps: number;
@@ -43,6 +50,7 @@ export type TAutoPilotConfig = {
 export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
     const preset = RISK_PRESETS[level];
     return {
+        recovery_mode: 'martingale',
         stake: Number(((balance * preset.stake_pct) / 100).toFixed(2)),
         martingale_multiplier: preset.martingale_multiplier,
         max_steps: preset.max_steps,
@@ -106,6 +114,7 @@ export const pickBestGlobalCandidate = (snapshots: TSnapshotMap): TCandidate | n
         for (const signal of snapshot.signals) {
             if (!AUTOPILOT_CONTRACT_TYPES.includes(signal.contract_type as (typeof AUTOPILOT_CONTRACT_TYPES)[number]))
                 continue;
+            if (!isTickTradable(symbol, signal.contract_type)) continue; // e.g. Ends Between/Outside has no tick durations
             if (!best || signal.confidence > best.confidence) best = { symbol, ...signal };
         }
     }
@@ -151,12 +160,8 @@ const NEEDS_SINGLE_BARRIER = new Set(['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'D
 /** Deriv rejects durations outside a contract's allowed tick range, so clamp
  *  whatever the analysis suggests: most non-digit contracts need at least 5
  *  ticks, Only Ups/Downs allows 2-5, digits allow 1-10. */
-const clampDuration = (contract_type: string, ticks: number | undefined): number => {
-    const wanted = Number(ticks) || 1;
-    if (contract_type === 'RUNHIGH' || contract_type === 'RUNLOW') return Math.min(5, Math.max(2, wanted));
-    if (contract_type === 'DIGITEVEN' || contract_type === 'DIGITODD') return Math.min(10, Math.max(1, wanted));
-    return Math.min(10, Math.max(5, wanted));
-};
+const clampDuration = (symbol: string, contract_type: string, ticks: number | undefined): number =>
+    clampTicks(symbol, contract_type, ticks);
 
 /** Builds Deriv `buy` parameters for any of the families this engine trades. */
 export const buildTradeParameters = (candidate: TCandidate, stake: number, currency: string) => {
@@ -177,7 +182,7 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
         const offset = Math.abs(Number(candidate.prediction) || 0);
         return {
             ...base,
-            duration: clampDuration(candidate.contract_type, candidate.duration_ticks),
+            duration: clampDuration(candidate.symbol, candidate.contract_type, candidate.duration_ticks),
             duration_unit: 't',
             barrier: `+${offset}`,
             barrier2: `-${offset}`,
@@ -186,7 +191,7 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
 
     const parameters: Record<string, unknown> = {
         ...base,
-        duration: clampDuration(candidate.contract_type, candidate.duration_ticks),
+        duration: clampDuration(candidate.symbol, candidate.contract_type, candidate.duration_ticks),
         duration_unit: 't',
     };
     if (NEEDS_SINGLE_BARRIER.has(candidate.contract_type)) {
@@ -197,6 +202,13 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
 
 const parameters_duration = (candidate: TCandidate, stake: number, currency: string) =>
     (buildTradeParameters(candidate, stake, currency) as { duration: number }).duration;
+
+export type TAutoPilotHooks = {
+    /** Every proposal_open_contract update, in Deriv's own shape (for the Transactions/Summary tabs). */
+    onContract?: (contract: Record<string, unknown>) => void;
+    /** Human-readable lines for the Journal tab. */
+    onLog?: (kind: 'info' | 'success' | 'error', message: string) => void;
+};
 
 export type TAutoPilotEvent = {
     ts: number;
@@ -227,6 +239,8 @@ export class AutoPilotEngine {
     private busy = false;
     private lastCandidate: TCandidate | null = null;
     private learner?: LearningEngine;
+    private hooks?: TAutoPilotHooks;
+    private refused = 0;
     private ladder_spent = 0;
     private last_wait_emit = 0;
 
@@ -236,15 +250,20 @@ export class AutoPilotEngine {
         config: TAutoPilotConfig,
         getSnapshots: () => TSnapshotMap,
         onEvent: (event: TAutoPilotEvent) => void,
-        learner?: LearningEngine
+        learner?: LearningEngine,
+        hooks?: TAutoPilotHooks
     ) {
         this.learner = learner;
+        this.hooks = hooks;
         this.connection = connection;
         this.currency = currency;
         this.config = config;
         this.getSnapshots = getSnapshots;
         this.onEvent = onEvent;
         this.connection.onFatalError = () => this._emit({ phase: 'error', error: 'Lost connection to Deriv' });
+        this.connection.onReconnecting = () => this.hooks?.onLog?.('info', 'Connection to Deriv dropped; reconnecting...');
+        this.connection.onReconnect = () =>
+            this.hooks?.onLog?.('success', 'Reconnected to Deriv. Any open contract is being re-checked.');
     }
 
     start() {
@@ -289,8 +308,18 @@ export class AutoPilotEngine {
         this._enter(candidate, stake);
     }
 
-    private _enter(candidate: TCandidate, wanted_stake: number) {
-        const stake = this.learner ? this.learner.governStake(wanted_stake, this.config.stake, candidate) : wanted_stake;
+    private _enter(candidate_in: TCandidate, wanted_stake: number) {
+        // A fixed time frame set in the panel overrides whatever the AI would have picked.
+        const candidate: TCandidate = this.config.fixed_duration
+            ? { ...candidate_in, duration_ticks: this.config.fixed_duration }
+            : candidate_in;
+        // The small-stake exploration cap applies ONLY to the first trade of a ladder. It used to
+        // clamp recovery steps too, which silently turned the martingale into a flat stake.
+        const governed = this.learner && this.step === 1 ? this.learner.governStake(wanted_stake, this.config.stake, candidate) : wanted_stake;
+        const stake = governed;
+        if (governed < wanted_stake) {
+            this.hooks?.onLog?.('info', `Exploring ${candidate.contract_type} ${candidate.duration_ticks ?? ''}t: first stake capped at ${governed} (25% of base) until 20 results are in.`);
+        }
         if (this.step === 1) this.ladder_spent = 0;
         this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
         this.busy = true;
@@ -305,6 +334,12 @@ export class AutoPilotEngine {
         });
 
         const parameters = buildTradeParameters(candidate, stake, this.currency);
+        const tried_duration = Number((parameters as { duration?: number }).duration);
+        this.hooks?.onLog?.(
+            'info',
+            `Buying ${candidate.contract_type} on ${candidate.symbol}, ${tried_duration} tick(s), stake ${stake} ${this.currency}` +
+                (candidate.prediction !== undefined ? `, prediction ${candidate.prediction}` : '')
+        );
         this.connection
             .send({ buy: '1', price: stake, parameters })
             .then(res => {
@@ -314,7 +349,20 @@ export class AutoPilotEngine {
             })
             .catch(err => {
                 this.busy = false;
-                this._emit({ phase: 'error', symbol: candidate.symbol, error: err?.message || 'Failed to place trade' });
+                const raw = String(err?.message || 'Failed to place trade');
+                if (/dropped/i.test(raw)) this.hooks?.onLog?.('error', 'The connection dropped while buying. Check Transactions: that contract may still be open.');
+                const detail = `${candidate.contract_type} on ${candidate.symbol} for ${tried_duration} tick(s): ${raw}`;
+                this.hooks?.onLog?.('error', detail);
+                // "Trading is not offered for this duration": skip this combination and pick another
+                // instead of stopping the whole session. Give up only if it keeps happening.
+                if (/not offered|duration/i.test(raw) && this.learner && this.refused < 8) {
+                    this.refused += 1;
+                    this.learner.markUnavailable(candidate.symbol, candidate.contract_type, tried_duration);
+                    this.hooks?.onLog?.('info', `Skipping ${candidate.symbol} ${candidate.contract_type} ${tried_duration}t for 6 hours and trying another.`);
+                    if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+                    return;
+                }
+                this._emit({ phase: 'error', symbol: candidate.symbol, error: detail });
                 this.stop('trade placement failed');
             });
     }
@@ -328,15 +376,18 @@ export class AutoPilotEngine {
                 return;
             }
             const contract = data?.proposal_open_contract;
+            if (contract) this.hooks?.onContract?.(contract);
             if (!contract?.is_sold) return;
+            this.refused = 0;
 
             this.connection.unsubscribe(sub_id);
             const profit = Number(contract.profit ?? 0);
             const won = profit > 0;
+            this.hooks?.onLog?.(won ? 'success' : 'error', `${won ? 'Won' : 'Lost'} ${Math.abs(profit).toFixed(2)} ${this.currency} on ${candidate.symbol} ${candidate.contract_type}`);
             if (this.learner && this.learner.mode !== 'off') {
                 this.learner.record({
                     symbol: candidate.symbol,
-                    contract_type: candidate.contract_type,
+                    contract_type: candidate.contract_type + ((candidate as { bucket?: string }).bucket ? `@${(candidate as { bucket?: string }).bucket}` : ''),
                     duration: Number(parameters_duration(candidate, stake, this.currency)),
                     stake: Number(contract.buy_price ?? stake),
                     profit,
@@ -371,6 +422,14 @@ export class AutoPilotEngine {
                 return;
             }
 
+            const mode = this.config.recovery_mode ?? 'flip';
+            if (mode === 'flat') {
+                // No recovery: keep the base stake; only the take-profit / stop-loss end the session.
+                this.step = 1;
+                this._findAndEnter(this.config.stake);
+                return;
+            }
+
             if (this.step >= this.config.max_steps) {
                 this.stop('max recovery steps reached');
                 return;
@@ -383,6 +442,10 @@ export class AutoPilotEngine {
                 return;
             }
             this.step += 1;
+            if (mode === 'martingale') {
+                this._enter(candidate, next_stake); // same contract, same side, bigger stake
+                return;
+            }
             const flip = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
             this._enter(flip, next_stake);
         });

@@ -53,7 +53,12 @@ export class DerivClientConnection {
     subscriptions = new Map<number, TOnUpdate>();
     subscription_ids = new Map<number, string>();
     isReady = false;
+    sub_requests = new Map<number, Record<string, unknown>>(); // so subscriptions survive a reconnect
     onFatalError: ((err: Error) => void) | null = null;
+    onReconnecting: (() => void) | null = null;
+    onReconnect: (() => void) | null = null;
+    private closed_on_purpose = false;
+    private keepalive: ReturnType<typeof setInterval> | null = null;
     accountInfo: TDerivAccountInfo | null = null;
 
     constructor(token: string) {
@@ -71,29 +76,84 @@ export class DerivClientConnection {
         };
 
         const wsUrl = await DerivWSAccountsService.fetchOTPWebSocketURL(this.token, account.account_id);
+        await this._open(wsUrl, true);
+        return { authorize: this.accountInfo as TDerivAccountInfo };
+    }
 
+    /** Opens the socket. The OTP-signed URL is already authenticated: no separate "authorize" request. */
+    private _open(wsUrl: string, first: boolean): Promise<void> {
         return new Promise((resolve, reject) => {
-            this.ws = new WebSocket(wsUrl);
+            const ws = new WebSocket(wsUrl);
+            this.ws = ws;
+            let opened = false;
 
-            this.ws.onopen = () => {
-                // The OTP-signed URL is already authenticated — there is no
-                // separate "authorize" request in the new API.
+            ws.onopen = () => {
+                opened = true;
                 this.isReady = true;
-                resolve({ authorize: this.accountInfo as TDerivAccountInfo });
+                this._startKeepAlive();
+                resolve();
             };
 
-            this.ws.onmessage = event => this._handleMessage(event.data);
+            ws.onmessage = event => this._handleMessage(event.data);
 
-            this.ws.onerror = () => {
-                if (!this.isReady) reject(new Error('Could not connect to Deriv.'));
-                this.onFatalError?.(new Error('Deriv connection error'));
+            ws.onerror = () => {
+                if (!opened) reject(new Error('Could not connect to Deriv.'));
             };
 
-            this.ws.onclose = () => {
+            ws.onclose = () => {
                 this.isReady = false;
-                this.onFatalError?.(new Error('Connection to Deriv closed'));
+                this._stopKeepAlive();
+                if (this.ws !== ws) return; // an old socket we already replaced
+                if (!opened && first) return; // initial connect failure is reported by reject()
+                if (this.closed_on_purpose) return;
+                // Anything waiting on a reply from the dead socket can never get one.
+                for (const [id, p] of this.pending) {
+                    p.reject(new Error('Connection to Deriv dropped while waiting for a reply'));
+                    this.pending.delete(id);
+                }
+                void this._reconnect();
             };
         });
+    }
+
+    /** Deriv closes idle sockets, so ping every 25s while open. */
+    private _startKeepAlive() {
+        this._stopKeepAlive();
+        this.keepalive = setInterval(() => {
+            try {
+                if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({ ping: 1 }));
+            } catch {
+                /* the close handler deals with it */
+            }
+        }, 25000);
+    }
+
+    private _stopKeepAlive() {
+        if (this.keepalive) clearInterval(this.keepalive);
+        this.keepalive = null;
+    }
+
+    /** Up to 5 attempts with a fresh login URL each time (the URL is single-use), then gives up. */
+    private async _reconnect() {
+        this.onReconnecting?.();
+        for (let attempt = 0; attempt < 5; attempt++) {
+            if (this.closed_on_purpose) return;
+            await new Promise(r => setTimeout(r, Math.min(1000 * 2 ** attempt, 8000)));
+            try {
+                const wsUrl = await DerivWSAccountsService.fetchOTPWebSocketURL(this.token, this.accountInfo?.account_id ?? '');
+                await this._open(wsUrl, false);
+                // Re-open every live subscription (ticks, open contracts) under the same req_ids.
+                // An open contract that settled while we were away is reported again as sold.
+                for (const [req_id, request] of this.sub_requests) {
+                    this.ws?.send(JSON.stringify({ ...request, subscribe: 1, req_id }));
+                }
+                this.onReconnect?.();
+                return;
+            } catch {
+                /* try again */
+            }
+        }
+        this.onFatalError?.(new Error('Connection to Deriv closed'));
     }
 
     _handleMessage(raw: string) {
@@ -155,6 +215,7 @@ export class DerivClientConnection {
     subscribe(request: Record<string, unknown>, onUpdate: TOnUpdate): number {
         const req_id = nextReqId();
         this.subscriptions.set(req_id, onUpdate);
+        this.sub_requests.set(req_id, request);
         this.ws?.send(JSON.stringify({ ...request, subscribe: 1, req_id }));
         return req_id;
     }
@@ -162,6 +223,7 @@ export class DerivClientConnection {
     async unsubscribe(req_id: number) {
         const sub_id = this.subscription_ids.get(req_id);
         this.subscriptions.delete(req_id);
+        this.sub_requests.delete(req_id);
         this.subscription_ids.delete(req_id);
         if (sub_id) {
             try {
@@ -173,6 +235,8 @@ export class DerivClientConnection {
     }
 
     close() {
+        this.closed_on_purpose = true;
+        this._stopKeepAlive();
         this.isReady = false;
         this.onFatalError = null; // this is a deliberate close, not a fatal error
         try {
