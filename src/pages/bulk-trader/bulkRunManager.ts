@@ -31,6 +31,9 @@ const validateStrategyConfig = (config: TStrategyConfig) => {
     if (config.stake < 0.35) {
         throw new Error(`Strategy "${config.label}" stake must be at least 0.35`);
     }
+    if (config.burst_count !== undefined && (config.burst_count < 1 || config.burst_count > 50)) {
+        throw new Error(`Strategy "${config.label}" burst size must be between 1 and 50`);
+    }
     const needs_prediction = ['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER'].includes(config.contract_type);
     if (needs_prediction && (config.prediction === undefined || config.prediction < 0 || config.prediction > 9)) {
         throw new Error(`Strategy "${config.label}" needs a digit prediction between 0 and 9`);

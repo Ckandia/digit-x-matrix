@@ -15,6 +15,7 @@ import {
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow, TTradeRow } from './tradeHistory';
+import type { TRecoveryMode } from './autoPilotEngine';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { keepScreenAwake } from './wakeLock';
 import { loadLiveRules } from './contractRules';
@@ -362,6 +363,18 @@ const AiAgentPanel = ({
                         </div>
                     )}
 
+                    <label className='ai-agent-panel__hint'>
+                        {localize('After a loss')}{' '}
+                        <select
+                            value={config?.recovery_mode ?? 'martingale'}
+                            disabled={!config}
+                            onChange={e => config && setConfig({ ...config, recovery_mode: e.target.value as TRecoveryMode })}
+                        >
+                            <option value='martingale'>{localize('Martingale: same side, bigger stake')}</option>
+                            <option value='flip'>{localize('Auto-flip: opposite side, bigger stake')}</option>
+                            <option value='flat'>{localize('Flat: same stake, no recovery')}</option>
+                        </select>
+                    </label>
                     <label className='ai-agent-panel__hint'>
                         {localize('Learning')}{' '}
                         <select value={learnMode} onChange={e => setLearnMode(e.target.value as TLearningMode)}>

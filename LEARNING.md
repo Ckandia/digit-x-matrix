@@ -51,3 +51,9 @@ The Summary / Transactions / Journal tray is hidden by `show_run_panel` in `src/
 - Add to home screen: `public/manifest.webmanifest`, icons in `public/assets/`, tags in `index.html`. Android Chrome: menu > Install app. iOS Safari: Share > Add to Home Screen.
 - Learning is pooled across markets (`ALL|contract|duration`), old per-market data is merged automatically.
 - Not tested on real phones or against live Deriv; run `npm run type-check` and `npm run build`.
+
+## Burst bulk trades + recovery modes (added)
+- Bulk Trades "FIRE ALL AT ONCE (BURST)" (on by default): the NO. OF BULK TRADES contracts are all bought together when Start is pressed (concurrent chunks of 10), not one after another. MAX ENTRY TICKS (default 3, max 5) is the slippage cap: if that many ticks pass before all buys are sent, the rest are NOT sent. The Journal and results then show how many entry ticks and last digits the burst ended up with. The panel shows the total stake of the burst before you press Start; the burst also trims itself to what the balance can cover.
+- Both Sides starts both bursts in the same instant. Note: Even + Odd (or Rise + Fall) on the same tick always has exactly one winner, so the pair loses the house margin each time.
+- AI Trader "After a loss": Martingale (same side, bigger stake, default), Auto-flip (opposite side, bigger stake) or Flat (no recovery). Auto-flip is no longer hard-coded.
+- Still to do: small-balance handling, cooldown / daily limit / journal CSV, Only Ups/Downs pair option.

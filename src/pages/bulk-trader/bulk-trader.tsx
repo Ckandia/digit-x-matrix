@@ -151,6 +151,8 @@ const BulkTrader = () => {
     const [autoFlip, setAutoFlip] = useState(DEFAULT_STRATEGY.auto_flip);
     const [stopWin, setStopWin] = useState(true);
     const [bothSides, setBothSides] = useState(false);
+    const [burstMode, setBurstMode] = useState(true);
+    const [maxEntryTicks, setMaxEntryTicks] = useState(3);
     const [fastExecution, setFastExecution] = useState(DEFAULT_STRATEGY.fast_execution);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -309,6 +311,8 @@ const BulkTrader = () => {
                 take_profit: stopWin ? takeProfit : undefined,
                 stop_loss: stopLoss,
                 max_trades: maxTrades,
+                burst_count: burstMode && maxTrades > 1 ? maxTrades : undefined,
+                max_entry_ticks: maxEntryTicks,
             };
             const primary_type = override_contract_type ?? contractType;
 
@@ -536,6 +540,31 @@ const BulkTrader = () => {
                                 disabled={is_running}
                             />
                         </label>
+
+                        <label className='bulk-trader__field'>
+                            <span>{localize('FIRE ALL AT ONCE (BURST)')}</span>
+                            <input type='checkbox' checked={burstMode} onChange={e => setBurstMode(e.target.checked)} disabled={is_running} />
+                        </label>
+
+                        {burstMode && (
+                            <label className='bulk-trader__field'>
+                                <span>{localize('MAX ENTRY TICKS (SLIPPAGE CAP)')}</span>
+                                <input
+                                    type='number'
+                                    min={1}
+                                    max={5}
+                                    step={1}
+                                    value={maxEntryTicks}
+                                    onChange={e => setMaxEntryTicks(Number(e.target.value))}
+                                    disabled={is_running}
+                                />
+                                <small>
+                                    {localize('Total stake this burst: {{t}}', {
+                                        t: (stake * Math.max(1, maxTrades) * (bothSides ? 2 : 1)).toFixed(2),
+                                    })}
+                                </small>
+                            </label>
+                        )}
                     </div>
 
                     <div className='bulk-trader__toggle-row'>

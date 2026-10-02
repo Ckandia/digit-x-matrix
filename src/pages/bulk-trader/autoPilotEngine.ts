@@ -30,7 +30,11 @@ export const RISK_PRESETS: Record<TRiskLevel, TRiskPreset> = {
     aggressive: { stake_pct: 3, martingale_multiplier: 2.5, max_steps: 6, stop_loss_pct: 25, take_profit_pct: 30 },
 };
 
+/** What happens after a loss: 'martingale' = same contract again with a bigger stake, 'flip' = the opposite side with a bigger stake, 'flat' = same base stake, no recovery. */
+export type TRecoveryMode = 'martingale' | 'flip' | 'flat';
+
 export type TAutoPilotConfig = {
+    recovery_mode?: TRecoveryMode;
     stake: number;
     martingale_multiplier: number;
     max_steps: number;
@@ -44,6 +48,7 @@ export type TAutoPilotConfig = {
 export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
     const preset = RISK_PRESETS[level];
     return {
+        recovery_mode: 'martingale',
         stake: Number(((balance * preset.stake_pct) / 100).toFixed(2)),
         martingale_multiplier: preset.martingale_multiplier,
         max_steps: preset.max_steps,
@@ -405,6 +410,14 @@ export class AutoPilotEngine {
                 return;
             }
 
+            const mode = this.config.recovery_mode ?? 'flip';
+            if (mode === 'flat') {
+                // No recovery: keep the base stake; only the take-profit / stop-loss end the session.
+                this.step = 1;
+                this._findAndEnter(this.config.stake);
+                return;
+            }
+
             if (this.step >= this.config.max_steps) {
                 this.stop('max recovery steps reached');
                 return;
@@ -417,6 +430,10 @@ export class AutoPilotEngine {
                 return;
             }
             this.step += 1;
+            if (mode === 'martingale') {
+                this._enter(candidate, next_stake); // same contract, same side, bigger stake
+                return;
+            }
             const flip = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
             this._enter(flip, next_stake);
         });
