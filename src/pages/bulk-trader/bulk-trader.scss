@@ -19,16 +19,9 @@
     padding: 16px;
     max-width: 1100px;
     margin: 0 auto;
-    // The tab body has no fixed height of its own and `.main` clips overflow,
-    // so `height: 100%` resolved to "as tall as the content" and nothing could
-    // scroll. Cap it to the visible area instead.
-    max-height: calc(100vh - 18rem);
+    height: 100%;
     min-height: 0;
     overflow-y: auto;
-
-    @media (max-width: 1024px) {
-        max-height: calc(100vh - 13rem);
-    }
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
     touch-action: pan-y;

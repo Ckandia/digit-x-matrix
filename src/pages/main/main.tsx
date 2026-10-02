@@ -48,7 +48,6 @@ import './main.scss';
 const ChartWrapper = lazy(() => import('../chart/chart-wrapper'));
 const Tutorial = lazy(() => import('../tutorials'));
 const BulkTrader = lazy(() => import('../bulk-trader'));
-const AiTrader = lazy(() => import('../ai-trader'));
 
 const AppWrapper = observer(() => {
     const { connectionStatus } = useApiBase();
@@ -81,7 +80,7 @@ const AppWrapper = observer(() => {
     const { clear } = summary_card;
     const { DASHBOARD, BOT_BUILDER } = DBOT_TABS;
     const init_render = React.useRef(true);
-    const hash = ['dashboard', 'bot_builder', 'chart', 'bulk_trader', 'ai_trader', 'tutorial'];
+    const hash = ['dashboard', 'bot_builder', 'chart', 'bulk_trader', 'tutorial'];
     const { isDesktop } = useDevice();
     const location = useLocation();
     const navigate = useNavigate();
@@ -448,25 +447,6 @@ const AppWrapper = observer(() => {
                                     fallback={<ChunkLoader message={localize('Please wait, loading bulk trader...')} />}
                                 >
                                     <BulkTrader />
-                                </Suspense>
-                            </div>
-                            <div
-                                label={
-                                    <>
-                                        <LabelPairedPuzzlePieceTwoCaptionBoldIcon
-                                            height='24px'
-                                            width='24px'
-                                            fill='var(--text-general)'
-                                        />
-                                        <Localize i18n_default_text='AI Trader' />
-                                    </>
-                                }
-                                id='id-ai-trader'
-                            >
-                                <Suspense
-                                    fallback={<ChunkLoader message={localize('Please wait, loading AI trader...')} />}
-                                >
-                                    <AiTrader />
                                 </Suspense>
                             </div>
                             <div

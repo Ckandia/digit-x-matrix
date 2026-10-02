@@ -25,16 +25,10 @@ export const STAGING_DOMAINS = {
     COM: brandConfig.platform.hostname.staging.com,
 } as const;
 
-// brand.config.json's derivws base URLs are REST URLs (https://...) — correct
-// as-is for the account/OTP fetch() calls in derivws-accounts.service.ts, but
-// the WebSocket constructor requires a ws:// or wss:// scheme and throws a
-// SyntaxError otherwise. Only the WS_SERVERS values below need the swap.
-const toWebSocketScheme = (url: string) => url.replace(/^http/, 'ws');
-
-// WebSocket server URLs (public, unauthenticated market-data connection)
+// WebSocket server URLs
 export const WS_SERVERS = {
-    STAGING: `${toWebSocketScheme(brandConfig.platform.derivws.url.staging)}options/ws/public`,
-    PRODUCTION: `${toWebSocketScheme(brandConfig.platform.derivws.url.production)}options/ws/public`,
+    STAGING: `${brandConfig.platform.derivws.url.staging}options/ws/public`,
+    PRODUCTION: `${brandConfig.platform.derivws.url.production}options/ws/public`,
 } as const;
 
 // =============================================================================

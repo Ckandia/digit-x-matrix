@@ -23,9 +23,9 @@
         <div class='clearfix'>
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">72.37% </span>
+                <span class="strong">64.11% </span>
                 <span class="quiet">Statements</span>
-                <span class='fraction'>131/181</span>
+                <span class='fraction'>109/170</span>
             </div>
         
             
@@ -44,9 +44,9 @@
         
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">72.37% </span>
+                <span class="strong">64.11% </span>
                 <span class="quiet">Lines</span>
-                <span class='fraction'>131/181</span>
+                <span class='fraction'>109/170</span>
             </div>
         
             
@@ -233,36 +233,7 @@
 <a name='L168'></a><a href='#L168'>168</a>
 <a name='L169'></a><a href='#L169'>169</a>
 <a name='L170'></a><a href='#L170'>170</a>
-<a name='L171'></a><a href='#L171'>171</a>
-<a name='L172'></a><a href='#L172'>172</a>
-<a name='L173'></a><a href='#L173'>173</a>
-<a name='L174'></a><a href='#L174'>174</a>
-<a name='L175'></a><a href='#L175'>175</a>
-<a name='L176'></a><a href='#L176'>176</a>
-<a name='L177'></a><a href='#L177'>177</a>
-<a name='L178'></a><a href='#L178'>178</a>
-<a name='L179'></a><a href='#L179'>179</a>
-<a name='L180'></a><a href='#L180'>180</a>
-<a name='L181'></a><a href='#L181'>181</a>
-<a name='L182'></a><a href='#L182'>182</a></td><td class="line-coverage quiet"><span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
+<a name='L171'></a><a href='#L171'>171</a></td><td class="line-coverage quiet"><span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
@@ -336,10 +307,17 @@
 <span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
-<span class="cline-any cline-yes">1x</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-yes">1x</span>
@@ -428,12 +406,14 @@
 <span class="cline-any cline-neutral">&nbsp;</span></td><td class="text"><pre class="prettyprint lang-js">import {
     buildAuthorizationUrl,
     buildSignUpUrl,
+    getAuthInfo,
     parseReferralLink,
     parseLandingParams,
     resolveReferralViaProxy,
 } from '@/external/deriv-core';
 import type { AuthConfig } from '@/external/deriv-core';
 import { getInitialLanguage } from '@deriv-com/translations';
+import { DerivWSAccountsService } from '@/services/derivws-accounts.service';
 import brandConfig from '../../../../../brand.config.json';
 &nbsp;
 // =============================================================================
@@ -450,30 +430,10 @@ export const STAGING_DOMAINS = {
     COM: brandConfig.platform.hostname.staging.com,
 } as const;
 &nbsp;
-// WebSocket server URLs.
-//
-// IMPORTANT: this app's trading layer (src/external/bot-skeleton, built on
-// @deriv/deriv-api's DerivAPIBasic) speaks Deriv's CLASSIC protocol — plain
-// messages like {active_symbols: 'brief'}, {ticks_history: 'R_100', ...},
-// {authorize: token} — against wss://ws.derivws.com/websockets/v3. It is NOT
-// built for Deriv's newer "Options Trading API" (trading/v1/options), which
-// uses a different field name (underlying_symbol instead of symbol) and a
-// different auth model (a short-lived OTP embedded in the connection URL,
-// with no separate authorize message).
-//
-// `api-base.ts`'s authorizeAndSubscribe() already calls `this.api.authorize(token)`
-// explicitly after connecting — that's the classic-protocol auth message. If the
-// socket URL points at the OTP-authenticated Options endpoint instead, that
-// stray authorize message gets sent to a connection that doesn't expect it and
-// isn't built to serve it, and every classic-protocol call after that
-// (active_symbols, contracts_for, trading_times, ticks_history, buy) times out —
-// which is exactly the "No symbols found" / "Invalid symbol" / fetch-timeout
-// cascade this fixes.
-const WS_APP_ID = process.env.NEXT_PUBLIC_DERIV_WS_APP_ID || '1089';
-&nbsp;
+// WebSocket server URLs
 export const WS_SERVERS = {
-    STAGING: `wss://ws.derivws.com/websockets/v3?app_id=${WS_APP_ID}`,
-    PRODUCTION: `wss://ws.derivws.com/websockets/v3?app_id=${WS_APP_ID}`,
+    STAGING: `${brandConfig.platform.derivws.url.staging}options/ws/public`,
+    PRODUCTION: `${brandConfig.platform.derivws.url.production}options/ws/public`,
 } as const;
 &nbsp;
 // =============================================================================
@@ -510,18 +470,25 @@ const getDefaultServerURL = <span class="fstat-no" title="function not covered" 
 <span class="cstat-no" title="statement not covered" >};</span>
 &nbsp;
 /**
- * Gets the WebSocket URL for the trading socket.
+ * Gets the WebSocket URL using the authenticated flow
+ * 1. Get access token from auth_info (localStorage via vendored deriv-core)
+ * 2. Fetch OTP WebSocket URL from DerivWSAccountsService
  *
- * This always returns the classic v3 endpoint (see the WS_SERVERS comment
- * above for why) regardless of login state. Authentication for a logged-in
- * session happens afterward, on the open socket, via the explicit
- * `this.api.authorize(token)` call in api-base.ts's authorizeAndSubscribe() —
- * not by connecting to a different, pre-authenticated URL.
- *
- * @returns Promise with the WebSocket URL
+ * @returns Promise with WebSocket URL or fallback to default server
  */
 export const getSocketURL = <span class="fstat-no" title="function not covered" >async (): Promise&lt;string&gt; =&gt; {</span>
-<span class="cstat-no" title="statement not covered" >    return getDefaultServerURL();</span>
+<span class="cstat-no" title="statement not covered" >    try {</span>
+<span class="cstat-no" title="statement not covered" >        const authInfo = getAuthInfo();</span>
+<span class="cstat-no" title="statement not covered" >        if (!authInfo || !authInfo.access_token) {</span>
+<span class="cstat-no" title="statement not covered" >            return getDefaultServerURL();</span>
+<span class="cstat-no" title="statement not covered" >        }</span>
+<span class="cstat-no" title="statement not covered" ></span>
+<span class="cstat-no" title="statement not covered" >        const wsUrl = await DerivWSAccountsService.getAuthenticatedWebSocketURL(authInfo.access_token);</span>
+<span class="cstat-no" title="statement not covered" >        return wsUrl;</span>
+<span class="cstat-no" title="statement not covered" >    } catch (error) {</span>
+<span class="cstat-no" title="statement not covered" >        console.error('[DerivWS] Error in getSocketURL:', error);</span>
+<span class="cstat-no" title="statement not covered" >        return getDefaultServerURL();</span>
+<span class="cstat-no" title="statement not covered" >    }</span>
 <span class="cstat-no" title="statement not covered" >};</span>
 &nbsp;
 export const getDebugServiceWorker = <span class="fstat-no" title="function not covered" >() =&gt; {</span>
@@ -613,7 +580,7 @@ export const generateOAuthURL = async (prompt?: string): Promise&lt;string&gt; =
             <div class='footer quiet pad2 space-top1 center small'>
                 Code coverage generated by
                 <a href="https://istanbul.js.org/" target="_blank" rel="noopener noreferrer">istanbul</a>
-                at 2026-09-24T08:10:15.041Z
+                at 2026-09-21T17:56:13.877Z
             </div>
         <script src="../../../../../prettify.js"></script>
         <script>

@@ -71,24 +71,6 @@ class APIBase {
     private readonly ENRICHMENT_TIMEOUT_MS = 10000; // 10 seconds
     private readonly MAX_RECONNECTION_ATTEMPTS = 5; // Maximum number of reconnection attempts before session reset
 
-    // Bound once, reused for every add/removeEventListener call. `fn.bind()`
-    // returns a *new* function every time it's called, so the previous
-    // pattern of calling `.bind(this)` separately at the addEventListener and
-    // removeEventListener call sites never actually matched — removeEventListener
-    // was always a no-op, so every reconnect left the old socket's listeners
-    // attached. A late/duplicate 'close' event from an old, already-replaced
-    // socket would then trigger another reconnect on top of a fresh one,
-    // compounding every cycle (this is what produced the runaway
-    // connect/close storm). Binding once and reusing the same reference makes
-    // removeEventListener actually remove the right listener.
-    private readonly boundOnSocketOpen = this.onsocketopen.bind(this);
-    private readonly boundOnSocketClose = this.onsocketclose.bind(this);
-
-    // Guards against overlapping init() calls — e.g. a 'close' event and a
-    // window 'focus' event firing close together — which used to be able to
-    // kick off two reconnects racing each other.
-    private _init_in_progress: Promise<void> | null = null;
-
     unsubscribeAllSubscriptions = () => {
         this.current_auth_subscriptions?.forEach(subscription_promise => {
             subscription_promise.then(({ subscription }) => {
@@ -170,27 +152,6 @@ class APIBase {
     }
 
     async init(force_create_connection = false) {
-        // If a call is already in flight, piggyback on it instead of starting
-        // a second, overlapping reconnect (see _init_in_progress above).
-        if (this._init_in_progress) {
-            await this._init_in_progress;
-            return;
-        }
-
-        let done: () => void = () => {};
-        this._init_in_progress = new Promise(resolve => {
-            done = resolve;
-        });
-
-        try {
-            await this._doInit(force_create_connection);
-        } finally {
-            this._init_in_progress = null;
-            done();
-        }
-    }
-
-    private async _doInit(force_create_connection = false) {
         this.toggleRunButton(true);
 
         if (this.api) {
@@ -207,14 +168,14 @@ class APIBase {
                 ApiHelpers.disposeInstance();
                 setConnectionStatus(CONNECTION_STATUS.CLOSED);
                 this.api.disconnect();
-                this.api.connection.removeEventListener('open', this.boundOnSocketOpen);
-                this.api.connection.removeEventListener('close', this.boundOnSocketClose);
+                this.api.connection.removeEventListener('open', this.onsocketopen.bind(this));
+                this.api.connection.removeEventListener('close', this.onsocketclose.bind(this));
             }
 
             this.api = await generateDerivApiInstance();
 
-            this.api?.connection.addEventListener('open', this.boundOnSocketOpen);
-            this.api?.connection.addEventListener('close', this.boundOnSocketClose);
+            this.api?.connection.addEventListener('open', this.onsocketopen.bind(this));
+            this.api?.connection.addEventListener('close', this.onsocketclose.bind(this));
 
             // Store the current account ID used for this WebSocket connection
             // This will be used to check if we need to regenerate the connection when the tab becomes active
@@ -268,7 +229,6 @@ class APIBase {
     }
 
     reconnectIfNotConnected = () => {
-        if (this._init_in_progress) return; // a reconnect is already underway — don't stack another one
         if (this.api?.connection?.readyState && this.api?.connection?.readyState > 1) {
             this.reconnection_attempts += 1;
 
@@ -448,17 +408,11 @@ class APIBase {
 
             const { active_symbols = [], error = {} } = apiResult as any;
 
-            // [FIX] New Options API returns `underlying_symbol` instead of `symbol`.
-            // Copy it into `symbol` so the rest of the app can read it.
-            const normalized_symbols = (active_symbols as any[]).map(sym =>
-                sym && sym.symbol ? sym : { ...sym, symbol: sym?.underlying_symbol }
-            );
-
             if (error && Object.keys(error).length > 0) {
                 throw new Error(`Active symbols API error: ${error.message || 'Unknown error'}`);
             }
 
-            if (!normalized_symbols.length) {
+            if (!active_symbols.length) {
                 throw new Error('No active symbols received from API');
             }
 
@@ -470,7 +424,7 @@ class APIBase {
                     setTimeout(() => reject(new Error('Enrichment timeout')), this.ENRICHMENT_TIMEOUT_MS)
                 );
 
-                const enrichmentPromise = activeSymbolsProcessorService.processActiveSymbols(normalized_symbols);
+                const enrichmentPromise = activeSymbolsProcessorService.processActiveSymbols(active_symbols);
                 const processedResult = await Promise.race([enrichmentPromise, enrichmentTimeout]);
 
                 this.active_symbols = processedResult.enrichedSymbols;
@@ -478,7 +432,7 @@ class APIBase {
             } catch (enrichmentError) {
                 console.warn('Symbol enrichment failed, using raw symbols:', enrichmentError);
                 // Fallback to raw symbols if enrichment fails
-                this.active_symbols = normalized_symbols;
+                this.active_symbols = active_symbols;
                 this.pip_sizes = {};
             }
 
