@@ -5,7 +5,10 @@
 // so the question asked here is "what does the NEXT tick do?", not "where is the drift over the
 // last N ticks?". Families kept:
 //   - Rise/Fall (CALL/PUT): next-tick direction from the tick-to-tick transition table.
-//   - Touch/No Touch and Ends Between/Outside: barrier contracts, the only ones that run longer.
+//   - Touch/No Touch, Stays Between/Goes Outside and Ends Between/Outside: barrier contracts, the
+//     only ones that run longer. Which side is offered follows the owner's notes: a quiet market
+//     favours No Touch / Stays Between / Ends Between, an expanding one favours Touch / Goes Outside /
+//     Ends Outside.
 // Dropped because Deriv does not sell them at 1 tick (it rejects the buy): Asians (min 5 ticks),
 // Only Ups/Downs (min 2), High/Low Tick (fixed 5), Reset Call/Put (min 5).
 //
@@ -146,6 +149,16 @@ export function computeContractSignals(window, symbol, decimals = 2) {
                 label: expanding ? 'Ends outside' : 'Ends between',
                 confidence: Math.round(vol_conf * 0.95),
                 basis: `Same volatility read, applied to a symmetric range \u00b1${barrier_offset} around spot.`,
+            });
+            // Stays Between / Goes Outside watch EVERY tick (Ends Between/Outside only the last one).
+            signals.push({
+                family: 'range',
+                contract_type: expanding ? 'UPORDOWN' : 'RANGE',
+                duration_ticks: TOUCH_TICKS,
+                prediction: barrier_offset,
+                label: expanding ? 'Goes outside' : 'Stays between',
+                confidence: Math.round(vol_conf * 0.95),
+                basis: `Volatility is ${expanding ? 'expanding' : 'contracting'} (recent/baseline ${round2(vol_ratio)}), the state where ${expanding ? 'Goes Outside' : 'Stays Between'} is easiest per your notes; range \u00b1${barrier_offset}.`,
             });
         }
     }

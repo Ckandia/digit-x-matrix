@@ -78,6 +78,8 @@ const AUTOPILOT_CONTRACT_TYPES = [
     'NOTOUCH',
     'EXPIRYRANGE',
     'EXPIRYMISS',
+    'RANGE',
+    'UPORDOWN',
     'ASIANU',
     'ASIAND',
     'TICKHIGH',
@@ -99,6 +101,8 @@ const FLIP_PARTNER: Record<string, string> = {
     NOTOUCH: 'ONETOUCH',
     EXPIRYRANGE: 'EXPIRYMISS',
     EXPIRYMISS: 'EXPIRYRANGE',
+    RANGE: 'UPORDOWN',
+    UPORDOWN: 'RANGE',
     ASIANU: 'ASIAND',
     ASIAND: 'ASIANU',
     TICKHIGH: 'TICKLOW',
@@ -190,7 +194,7 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
         return { ...base, duration: 5, duration_unit: 't', selected_tick: Number(candidate.prediction) || 5 };
     }
 
-    if (candidate.contract_type === 'EXPIRYRANGE' || candidate.contract_type === 'EXPIRYMISS') {
+    if (['EXPIRYRANGE', 'EXPIRYMISS', 'RANGE', 'UPORDOWN'].includes(candidate.contract_type)) {
         const offset = Math.abs(Number(candidate.prediction) || 0);
         return {
             ...base,
@@ -331,6 +335,15 @@ export class AutoPilotEngine {
         const stake = governed;
         if (governed < wanted_stake) {
             this.hooks?.onLog?.('info', `Exploring ${candidate.contract_type} ${candidate.duration_ticks ?? ''}t: first stake capped at ${governed} (25% of base) until 20 results are in.`);
+        }
+        // The connection keeps a LIVE balance (derivClient balance stream). Never buy a stake the
+        // account cannot cover: Deriv would reject it, and a martingale step that big means the
+        // ladder has run out of money, so stop the session instead of retrying.
+        const live_balance = this.connection.accountInfo?.balance;
+        if (typeof live_balance === 'number' && Number.isFinite(live_balance) && stake > live_balance) {
+            this.hooks?.onLog?.('error', `The next stake (${stake} ${this.currency}) is more than the account balance (${live_balance.toFixed(2)}). Stopping.`);
+            this.stop('balance is too low for the next stake');
+            return;
         }
         if (this.step === 1) this.ladder_spent = 0;
         this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));

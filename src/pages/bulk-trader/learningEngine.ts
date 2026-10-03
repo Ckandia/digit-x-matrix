@@ -14,6 +14,7 @@
 // combinations, and that is the correct, useful answer. 'edge_gate' mode
 // refuses to trade until an edge is statistically demonstrated.
 import { TSnapshotMap } from './analysis-types';
+import { STREAK_PLAYBOOK } from './tradingKnowledge';
 import { isTickTradable, loadLiveRules, markRefused, skewBucket, tradeTicks } from './contractRules';
 
 export type TLearningMode = 'off' | 'learn' | 'edge_gate';
@@ -255,7 +256,10 @@ export const candidatesFromSnapshots = <S extends { confidence: number; contract
     for (const [symbol, snap] of Object.entries(snapshots)) {
         for (const s of snap.signals as unknown as S[]) {
             if (!allowed.includes(s.contract_type) || !isTickTradable(symbol, s.contract_type)) continue;
-            out.push({ symbol, ...s, bucket: skewBucket(snap.stats.recent as never, s.contract_type) });
+            // A signal from a named playbook strategy is scored on its own record, apart from the plain skew signals.
+            const strategy = (s as { strategy?: string }).strategy;
+            const bucket = strategy === 'streak_reversal' ? STREAK_PLAYBOOK.learner_bucket : skewBucket(snap.stats.recent as never, s.contract_type);
+            out.push({ symbol, ...s, bucket });
         }
     }
     return out;

@@ -19,6 +19,7 @@ import type { TRecoveryMode } from './autoPilotEngine';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { keepScreenAwake } from './wakeLock';
 import { loadLiveRules } from './contractRules';
+import { CONTRACT_NOTES, playbookLines } from './tradingKnowledge';
 import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
 
@@ -55,6 +56,12 @@ const AiAgentPanel = ({
 
     const [riskLevel, setRiskLevel] = useState<TRiskLevel>('moderate');
     const [balance, setBalance] = useState<number | null>(null);
+    // The balance the risk-preset numbers (stake, stop loss, take profit) were built from. It is NOT
+    // moved by every live balance tick, so editing a field is never overwritten mid-edit.
+    const [presetBalance, setPresetBalance] = useState<number | null>(null);
+    const [balanceLive, setBalanceLive] = useState(false);
+    const [connectedLoginid, setConnectedLoginid] = useState('');
+    const [connectedType, setConnectedType] = useState('');
     const [currency, setCurrency] = useState('USD');
     const [config, setConfig] = useState<TAutoPilotConfig | null>(null);
 
@@ -79,6 +86,26 @@ const AiAgentPanel = ({
     const [connectError, setConnectError] = useState<string | null>(null);
     const [isConnecting, setIsConnecting] = useState(false);
 
+    // Opens a trading connection for the account that is active in the app and wires its LIVE
+    // balance stream into the panel. Used by the first connect, by a header account switch, and by Start.
+    const openConnection = React.useCallback(async (token: string) => {
+        const connection = new DerivClientConnection(token);
+        connection.onBalance = (b, c) => {
+            setBalance(b);
+            setCurrency(c || 'USD');
+            setBalanceLive(true);
+            setPresetBalance(prev => prev ?? b);
+        };
+        const auth = await connection.connect();
+        setBalance(auth.authorize.balance ?? 0);
+        setCurrency(auth.authorize.currency || 'USD');
+        setBalanceLive(connection.balanceLive);
+        setConnectedLoginid(auth.authorize.loginid);
+        setConnectedType(auth.authorize.type || '');
+        setPresetBalance(prev => prev ?? (auth.authorize.balance ?? 0));
+        return connection;
+    }, []);
+
     // Opens this tab's own trading connection and reads the balance. Errors
     // are shown (not swallowed) so "not connected" always says why.
     const connectAccount = React.useCallback(async () => {
@@ -91,17 +118,13 @@ const AiAgentPanel = ({
         setConnectError(null);
         try {
             connectionRef.current?.close();
-            const connection = new DerivClientConnection(token);
-            const auth = await connection.connect();
-            connectionRef.current = connection;
-            setBalance(auth.authorize.balance ?? 0);
-            setCurrency(auth.authorize.currency || 'USD');
+            connectionRef.current = await openConnection(token);
         } catch (err) {
             setConnectError(err instanceof Error ? err.message : localize('Could not connect to Deriv.'));
         } finally {
             setIsConnecting(false);
         }
-    }, []);
+    }, [openConnection]);
 
     useEffect(() => {
         connectAccount();
@@ -117,18 +140,34 @@ const AiAgentPanel = ({
         if (balance == null && typeof authData?.balance === 'number') {
             setBalance(authData.balance);
             setCurrency(authData.currency || 'USD');
+            setPresetBalance(prev => prev ?? authData.balance);
         }
     }, [authData, balance]);
+
+    // The user switched account (demo <-> real) in the header. This panel's connection is bound to the
+    // account it opened with, so left alone it would show and trade on the OLD account. A running AI
+    // is stopped (it must never carry on trading on a different account than the one on screen);
+    // then the panel reconnects to the new account and starts learning from that account's own record.
+    useEffect(() => {
+        const conn = connectionRef.current;
+        const bound = conn?.accountInfo?.loginid;
+        if (!activeLoginid || !bound || activeLoginid === bound) return;
+        engineRef.current?.stop('the active account was switched in the header');
+        learnerRef.current = null;
+        setPresetBalance(null);
+        setBalanceLive(false);
+        void connectAccount();
+    }, [activeLoginid, connectAccount]);
 
     // Recompute the preset's numbers whenever the level or balance changes,
     // as long as nothing is running — this intentionally overwrites any
     // manual edits, since picking a preset is "start over from here."
     useEffect(() => {
-        if (is_running || balance == null) return;
-        const preset_config = buildConfigFromPreset(riskLevel, balance);
+        if (is_running || presetBalance == null) return;
+        const preset_config = buildConfigFromPreset(riskLevel, presetBalance);
         capStopLossRef.current = preset_config.stop_loss; // the hard cap the AI may never exceed
         setConfig(preset_config);
-    }, [riskLevel, balance, is_running]);
+    }, [riskLevel, presetBalance, is_running]);
 
     const updateField = (key: keyof TAutoPilotConfig, value: number) => {
         setConfig(prev => (prev ? { ...prev, [key]: value } : prev));
@@ -164,6 +203,7 @@ const AiAgentPanel = ({
             setTotalProfit(event.total_profit ?? 0);
             if (learnerRef.current) setLearnInfo(learnerRef.current.summary());
         } else if (event.phase === 'stopped') {
+            setPresetBalance(connectionRef.current?.accountInfo?.balance ?? null);
             setStatus('stopped');
             keepScreenAwake('ai', false);
             setStopReason(event.reason);
@@ -195,17 +235,34 @@ const AiAgentPanel = ({
         setStatus('connecting');
         try {
             let connection = connectionRef.current;
-            if (!connection || !connection.isReady) {
-                connection = new DerivClientConnection(token);
-                const auth = await connection.connect();
-                setBalance(auth.authorize.balance ?? 0);
-                setCurrency(auth.authorize.currency || 'USD');
+            const on_wrong_account = !!activeLoginid && !!connection?.accountInfo && connection.accountInfo.loginid !== activeLoginid;
+            if (!connection || !connection.isReady || on_wrong_account) {
+                connection?.close();
+                connection = await openConnection(token);
                 connectionRef.current = connection;
+                learnerRef.current = null;
             }
+            if (activeLoginid && connection.accountInfo && connection.accountInfo.loginid !== activeLoginid) {
+                connection.close();
+                connectionRef.current = null;
+                throw new Error(
+                    localize('The AI connected to account {{ai}} but the header shows {{shown}}. Not starting, so it cannot trade on the wrong account.', {
+                        ai: connection.accountInfo.loginid,
+                        shown: activeLoginid,
+                    })
+                );
+            }
+            // Read the real balance right before trading, so the AI never works from a stale number.
+            const live_balance = await connection.refreshBalance();
+            if (live_balance != null) setBalance(live_balance);
+            if (live_balance == null && !connection.balanceLive) {
+                throw new Error(localize('Could not read your live account balance from Deriv. Try again in a moment.'));
+            }
+            const trade_currency = connection.accountInfo?.currency || currency;
 
             await loadLiveRules(Object.keys(snapshotsRef.current));
             if (!learnerRef.current) {
-                const learner = new LearningEngine(await makeProfileId(activeLoginid || 'account'), learnMode);
+                const learner = new LearningEngine(await makeProfileId(connection.accountInfo?.loginid || activeLoginid || 'account'), learnMode);
                 await learner.syncFromBackend();
                 learnerRef.current = learner;
             }
@@ -214,7 +271,7 @@ const AiAgentPanel = ({
 
             const engine = new AutoPilotEngine(
                 connection,
-                currency,
+                trade_currency,
                 config,
                 () => snapshotsRef.current,
                 handleEngineEvent,
@@ -272,7 +329,7 @@ const AiAgentPanel = ({
                 <h3>{localize('AI auto-trader')}</h3>
                 <p>
                     {localize(
-                        'Reads your balance, picks the stake and martingale from a risk level, and scans every market for Even/Odd and Rise/Fall on the next tick (plus Touch/No Touch, which needs a barrier) and picks the market and contract with the strongest signal, all on 1 tick. Every trade is priced with Deriv first, so a contract Deriv would reject is skipped before any money is spent. On a loss it flips to the opposite side and escalates stake to recover — this is a statistical deviation score, not a win-probability estimate.'
+                        'Reads your balance, picks the stake and martingale from a risk level, and scans every market for Even/Odd (including your streak-reversal rule) and Rise/Fall on the next tick, plus the barrier contracts (Touch/No Touch, Stays Between/Goes Outside) when the market state suits them, and picks the market and contract with the strongest signal, all on 1 tick (barrier contracts use the shortest duration Deriv offers). Every trade is priced with Deriv first, so a contract Deriv would reject is skipped before any money is spent. On a loss it flips to the opposite side and escalates stake to recover — this is a statistical deviation score, not a win-probability estimate.'
                     )}
                 </p>
             </header>
@@ -285,6 +342,11 @@ const AiAgentPanel = ({
                         <span className='ai-agent-panel__card-title'>{localize('AI auto-trader')}</span>
                         <span className='ai-agent-panel__balance'>
                             {balance != null ? `${currency} ${balance.toFixed(2)}` : '—'}
+                            {balance != null && (
+                                <small style={{ marginLeft: 6, opacity: 0.7 }}>
+                                    {balanceLive ? localize('live') : localize('last known')}
+                                </small>
+                            )}
                         </span>
                     </div>
 
@@ -296,7 +358,8 @@ const AiAgentPanel = ({
                         />
                         {connectionRef.current?.isReady ? (
                             <span>
-                                {localize('Connected')} — <strong>{activeLoginid || '—'}</strong>
+                                {localize('Connected')} — <strong>{connectedLoginid || activeLoginid || '—'}</strong>
+                                {connectedType ? ` (${connectedType})` : ''}
                             </span>
                         ) : (
                             <span>
@@ -380,6 +443,21 @@ const AiAgentPanel = ({
                             'Time frame: 1 tick. Touch/No Touch (barrier contracts) use the shortest duration Deriv offers; contracts Deriv does not sell at 1 tick are skipped.'
                         )}
                     </p>
+                    <details className='ai-agent-panel__hint'>
+                        <summary>{localize('AI playbook (your notes)')}</summary>
+                        <ul>
+                            {playbookLines().map(line => (
+                                <li key={line}>{localize(line)}</li>
+                            ))}
+                        </ul>
+                        <ul>
+                            {CONTRACT_NOTES.filter(n => !n.supported).map(n => (
+                                <li key={n.name}>
+                                    <strong>{n.name}</strong>: {n.unsupported_reason}
+                                </li>
+                            ))}
+                        </ul>
+                    </details>
                     <label className='ai-agent-panel__hint'>
                         {localize('Learning')}{' '}
                         <select value={learnMode} onChange={e => setLearnMode(e.target.value as TLearningMode)}>
@@ -455,7 +533,7 @@ const AiAgentPanel = ({
                         <dl className='ai-agent-panel__stat-box'>
                             <dt>{localize('Balance')}</dt>
                             <dd>
-                                {currency} {balance != null ? (balance + totalProfit).toFixed(2) : '—'}
+                                {currency} {balance != null ? balance.toFixed(2) : '—'}
                             </dd>
                         </dl>
                         <dl className='ai-agent-panel__stat-box'>

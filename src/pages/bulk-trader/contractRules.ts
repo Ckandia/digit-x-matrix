@@ -21,7 +21,10 @@
 //  TICKHIGH/LOW    pick which of 5 ticks is the highest/lowest. Fixed 5 ticks.
 //  ONETOUCH/NOTOUCH price touches / never touches a barrier. 5-10 ticks.
 //  EXPIRYRANGE/MISS Ends Between/Outside: exit inside/outside two barriers. NOT offered in ticks.
+//  RANGE/UPORDOWN  Stays Between/Goes Outside: price stays inside / leaves two barriers at any tick.
 //  RESETCALL/PUT   Rise/Fall whose barrier resets. 5-10 ticks.
+import { isBarrierContract } from './tradingKnowledge';
+
 export type TTickRange = { min: number; max: number } | null;
 type TRules = Record<string, TTickRange>;
 
@@ -44,6 +47,10 @@ const BUILT_IN: TRules = {
     RESETPUT: { min: 5, max: 10 },
     EXPIRYRANGE: null,
     EXPIRYMISS: null,
+    // Stays Between / Goes Outside: treated as not-in-ticks until Deriv's live rules (contracts_for)
+    // show a tick duration for them. Until then the AI will not buy them.
+    RANGE: null,
+    UPORDOWN: null,
 };
 
 const rest_base = (process.env.NEXT_PUBLIC_BULK_TRADER_API_URL || '').trim().replace(/\/$/, '');
@@ -72,9 +79,6 @@ export const tickRange = (symbol: string, type: string): TTickRange => {
     return type in BUILT_IN ? BUILT_IN[type] : null; // unknown contract: never guess a duration
 };
 
-/** Contracts that need a price barrier. They are the only ones allowed to run longer than 1 tick. */
-export const BARRIER_CONTRACTS = new Set(['ONETOUCH', 'NOTOUCH', 'EXPIRYRANGE', 'EXPIRYMISS']);
-
 // Combinations Deriv refused at runtime (symbol|type -> when). Shared by the learner and by the
 // engine in every learning mode, so a refused combination is skipped for 6 hours.
 const refused: Record<string, number> = {};
@@ -96,7 +100,7 @@ const isRefused = (symbol: string, type: string) => {
 export const tradeTicks = (symbol: string, type: string): number | null => {
     const r = tickRange(symbol, type);
     if (!r || isRefused(symbol, type)) return null;
-    if (BARRIER_CONTRACTS.has(type)) return r.min;
+    if (isBarrierContract(type)) return r.min; // which contracts need a barrier comes from the owner's notes (tradingKnowledge.ts)
     return r.min <= 1 && r.max >= 1 ? 1 : null;
 };
 

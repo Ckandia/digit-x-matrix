@@ -57,6 +57,10 @@ export class DerivClientConnection {
     onFatalError: ((err: Error) => void) | null = null;
     onReconnecting: (() => void) | null = null;
     onReconnect: (() => void) | null = null;
+    /** Fires with the LIVE account balance now and after every change (trades, deposits, other tabs). */
+    onBalance: ((balance: number, currency: string, loginid: string) => void) | null = null;
+    /** False until Deriv has actually sent a balance; until then `accountInfo.balance` is only the login-time cache. */
+    balanceLive = false;
     private closed_on_purpose = false;
     private keepalive: ReturnType<typeof setInterval> | null = null;
     accountInfo: TDerivAccountInfo | null = null;
@@ -77,7 +81,58 @@ export class DerivClientConnection {
 
         const wsUrl = await DerivWSAccountsService.fetchOTPWebSocketURL(this.token, account.account_id);
         await this._open(wsUrl, true);
+        // The balance in the stored accounts list is a snapshot from login time. Replace it with the
+        // real one from Deriv and keep it updating, so the AI sees what the account really holds.
+        await this._startBalanceStream();
         return { authorize: this.accountInfo as TDerivAccountInfo };
+    }
+
+    /**
+     * Subscribes to Deriv's `balance` stream for this account. Resolves after the first live value
+     * (or after 4s / an error, in which case the login-time cache stays and `balanceLive` is false).
+     * The subscription is re-opened automatically after a reconnect.
+     */
+    private _startBalanceStream(): Promise<void> {
+        return new Promise(resolve => {
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+            };
+            const timer = setTimeout(finish, 4000);
+            this.subscribe({ balance: 1 }, (data, err) => {
+                const b = data?.balance;
+                if (!err && b && Number.isFinite(Number(b.balance))) {
+                    const loginid = String(b.loginid || this.accountInfo?.loginid || '');
+                    // Never accept a balance that belongs to a different account than this connection's.
+                    if (!this.accountInfo || !loginid || loginid === this.accountInfo.loginid) {
+                        const currency = String(b.currency || this.accountInfo?.currency || 'USD');
+                        if (this.accountInfo) this.accountInfo = { ...this.accountInfo, balance: Number(b.balance), currency };
+                        this.balanceLive = true;
+                        this.onBalance?.(Number(b.balance), currency, loginid);
+                    }
+                }
+                finish();
+            });
+        });
+    }
+
+    /** One-off live balance read (used right before starting a run). Returns null if Deriv does not answer. */
+    async refreshBalance(): Promise<number | null> {
+        try {
+            const res = await this.send({ balance: 1 });
+            const value = Number(res?.balance?.balance);
+            if (Number.isFinite(value) && this.accountInfo) {
+                this.accountInfo = { ...this.accountInfo, balance: value };
+                this.balanceLive = true;
+                return value;
+            }
+        } catch {
+            /* keep the last known balance */
+        }
+        return null;
     }
 
     /** Opens the socket. The OTP-signed URL is already authenticated: no separate "authorize" request. */
@@ -236,6 +291,7 @@ export class DerivClientConnection {
 
     close() {
         this.closed_on_purpose = true;
+        this.onBalance = null;
         this._stopKeepAlive();
         this.isReady = false;
         this.onFatalError = null; // this is a deliberate close, not a fatal error

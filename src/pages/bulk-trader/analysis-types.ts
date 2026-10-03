@@ -9,6 +9,7 @@ export type TContractFamily =
     | 'only_up_down'
     | 'touch'
     | 'ends'
+    | 'range'
     | 'asians'
     | 'high_low_tick'
     | 'reset';
@@ -23,6 +24,8 @@ export type TContractType =
     | 'NOTOUCH'
     | 'EXPIRYRANGE'
     | 'EXPIRYMISS'
+    | 'RANGE'
+    | 'UPORDOWN'
     | 'ASIANU'
     | 'ASIAND'
     | 'TICKHIGH'
@@ -69,6 +72,8 @@ export type TDigitSignal = {
     label: string;
     confidence: number;
     basis: string;
+    /** Set when a signal comes from a named playbook strategy (e.g. 'streak_reversal'), so the learner scores it on its own. */
+    strategy?: string;
 };
 
 export type TSymbolSnapshot = {

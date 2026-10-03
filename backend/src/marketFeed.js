@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { computeSignals, computeStats, createDigitWindow, pushDigit } from './digitAnalysis.js';
 import { computeContractSignals, createPriceWindow, pushPrice } from './contractAnalysis.js';
+import { computeStreakSignal } from './streakStrategy.js';
 
 // Deriv's current documentation ("Use ONLY this API") and live testing both
 // confirm ws.derivws.com/websockets/v3 (legacy v3) is now unreliable —
@@ -133,15 +134,18 @@ export class MarketFeed {
         return out;
     }
 
-    /** Combines digit signals (family: 'digits') with the price-based
-     *  Rise/Fall, Only Ups/Downs, Touch/No Touch, Ends Between/Outside,
-     *  Asians, High/Low Tick and Reset Call/Put signals into one ranked list. */
+    /** Combines digit signals (family: 'digits', incl. the streak-reversal playbook) with the
+     *  price-based Rise/Fall and the barrier contracts (Touch/No Touch, Stays Between/Goes Outside,
+     *  Ends Between/Outside) into one ranked list. */
     getSnapshot(symbol) {
         const window = this.windows.get(symbol);
         const priceWindow = this.priceWindows.get(symbol);
         if (!window || !priceWindow) return null;
         const stats = computeStats(window, symbol);
         const digit_signals = computeSignals(stats).map(s => ({ family: 'digits', ...s }));
+        // The owner's Even/Odd streak-reversal playbook (rare: needs a 5+ run and slowing tick speed).
+        const streak_signal = computeStreakSignal(stats, priceWindow);
+        if (streak_signal) digit_signals.push(streak_signal);
         const contract_signals = computeContractSignals(priceWindow, symbol, this.getPipSize(symbol));
         const signals = [...digit_signals, ...contract_signals].sort((a, b) => b.confidence - a.confidence);
         return { stats, signals };
