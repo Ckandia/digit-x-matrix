@@ -1,6 +1,8 @@
 // A tiny shared feed of trade results and log lines from the Bulk Trader
 // engines (which run outside React). The Bulk Trader tab subscribes to it, so
 // results survive switching tabs and stay visible after a run stops.
+import { fromContract } from '../journal/derivMapping';
+import { journalStore } from '../journal/journalStore';
 import { mergeTradeRow, TTradeRow } from './tradeHistory';
 
 export type TActivity = { ts: number; kind: 'info' | 'success' | 'error'; text: string };
@@ -16,6 +18,8 @@ const notify = () => listeners.forEach(l => l());
 export const tradeBus = {
     contract(c: Record<string, unknown>) {
         rows = mergeTradeRow(rows, c);
+        // Every settled Bulk Trader contract also goes into the Journal (duplicates are merged by contract id).
+        journalStore.add(fromContract(c, 'bulk'));
         contract_listeners.forEach(l => l(c));
         notify();
     },

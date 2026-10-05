@@ -17,6 +17,7 @@
 import { DerivClientConnection } from './derivClient';
 import { TDigitSignal, TSnapshotMap } from './analysis-types';
 import { candidatesFromSnapshots, LearningEngine } from './learningEngine';
+import { applyGate, isBlocked, TReviewGate } from '../journal/selfReview';
 import { markRefused, tradeTicks } from './contractRules';
 
 export type TRiskLevel = 'conservative' | 'moderate' | 'aggressive';
@@ -238,6 +239,30 @@ export type TAutoPilotHooks = {
     onContract?: (contract: Record<string, unknown>) => void;
     /** Human-readable lines for the Journal tab. */
     onLog?: (kind: 'info' | 'success' | 'error', message: string) => void;
+    /** Every settled trade with the AI's own context, for the Journal tab and the AI's self-review. */
+    onSettled?: (trade: TSettledTrade) => void;
+    /** The AI's self-review of its past results: contracts it must skip and ones it ranks lower. Undefined = no gate. */
+    gate?: () => TReviewGate | undefined;
+};
+
+export type TSettledTrade = {
+    contract_id: string;
+    symbol: string;
+    contract_type: string;
+    stake: number;
+    profit: number;
+    /** What came back: stake + profit. */
+    payout: number;
+    buy_ts: number;
+    sell_ts: number;
+    duration_ticks: number;
+    /** Position on the stake ladder when the trade was placed. */
+    step: number;
+    base_stake: number;
+    mode: TRecoveryMode;
+    confidence: number;
+    strategy?: string;
+    tag?: 'flipped' | 'switched' | 'streak';
 };
 
 export type TAutoPilotEvent = {
@@ -278,6 +303,7 @@ export class AutoPilotEngine {
     private consecutive_losses = 0;
     private win_streak = 0; // reverse martingale: wins in a row
     private streak_profit = 0; // reverse martingale: what the current win streak has made
+    private entry_tag: TAutoPilotEvent['tag']; // why the trade being placed is not a plain fresh pick
 
     constructor(
         connection: DerivClientConnection,
@@ -327,7 +353,9 @@ export class AutoPilotEngine {
     }
 
     /** The best tradable contract right now (learner-guided when learning is on). Risk style plays no part in this. */
-    private _pick(snapshots: TSnapshotMap): TCandidate | null {
+    private _pick(raw_snapshots: TSnapshotMap): TCandidate | null {
+        // The AI's self-review comes first: skip contracts its own history proves are losing, rank lagging ones lower.
+        const snapshots = applyGate(raw_snapshots, this.hooks?.gate?.());
         const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
         return learner
             ? learner.pickBest(candidatesFromSnapshots<TDigitSignal>(snapshots, AUTOPILOT_CONTRACT_TYPES) as TCandidate[])
@@ -345,7 +373,7 @@ export class AutoPilotEngine {
         return this._pick(others);
     }
 
-    private _findAndEnter(stake: number) {
+    private _findAndEnter(stake: number, tag?: TAutoPilotEvent['tag']) {
         if (!this.running || this.busy) return;
 
         const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
@@ -363,10 +391,10 @@ export class AutoPilotEngine {
             }
             // Nothing meets the bar right now — try again shortly rather than
             // erroring out; live signals come and go every second.
-            setTimeout(() => this._findAndEnter(stake), 1500);
+            setTimeout(() => this._findAndEnter(stake, tag), 1500);
             return;
         }
-        this._enter(candidate, stake);
+        this._enter(candidate, stake, tag);
     }
 
     private _enter(candidate_in: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag']) {
@@ -391,6 +419,7 @@ export class AutoPilotEngine {
         this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
         this.busy = true;
         this.lastCandidate = candidate;
+        this.entry_tag = tag;
         this._emit({
             phase: 'entering',
             symbol: candidate.symbol,
@@ -411,7 +440,7 @@ export class AutoPilotEngine {
             this.hooks?.onLog?.('error', detail);
             markRefused(candidate.symbol, candidate.contract_type);
             if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
-            setTimeout(() => this._findAndEnter(wanted_stake), 500);
+            setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
             return;
         }
         const tried_duration = Number(parameters.duration);
@@ -455,7 +484,7 @@ export class AutoPilotEngine {
                     this.hooks?.onLog?.('info', `Skipping ${candidate.symbol} ${candidate.contract_type} for 6 hours and trying another.`);
                     if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
                     // Search again. (Before this, the engine marked the combination and then went idle.)
-                    setTimeout(() => this._findAndEnter(wanted_stake), 500);
+                    setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
                     return;
                 }
                 this._emit({ phase: 'error', symbol: candidate.symbol, error: detail });
@@ -464,6 +493,8 @@ export class AutoPilotEngine {
     }
 
     private _watch(candidate: TCandidate, stake: number, contract_id: string, duration: number) {
+        const entry_step = this.step;
+        const entry_tag = this.entry_tag;
         const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id }, (data, err) => {
             if (err) {
                 this.busy = false;
@@ -491,6 +522,26 @@ export class AutoPilotEngine {
                 });
             }
             this.total_profit = Number((this.total_profit + profit).toFixed(2));
+
+            const bought = Number(contract.buy_price ?? stake);
+            const now = Date.now();
+            this.hooks?.onSettled?.({
+                contract_id: String(contract_id),
+                symbol: candidate.symbol,
+                contract_type: candidate.contract_type,
+                stake: bought,
+                profit: Number(profit.toFixed(2)),
+                payout: Number((bought + profit).toFixed(2)),
+                buy_ts: Number(contract.date_start ?? contract.purchase_time ?? 0) * 1000 || now,
+                sell_ts: Number(contract.sell_time ?? contract.date_expiry ?? 0) * 1000 || now,
+                duration_ticks: duration,
+                step: entry_step,
+                base_stake: this.config.stake,
+                mode: this.config.recovery_mode ?? 'reverse',
+                confidence: candidate.confidence,
+                strategy: (candidate as { strategy?: string }).strategy,
+                tag: entry_tag,
+            });
 
             this._emit({
                 phase: 'settled',
@@ -538,7 +589,7 @@ export class AutoPilotEngine {
                 // Never risk more than the base stake plus what this streak has already won.
                 const next_stake = Number(Math.max(base_stake, Math.min(stake * growth, base_stake + this.streak_profit)).toFixed(2));
                 this.step = this.win_streak + 1;
-                this._findAndEnter(next_stake);
+                this._findAndEnter(next_stake, 'streak');
                 return;
             }
 
@@ -588,6 +639,11 @@ export class AutoPilotEngine {
                 return;
             }
             const flip = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
+            if (isBlocked(this.hooks?.gate?.(), flip.symbol, flip.contract_type, (flip as { strategy?: string }).strategy)) {
+                this.hooks?.onLog?.('info', `The opposite side (${flip.contract_type}) is skipped: its own results are clearly negative. Picking another contract.`);
+                this._findAndEnter(next_stake);
+                return;
+            }
             this._enter(flip, next_stake, 'flipped');
         });
     }

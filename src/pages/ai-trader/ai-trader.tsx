@@ -19,7 +19,7 @@ const AiTrader = () => {
                 />
                 <span>
                     {localize(
-                        'I understand the AI auto-trader places real trades on my active account, martingale recovery increases stake after losses, and past signals do not predict future results. I can lose my whole balance.'
+                        'I understand the AI auto-trader places real trades on my active account, reverse martingale increases the stake after wins, and past signals do not predict future results. I can lose my whole balance.'
                     )}
                 </span>
             </label>

@@ -20,6 +20,8 @@ import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { keepScreenAwake } from './wakeLock';
 import { loadLiveRules } from './contractRules';
 import { CONTRACT_NOTES, playbookLines } from './tradingKnowledge';
+import { activeAccount } from '../journal/derivMapping';
+import { journalStore } from '../journal/journalStore';
 import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
 
@@ -60,6 +62,7 @@ const AiAgentPanel = ({
     // moved by every live balance tick, so editing a field is never overwritten mid-edit.
     const [presetBalance, setPresetBalance] = useState<number | null>(null);
     const [balanceLive, setBalanceLive] = useState(false);
+    const [selfReviewOn, setSelfReviewOn] = useState(journalStore.selfReviewEnabled());
     const [connectedLoginid, setConnectedLoginid] = useState('');
     const [connectedType, setConnectedType] = useState('');
     const [currency, setCurrency] = useState('USD');
@@ -269,6 +272,14 @@ const AiAgentPanel = ({
             learnerRef.current.mode = learnMode;
             setLearnInfo(learnerRef.current.summary());
 
+            const journal_account = connection.accountInfo?.loginid || activeLoginid || activeAccount();
+            const logLine = (kind: 'info' | 'success' | 'error', message: string) => {
+                setActivity(prev => [{ ts: Date.now(), kind, text: message }, ...prev].slice(0, 40));
+                journal.pushMessage(
+                    message,
+                    kind === 'error' ? MessageTypes.ERROR : kind === 'success' ? MessageTypes.SUCCESS : MessageTypes.NOTIFY
+                );
+            };
             const engine = new AutoPilotEngine(
                 connection,
                 trade_currency,
@@ -284,19 +295,40 @@ const AiAgentPanel = ({
                         summary_card.onBotContractEvent(c as never);
                         run_panel.onBotContractEvent(c as never);
                     },
-                    onLog: (kind, message) => {
-                        setActivity(prev => [{ ts: Date.now(), kind, text: message }, ...prev].slice(0, 40));
-                        journal.pushMessage(
-                            message,
-                            kind === 'error' ? MessageTypes.ERROR : kind === 'success' ? MessageTypes.SUCCESS : MessageTypes.NOTIFY
-                        );
-                    },
+                    onLog: logLine,
+                    // Every settled trade goes into the journal with the AI's own context, so it can review itself.
+                    onSettled: s =>
+                        journalStore.addAi(
+                            {
+                                id: s.contract_id,
+                                account: journal_account,
+                                symbol: s.symbol,
+                                type: s.contract_type,
+                                stake: s.stake,
+                                payout: s.payout,
+                                profit: s.profit,
+                                buy_ts: s.buy_ts,
+                                sell_ts: s.sell_ts,
+                                ticks: s.duration_ticks,
+                                source: 'ai',
+                            },
+                            { strategy: s.strategy, step: s.step, base_stake: s.base_stake, mode: s.mode, confidence: s.confidence, tag: s.tag }
+                        ),
+                    // Before each pick the AI consults its own record: skip proven losers, rank lagging ones lower.
+                    gate: () => journalStore.gate(journal_account),
                 }
             );
             run_panel.run_id = `ai-${Date.now()}`;
             run_panel.toggleDrawer(true);
             journal.pushMessage('AI auto-pilot started', MessageTypes.NOTIFY);
             engineRef.current = engine;
+            // Start by reading out what the AI concluded about its own past trades.
+            if (journalStore.selfReviewEnabled()) {
+                journalStore
+                    .review(journal_account)
+                    .lines.slice(0, 3)
+                    .forEach(line => logLine('info', `Self-review: ${line}`));
+            }
             engine.start();
         } catch (err) {
             setStatus('error');
@@ -485,6 +517,20 @@ const AiAgentPanel = ({
                             ))}
                         </ul>
                     </details>
+                    <label className='ai-agent-panel__hint'>
+                        <input
+                            type='checkbox'
+                            checked={selfReviewOn}
+                            disabled={status === 'connecting'}
+                            onChange={e => {
+                                setSelfReviewOn(e.target.checked);
+                                journalStore.setSelfReviewEnabled(e.target.checked);
+                            }}
+                        />{' '}
+                        {localize(
+                            'Let the AI use its self-review: it skips market and contract combinations its own past trades show are clearly losing, and ranks lagging ones lower. The full review is in the Journal tab.'
+                        )}
+                    </label>
                     <label className='ai-agent-panel__hint'>
                         {localize('Learning')}{' '}
                         <select value={learnMode} onChange={e => setLearnMode(e.target.value as TLearningMode)}>
