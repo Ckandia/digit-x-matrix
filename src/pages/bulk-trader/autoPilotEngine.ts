@@ -338,6 +338,11 @@ export class AutoPilotEngine {
         this._findAndEnter(this.config.stake);
     }
 
+    /** True from start() until stop(). The AI tab reads this to re-attach to a run that kept going while the tab was closed. */
+    get isRunning() {
+        return this.running;
+    }
+
     stop(reason = 'stopped by user') {
         this.running = false;
         this._emit({ phase: 'stopped', reason });

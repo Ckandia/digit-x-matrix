@@ -218,3 +218,82 @@ connection attempt returned 403 from the proxy. Anything that only executes
 with a real token and a live feed is unverified. Test on a **demo account**
 first.
 
+
+---
+
+## 6. Bulk Trades: Over 4 / Under 5, new contracts, switching, trend gate (2026-10-06)
+
+Verified: `tsc --noEmit` clean, `npm run build` succeeds, `npx jest` 44/44 suites (450 tests; new ones in
+`src/pages/bulk-trader/__tests__/`: `bulk-contracts.spec.ts` and `ai-runtime.spec.tsx`). **Not yet verified against live Deriv** (no network in
+the build sandbox): test on a demo account first, see "Check on demo" below.
+
+### What was added (Bulk Trades tab, Strategy dropdown, grouped)
+
+| Contract | Deriv request | Ticks | Barrier |
+|---|---|---|---|
+| Over 4 / Under 5 | `DIGITOVER` / `DIGITUNDER` | form value (default 1) | digit 4 / digit 5 |
+| Rise / Fall | `CALL` / `PUT` | form value (default 1) | none |
+| Higher / Lower | `CALL` / `PUT` | 5 | `+0.1` / `-0.1` (editable) |
+| Touch / No Touch | `ONETOUCH` / `NOTOUCH` | 5, then 10 if Deriv refuses 5 | `+0.5` (editable) |
+| Multiplier Up / Down | `MULTUP` / `MULTDOWN` | none (open position) | take profit = 20% of stake |
+
+### Auto Flip (switch after a loss, and back after the next loss)
+
+Even <-> Over 4 · Odd <-> Under 5 · Touch <-> Under 5 · No Touch <-> Over 4 · Rise <-> Under 5 ·
+Fall <-> Over 4 · Higher <-> Under 5 · Lower <-> Over 4. Over 4 / Under 5 started directly switch with each other;
+Multiplier Up / Down switch with each other. **This replaces the old Even <-> Odd flip.** The table lives in
+`contractSpecs.ts` (`SWITCH_PARTNER`).
+
+### Trend gate (`trendFilter.ts`)
+
+Rise/Fall, Higher/Lower and Multipliers are bought only after the 1-tick chart (each tick = one candle) confirms:
+- bullish (Rise, Higher, Multiplier Up): the last two swing highs are rising (higher high);
+- bearish (Fall, Lower, Multiplier Down): the last two swing lows are falling (lower low);
+- if both happen at once (range widening both ways) neither side is confirmed and nothing is bought.
+
+A swing point is a tick above/below the 2 ticks either side, so it confirms 2 ticks after it forms. Until the trend
+shows, the Activity log says it is waiting. Touch/No Touch and the digit contracts are not gated. After a switch to
+Over 4 / Under 5 no gate applies; switching back to a trend contract gates again.
+
+### Multipliers
+
+- The multiplier (x) is picked from what Deriv offers for the market (closest to 100x), or type one in the form.
+- Closing at +20% is a Deriv take-profit order sent with the buy, so it works even if the tab is closed.
+- A multiplier has no expiry: pressing Stop sells any that are still open. If the tab is closed mid-trade they stay
+  open until they hit +20% or are stopped out at the stake; close them on Deriv if needed.
+
+### Check on demo before real money
+
+1. Higher/Lower at 0.1 and Touch/No Touch at 0.5 may be below Deriv's minimum barrier distance on some markets.
+   Touch retries at 10 ticks automatically; if Deriv still refuses, the Activity log shows its message: raise the
+   Barrier field.
+2. Multipliers are not offered on every market (the log shows Deriv's reply if so).
+3. `contracts_for` and `ticks_history` are sent as in the classic API. If the new Options API names them differently,
+   multipliers fall back to 100x and the trend gate fills from live ticks (about 10 ticks of warm-up).
+
+Also fixed on the way: `buildStrategyConfigs` ignored changes to "Fire all at once" and "Max entry ticks" because
+they were missing from its dependency list.
+
+
+---
+
+## 7. AI auto-pilot no longer stops when you leave its tab (2026-10-06)
+
+**Cause.** Switching tabs unmounts the AI panel. The engine, its Deriv connection and its learner were held in that
+panel's refs, and the panel's unmount cleanup called `engine.stop('panel closed')` and closed the connection. The
+engine also read its signals through the panel's own live-signal socket, so even without the stop it would have
+carried on with frozen signals.
+
+**Fix.**
+- `aiRuntime.ts` (new): the engine, connection, learner and the run's display state (status, ladder, P/L, history,
+  activity, config) now live at module level. The panel reads them with `useAiRuntime()` and re-attaches to a live
+  run when you come back, without opening a second connection.
+- `useDigitSignals.ts`: the signal feed is now one shared socket, held open while any tab or a running AI needs it
+  (`retainSignals()`), closed when nobody does. The engine reads `getSignalSnapshots()`.
+- With the AI tab closed, a run still stops itself if you switch demo <-> real in the header (checked every 2 s in
+  `aiRuntime.watchAccount`), so it can never keep trading on a different account than the one on screen.
+- Pressing Stop, hitting take profit / stop loss, or a lost connection still ends the run as before; it then also
+  closes the connection if no AI tab is open.
+
+Note: the run lives in the browser tab. Closing or refreshing the whole page still ends it, and on a phone the
+browser may pause a background tab (the screen-awake lock is kept while a run is active).

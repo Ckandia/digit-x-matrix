@@ -12,6 +12,8 @@ import {
     SYMBOL_OPTIONS,
 } from './constants';
 import { TDigitSignal } from './analysis-types';
+import { MULTIPLIER_TAKE_PROFIT_PCT, SPECS, specOf, tickCandidates } from './contractSpecs';
+import { trendLabel } from './trendFilter';
 import { TRunStatus, TStrategyConfig } from './types';
 import { useDigitSignals } from './useDigitSignals';
 import { getActiveToken } from './tokenStorage';
@@ -153,6 +155,8 @@ const BulkTrader = () => {
     const [bothSides, setBothSides] = useState(false);
     const [burstMode, setBurstMode] = useState(true);
     const [maxEntryTicks, setMaxEntryTicks] = useState(3);
+    const [barrierOffset, setBarrierOffset] = useState<number>(0.1);
+    const [multValue, setMultValue] = useState<number | undefined>(undefined);
     const [fastExecution, setFastExecution] = useState(DEFAULT_STRATEGY.fast_execution);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -222,12 +226,20 @@ const BulkTrader = () => {
     };
 
     const contract_meta = CONTRACT_TYPE_OPTIONS.find(c => c.value === contractType);
+    const spec = SPECS[contractType] ?? specOf('DIGITEVEN');
+    const uses_barrier_offset = spec.family === 'higher_lower' || spec.family === 'touch';
+    const fixed_ticks = tickCandidates(spec, durationTicks);
+    const duration_is_fixed = spec.family === 'multiplier' || Boolean(spec.ticks);
+    // Each contract has its own default barrier distance (Higher/Lower 0.1, Touch/No Touch 0.5).
+    useEffect(() => {
+        if (spec.default_barrier_offset !== undefined) setBarrierOffset(spec.default_barrier_offset);
+    }, [contractType]); // eslint-disable-line react-hooks/exhaustive-deps
     const snapshot = snapshots[symbol];
     const stats = snapshot?.stats;
     const signals = snapshot?.signals ?? [];
     const opposite_type = FLIP_PAIR[contractType];
     const relevant_contract_types = bothSides && opposite_type ? [contractType, opposite_type] : [contractType];
-    const topSignal = signals.find(s => relevant_contract_types.includes(s.contract_type));
+    const topSignal = signals.find(s => (relevant_contract_types as string[]).includes(s.contract_type));
 
     const stopPolling = useCallback(() => {
         if (pollRef.current) {
@@ -313,6 +325,8 @@ const BulkTrader = () => {
                 max_trades: maxTrades,
                 burst_count: burstMode && maxTrades > 1 ? maxTrades : undefined,
                 max_entry_ticks: maxEntryTicks,
+                barrier_offset: uses_barrier_offset ? barrierOffset : undefined,
+                mult_value: multValue,
             };
             const primary_type = override_contract_type ?? contractType;
 
@@ -340,6 +354,11 @@ const BulkTrader = () => {
             maxTrades,
             contractType,
             bothSides,
+            burstMode,
+            maxEntryTicks,
+            barrierOffset,
+            multValue,
+            uses_barrier_offset,
         ]
     );
 
@@ -478,14 +497,26 @@ const BulkTrader = () => {
                                 onChange={e => setContractType(e.target.value as TStrategyConfig['contract_type'])}
                                 disabled={is_running}
                             >
-                                {CONTRACT_TYPE_OPTIONS.map(opt => (
-                                    <option key={opt.value} value={opt.value}>
-                                        {opt.label}
-                                    </option>
+                                {Array.from(new Set(CONTRACT_TYPE_OPTIONS.map(o => o.group))).map(group => (
+                                    <optgroup key={group} label={group}>
+                                        {CONTRACT_TYPE_OPTIONS.filter(o => o.group === group).map(opt => (
+                                            <option key={opt.value} value={opt.value}>
+                                                {opt.label}
+                                            </option>
+                                        ))}
+                                    </optgroup>
                                 ))}
                             </select>
                         </label>
                     </div>
+
+                    {spec.trend && (
+                        <div className='bulk-trader__hint'>
+                            {localize('Trend contract: waits for a {{t}} on the 1-tick chart before buying.', {
+                                t: trendLabel(spec.trend),
+                            })}
+                        </div>
+                    )}
 
                     {contract_meta?.needs_prediction && (
                         <label className='bulk-trader__field'>
@@ -523,11 +554,49 @@ const BulkTrader = () => {
                                 type='number'
                                 min={1}
                                 step={1}
-                                value={durationTicks}
+                                value={spec.family === 'multiplier' ? '' : duration_is_fixed ? fixed_ticks[0] : durationTicks}
+                                placeholder={spec.family === 'multiplier' ? localize('n/a') : undefined}
                                 onChange={e => setDurationTicks(Number(e.target.value))}
-                                disabled={is_running}
+                                disabled={is_running || duration_is_fixed}
                             />
+                            {fixed_ticks.length > 1 && (
+                                <small>{localize('Tries {{a}} ticks, then {{b}} if Deriv refuses.', { a: fixed_ticks[0], b: fixed_ticks[1] })}</small>
+                            )}
                         </label>
+
+                        {uses_barrier_offset && (
+                            <label className='bulk-trader__field'>
+                                <span>{localize('BARRIER (DISTANCE)')}</span>
+                                <input
+                                    type='number'
+                                    min={0.01}
+                                    step={0.01}
+                                    value={barrierOffset}
+                                    onChange={e => setBarrierOffset(Number(e.target.value))}
+                                    disabled={is_running}
+                                />
+                            </label>
+                        )}
+
+                        {spec.family === 'multiplier' && (
+                            <label className='bulk-trader__field'>
+                                <span>{localize('MULTIPLIER (x)')}</span>
+                                <input
+                                    type='number'
+                                    min={1}
+                                    step={1}
+                                    value={multValue ?? ''}
+                                    placeholder={localize('auto')}
+                                    onChange={e => setMultValue(e.target.value ? Number(e.target.value) : undefined)}
+                                    disabled={is_running}
+                                />
+                                <small>
+                                    {localize('Closes at +{{p}}% of stake. Blank = picked from what Deriv offers.', {
+                                        p: Math.round(MULTIPLIER_TAKE_PROFIT_PCT * 100),
+                                    })}
+                                </small>
+                            </label>
+                        )}
 
                         <label className='bulk-trader__field'>
                             <span>{localize('NO. OF BULK TRADES')}</span>
@@ -578,7 +647,7 @@ const BulkTrader = () => {
                             <span className='bulk-trader__toggle-track' />
                             <span className='bulk-trader__toggle-label'>
                                 {localize('Auto Flip')}
-                                <em title={localize('Switches Even/Odd (or Over/Under) after a loss.')}>i</em>
+                                <em title={localize('After a loss, switches to the partner contract (Even/Touch/Rise/Higher ↔ Over 4 or Under 5), and back after the next loss.')}>i</em>
                             </span>
                         </label>
 
@@ -682,7 +751,7 @@ const BulkTrader = () => {
                         percentages={stats?.digit_percentages ?? new Array(10).fill(0)}
                         hotDigit={stats?.hot_digit ?? -1}
                         coldDigit={stats?.cold_digit ?? -1}
-                        highlightedDigit={contract_meta?.needs_prediction ? prediction : undefined}
+                        highlightedDigit={spec.barrier_digit ?? (contract_meta?.needs_prediction ? prediction : undefined)}
                     />
                     <HistoryMatrix digits={stats?.last_digits ?? []} />
                 </div>

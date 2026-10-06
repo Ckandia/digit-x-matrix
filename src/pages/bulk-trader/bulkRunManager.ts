@@ -8,6 +8,7 @@ import { tradeBus } from './tradeBus';
 import { v4 as uuidv4 } from 'uuid';
 import { DerivClientConnection } from './derivClient';
 import { StrategyEngine } from './strategyEngineClient';
+import { SPECS } from './contractSpecs';
 import { TRunStatus, TStartBulkRunResponse, TStrategyConfig } from './types';
 
 const MAX_STRATEGIES_PER_RUN = 5;
@@ -33,6 +34,15 @@ const validateStrategyConfig = (config: TStrategyConfig) => {
     }
     if (config.burst_count !== undefined && (config.burst_count < 1 || config.burst_count > 50)) {
         throw new Error(`Strategy "${config.label}" burst size must be between 1 and 50`);
+    }
+    if (!SPECS[config.contract_type]) {
+        throw new Error(`Strategy "${config.label}" has an unknown contract type "${config.contract_type}"`);
+    }
+    if (config.barrier_offset !== undefined && !(config.barrier_offset > 0)) {
+        throw new Error(`Strategy "${config.label}" barrier distance must be above 0`);
+    }
+    if (config.mult_value !== undefined && !(config.mult_value >= 1)) {
+        throw new Error(`Strategy "${config.label}" multiplier must be at least 1`);
     }
     const needs_prediction = ['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER'].includes(config.contract_type);
     if (needs_prediction && (config.prediction === undefined || config.prediction < 0 || config.prediction > 9)) {

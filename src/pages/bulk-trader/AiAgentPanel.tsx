@@ -3,7 +3,8 @@ import { localize } from '@deriv-com/translations';
 import { useApiBase } from '@/hooks/useApiBase';
 import { getActiveToken } from './tokenStorage';
 import { DerivClientConnection } from './derivClient';
-import { useDigitSignals } from './useDigitSignals';
+import { getSignalSnapshots, useDigitSignals } from './useDigitSignals';
+import { aiRuntime, aiSet, holdSignals, releaseRun, useAiRuntime, watchAccount } from './aiRuntime';
 import {
     AutoPilotEngine,
     buildConfigFromPreset,
@@ -14,7 +15,7 @@ import {
 } from './autoPilotEngine';
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
-import { getDurationTicks, mergeTradeRow, TTradeRow } from './tradeHistory';
+import { getDurationTicks, mergeTradeRow } from './tradeHistory';
 import type { TRecoveryMode } from './autoPilotEngine';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { keepScreenAwake } from './wakeLock';
@@ -24,16 +25,6 @@ import { activeAccount } from '../journal/derivMapping';
 import { journalStore } from '../journal/journalStore';
 import { labReport, suggestLimits, TLabRow } from './strategyLab';
 import './ai-agent-panel.scss';
-
-type TLadderRow = {
-    step: number;
-    symbol: string;
-    label: string;
-    stake: number;
-    tag?: 'flipped' | 'switched' | 'streak';
-    result?: 'win' | 'loss';
-    profit?: number;
-};
 
 const RISK_LEVELS: { value: TRiskLevel; label: string }[] = [
     { value: 'conservative', label: 'Conservative' },
@@ -56,7 +47,19 @@ const AiAgentPanel = ({
         snapshotsRef.current = snapshots;
     }, [snapshots]);
 
-    const [riskLevel, setRiskLevel] = useState<TRiskLevel>('moderate');
+    // Run state lives in aiRuntime (module level), not in this component: switching to another tab unmounts
+    // this panel, and the run must carry on and be here, intact, when you come back.
+    const { status, stopReason, error, totalProfit, ladder, history, activity, config, riskLevel, learnMode } = useAiRuntime();
+    const setStatus = aiSet.status;
+    const setStopReason = aiSet.stopReason;
+    const setError = aiSet.error;
+    const setTotalProfit = aiSet.totalProfit;
+    const setLadder = aiSet.ladder;
+    const setHistory = aiSet.history;
+    const setActivity = aiSet.activity;
+    const setConfig = aiSet.config;
+    const setRiskLevel = aiSet.riskLevel;
+    const setLearnMode = aiSet.learnMode;
     const [balance, setBalance] = useState<number | null>(null);
     // The balance the risk-preset numbers (stake, stop loss, take profit) were built from. It is NOT
     // moved by every live balance tick, so editing a field is never overwritten mid-edit.
@@ -66,24 +69,12 @@ const AiAgentPanel = ({
     const [connectedLoginid, setConnectedLoginid] = useState('');
     const [connectedType, setConnectedType] = useState('');
     const [currency, setCurrency] = useState('USD');
-    const [config, setConfig] = useState<TAutoPilotConfig | null>(null);
 
-    const [status, setStatus] = useState<'idle' | 'connecting' | 'running' | 'stopped' | 'error'>('idle');
-    const [stopReason, setStopReason] = useState<string | undefined>();
-    const [error, setError] = useState<string | null>(null);
-    const [totalProfit, setTotalProfit] = useState(0);
-    const [ladder, setLadder] = useState<TLadderRow[]>([]);
 
-    const [learnMode, setLearnMode] = useState<TLearningMode>('learn');
     const [learnInfo, setLearnInfo] = useState<ReturnType<LearningEngine['summary']> | null>(null);
-    const [history, setHistory] = useState<TTradeRow[]>([]);
-    const [activity, setActivity] = useState<{ ts: number; kind: string; text: string }[]>([]);
     const [labRows, setLabRows] = useState<TLabRow[]>([]);
     const [limitNote, setLimitNote] = useState('');
-    const learnerRef = useRef<LearningEngine | null>(null);
-    const capStopLossRef = useRef(0);
-    const connectionRef = useRef<DerivClientConnection | null>(null);
-    const engineRef = useRef<AutoPilotEngine | null>(null);
+    const { learnerRef, capStopLossRef, connectionRef, engineRef } = aiRuntime;
     const is_running = status === 'running';
 
     const [connectError, setConnectError] = useState<string | null>(null);
@@ -91,14 +82,18 @@ const AiAgentPanel = ({
 
     // Opens a trading connection for the account that is active in the app and wires its LIVE
     // balance stream into the panel. Used by the first connect, by a header account switch, and by Start.
-    const openConnection = React.useCallback(async (token: string) => {
-        const connection = new DerivClientConnection(token);
+    const bindBalance = React.useCallback((connection: DerivClientConnection) => {
         connection.onBalance = (b, c) => {
             setBalance(b);
             setCurrency(c || 'USD');
             setBalanceLive(true);
             setPresetBalance(prev => prev ?? b);
         };
+    }, []);
+
+    const openConnection = React.useCallback(async (token: string) => {
+        const connection = new DerivClientConnection(token);
+        bindBalance(connection);
         const auth = await connection.connect();
         setBalance(auth.authorize.balance ?? 0);
         setCurrency(auth.authorize.currency || 'USD');
@@ -107,7 +102,7 @@ const AiAgentPanel = ({
         setConnectedType(auth.authorize.type || '');
         setPresetBalance(prev => prev ?? (auth.authorize.balance ?? 0));
         return connection;
-    }, []);
+    }, [bindBalance]);
 
     // Opens this tab's own trading connection and reads the balance. Errors
     // are shown (not swallowed) so "not connected" always says why.
@@ -130,12 +125,46 @@ const AiAgentPanel = ({
     }, [openConnection]);
 
     useEffect(() => {
-        connectAccount();
+        aiRuntime.mounted += 1;
+        const live_connection = connectionRef.current;
+        if (engineRef.current?.isRunning && live_connection) {
+            // The run kept going while this tab was closed: pick it up again instead of opening a second
+            // connection (which would also drop the one the run is trading on).
+            bindBalance(live_connection);
+            const info = live_connection.accountInfo;
+            if (info) {
+                setBalance(info.balance ?? 0);
+                setCurrency(info.currency || 'USD');
+                setBalanceLive(live_connection.balanceLive);
+                setConnectedLoginid(info.loginid);
+                setConnectedType(info.type || '');
+                setPresetBalance(prev => prev ?? (info.balance ?? 0));
+            }
+        } else {
+            connectAccount();
+        }
         return () => {
-            if (!engineRef.current) connectionRef.current?.close();
+            aiRuntime.mounted -= 1;
+            if (engineRef.current?.isRunning) {
+                // Leaving the tab never stops a run. Just stop this (unmounted) panel listening for balance ticks.
+                if (connectionRef.current) connectionRef.current.onBalance = null;
+            } else if (aiRuntime.get().status !== 'connecting') {
+                connectionRef.current?.close();
+                connectionRef.current = null;
+            }
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Show what the learner knows as the run progresses (and again when the tab is reopened).
+    useEffect(() => {
+        if (learnerRef.current) setLearnInfo(learnerRef.current.summary());
+    }, [ladder, totalProfit]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // After a run ends, rebuild the risk preset from the account's balance as it is now.
+    useEffect(() => {
+        if (status === 'stopped') setPresetBalance(connectionRef.current?.accountInfo?.balance ?? null);
+    }, [status]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // If our own connection couldn't read a balance, fall back to the one the
     // main app already has for the active account so presets still show.
@@ -204,17 +233,17 @@ const AiAgentPanel = ({
                 return next;
             });
             setTotalProfit(event.total_profit ?? 0);
-            if (learnerRef.current) setLearnInfo(learnerRef.current.summary());
         } else if (event.phase === 'stopped') {
-            setPresetBalance(connectionRef.current?.accountInfo?.balance ?? null);
             setStatus('stopped');
             keepScreenAwake('ai', false);
             setStopReason(event.reason);
             journal.pushMessage(`AI auto-pilot stopped: ${event.reason ?? 'no reason given'}`, MessageTypes.NOTIFY);
+            releaseRun();
         } else if (event.phase === 'error') {
             setStatus('error');
             keepScreenAwake('ai', false);
             setError(event.error || 'Something went wrong.');
+            releaseRun();
         }
     };
 
@@ -284,7 +313,7 @@ const AiAgentPanel = ({
                 connection,
                 trade_currency,
                 config,
-                () => snapshotsRef.current,
+                getSignalSnapshots,
                 handleEngineEvent,
                 learnerRef.current,
                 {
@@ -329,6 +358,8 @@ const AiAgentPanel = ({
                     .lines.slice(0, 3)
                     .forEach(line => logLine('info', `Self-review: ${line}`));
             }
+            holdSignals(); // the run keeps its own hold on the live signals, so leaving this tab does not starve it
+            watchAccount();
             engine.start();
         } catch (err) {
             setStatus('error');
@@ -337,13 +368,6 @@ const AiAgentPanel = ({
     };
 
     const handleStop = () => engineRef.current?.stop('stopped by user');
-
-    useEffect(() => {
-        return () => {
-            engineRef.current?.stop('panel closed');
-            connectionRef.current?.close();
-        };
-    }, []);
 
     const closed = history.filter(r => !r.open);
 
