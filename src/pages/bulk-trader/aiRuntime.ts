@@ -26,6 +26,18 @@ export type TLadderRow = {
 
 export type TAiActivity = { ts: number; kind: string; text: string };
 
+/** One paper (virtual) trade made by the virtual hook. */
+export type TVirtualRow = { ts: number; symbol: string; label: string; result: 'win' | 'loss' };
+export type TVirtualState = {
+    /** Real trading is paused and the AI is paper trading right now. */
+    active: boolean;
+    /** The paper trade in progress, e.g. "Over 4 on R_10". */
+    current: string;
+    /** Virtual losses since the pause started. */
+    losses: number;
+    rows: TVirtualRow[];
+};
+
 export type TAiState = {
     status: TAiStatus;
     stopReason: string | undefined;
@@ -34,6 +46,7 @@ export type TAiState = {
     ladder: TLadderRow[];
     history: TTradeRow[];
     activity: TAiActivity[];
+    virtual: TVirtualState;
     config: TAutoPilotConfig | null;
     riskLevel: TRiskLevel;
     learnMode: TLearningMode;
@@ -47,6 +60,7 @@ let state: TAiState = {
     ladder: [],
     history: [],
     activity: [],
+    virtual: { active: false, current: '', losses: 0, rows: [] },
     config: null,
     riskLevel: 'moderate',
     learnMode: 'learn',
@@ -80,6 +94,7 @@ export const aiSet = {
     ladder: makeSetter('ladder'),
     history: makeSetter('history'),
     activity: makeSetter('activity'),
+    virtual: makeSetter('virtual'),
     config: makeSetter('config'),
     riskLevel: makeSetter('riskLevel'),
     learnMode: makeSetter('learnMode'),

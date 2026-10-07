@@ -49,7 +49,7 @@ const AiAgentPanel = ({
 
     // Run state lives in aiRuntime (module level), not in this component: switching to another tab unmounts
     // this panel, and the run must carry on and be here, intact, when you come back.
-    const { status, stopReason, error, totalProfit, ladder, history, activity, config, riskLevel, learnMode } = useAiRuntime();
+    const { status, stopReason, error, totalProfit, ladder, history, activity, virtual, config, riskLevel, learnMode } = useAiRuntime();
     const setStatus = aiSet.status;
     const setStopReason = aiSet.stopReason;
     const setError = aiSet.error;
@@ -57,6 +57,7 @@ const AiAgentPanel = ({
     const setLadder = aiSet.ladder;
     const setHistory = aiSet.history;
     const setActivity = aiSet.activity;
+    const setVirtual = aiSet.virtual;
     const setConfig = aiSet.config;
     const setRiskLevel = aiSet.riskLevel;
     const setLearnMode = aiSet.learnMode;
@@ -217,6 +218,17 @@ const AiAgentPanel = ({
             keepScreenAwake('ai', true);
             setLadder([]);
             setTotalProfit(0);
+            setVirtual(prev => ({ ...prev, active: false, current: '', losses: 0 }));
+        } else if (event.phase === 'virtual') {
+            const what = `${event.label ?? event.contract_type ?? ''} on ${event.symbol ?? ''}`.trim();
+            if (event.virtual_state === 'result' && event.result) {
+                const row = { ts: Date.now(), symbol: event.symbol ?? '', label: event.label ?? '', result: event.result };
+                setVirtual(prev => ({ ...prev, losses: event.virtual_losses ?? prev.losses, rows: [row, ...prev.rows].slice(0, 50) }));
+            } else if (event.virtual_state === 'end') {
+                setVirtual(prev => ({ ...prev, active: false, current: '' }));
+            } else {
+                setVirtual(prev => ({ ...prev, active: true, current: what, losses: event.virtual_losses ?? prev.losses }));
+            }
         } else if (event.phase === 'entering' && event.symbol && event.contract_type) {
             setLadder(prev => [
                 ...prev,
@@ -241,12 +253,14 @@ const AiAgentPanel = ({
             setTotalProfit(event.total_profit ?? 0);
         } else if (event.phase === 'stopped') {
             setStatus('stopped');
+            setVirtual(prev => ({ ...prev, active: false, current: '' }));
             keepScreenAwake('ai', false);
             setStopReason(event.reason);
             journal.pushMessage(`AI auto-pilot stopped: ${event.reason ?? 'no reason given'}`, MessageTypes.NOTIFY);
             releaseRun();
         } else if (event.phase === 'error') {
             setStatus('error');
+            setVirtual(prev => ({ ...prev, active: false, current: '' }));
             keepScreenAwake('ai', false);
             setError(event.error || 'Something went wrong.');
             releaseRun();
@@ -761,6 +775,52 @@ const AiAgentPanel = ({
                     <button type='button' className='ai-agent-panel__stop' onClick={handleStop}>
                         {localize('Stop now')}
                     </button>
+                </div>
+            )}
+
+            {(virtual.active || virtual.rows.length > 0) && (
+                <div className='ai-agent-panel__history ai-agent-panel__virtual'>
+                    <div className='ai-agent-panel__history-head'>
+                        <strong>{localize('Virtual hook (paper trades, no money)')}</strong>
+                        <span className={virtual.active ? 'is-loss' : 'is-win'}>
+                            {virtual.active
+                                ? localize('PAUSED: paper trading {{what}} ({{n}} virtual losses so far)', { what: virtual.current, n: virtual.losses })
+                                : localize('Real trading is live')}
+                        </span>
+                        <span>
+                            {localize('{{w}} virtual wins, {{l}} virtual losses', {
+                                w: virtual.rows.filter(r => r.result === 'win').length,
+                                l: virtual.rows.filter(r => r.result === 'loss').length,
+                            })}
+                        </span>
+                        <button type='button' className='ai-agent-panel__retry' onClick={() => setVirtual(prev => ({ ...prev, rows: [] }))}>
+                            {localize('Clear')}
+                        </button>
+                    </div>
+                    {virtual.rows.length > 0 && (
+                        <div className='ai-agent-panel__history-scroll'>
+                            <table className='ai-agent-panel__history-table'>
+                                <thead>
+                                    <tr>
+                                        <th>{localize('Time')}</th>
+                                        <th>{localize('Market')}</th>
+                                        <th>{localize('Contract')}</th>
+                                        <th>{localize('Virtual result')}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {virtual.rows.map((r, i) => (
+                                        <tr key={`${r.ts}-${i}`}>
+                                            <td>{new Date(r.ts).toLocaleTimeString()}</td>
+                                            <td>{r.symbol}</td>
+                                            <td>{r.label}</td>
+                                            <td className={r.result === 'win' ? 'is-win' : 'is-loss'}>{r.result === 'win' ? localize('WIN') : localize('LOSS')}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
                 </div>
             )}
 

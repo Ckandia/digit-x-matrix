@@ -16,6 +16,9 @@
 - **Virtual hook** (checkbox on the AI Trader tab, default on): after a real loss the AI places no real trades. It paper-trades on live
   ticks (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch), switching contracts like real trades, until one paper trade wins; then
   real trading resumes at the stake it would have used. Paper trades move no money and do not count toward capital protection.
+- **Fix (Oct 7, later):** the auto flip no longer passes through the self-review gate. The gate blocks contracts the journal shows as
+  losers, and it was silently cancelling the one-loss switch. The virtual hook now has its own card on the AI Trader tab
+  ("Virtual hook (paper trades, no money)": PAUSED / live status, every paper trade WIN or LOSS, running totals).
 - Not run here (no node_modules/network in the build sandbox): the full `tsc` and jest suites. Run `npm test` and `npm run build` first.
 
 # Digit X Matrix — fixes applied and setup required

@@ -391,7 +391,10 @@ export type TSettledTrade = {
 
 export type TAutoPilotEvent = {
     ts: number;
-    phase: 'started' | 'entering' | 'settled' | 'stopped' | 'error' | 'waiting';
+    phase: 'started' | 'entering' | 'settled' | 'stopped' | 'error' | 'waiting' | 'virtual';
+    /** For phase 'virtual': the hook paused real trading ('start'), is about to paper trade ('paper'), settled one ('result'), or resumed real trading ('end'). */
+    virtual_state?: 'start' | 'paper' | 'result' | 'end';
+    virtual_losses?: number;
     step?: number;
     symbol?: string;
     contract_type?: string;
@@ -562,14 +565,12 @@ export class AutoPilotEngine {
     /** One auto-flip step: the partner after a loss, the original after the next one. Null when flipping is off / blocked. */
     private _autoFlipTarget(candidate: TCandidate): TCandidate | null {
         if (!this.config.auto_flip) return null;
+        // The owner's switch rule wins over the self-review gate: the gate is meant to steer fresh picks, and applying it here
+        // silently cancelled the switch whenever the journal held losses for the partner contract.
         const target = this.flip_origin ?? partnerCandidate(candidate.symbol, candidate);
         const came_back = !!this.flip_origin;
-        if (target && !isBlocked(this.hooks?.gate?.(), target.symbol, target.contract_type, (target as { strategy?: string }).strategy)) {
-            this.flip_origin = came_back ? null : candidate;
-            return target;
-        }
-        this.flip_origin = null;
-        return null;
+        this.flip_origin = came_back ? null : candidate;
+        return target;
     }
 
     /** One paper trade on live ticks: resolves true (win), false (loss) or null (could not be settled). No money moves. */
@@ -608,17 +609,19 @@ export class AutoPilotEngine {
     private async _virtualHook(first: TCandidate, resume_stake: number) {
         this.busy = true; // nothing else may place a real trade meanwhile
         this.hooks?.onLog?.('info', `Virtual hook: real trading paused after a loss. Paper-trading until one wins, then back to real at stake ${resume_stake}.`);
+        this._emit({ phase: 'virtual', virtual_state: 'start', virtual_losses: 0, symbol: first.symbol, label: first.label, contract_type: first.contract_type });
         let candidate = first;
         let losses = 0;
         let failures = 0;
         let trend_waits = 0;
         while (this.running) {
             this._emit({
-                phase: 'waiting',
+                phase: 'virtual',
+                virtual_state: 'paper',
+                virtual_losses: losses,
                 symbol: candidate.symbol,
                 contract_type: candidate.contract_type,
                 label: candidate.label,
-                reason: `virtual hook: paper trade on ${candidate.label} (${candidate.symbol}), ${losses} virtual loss${losses === 1 ? '' : 'es'} so far`,
             });
             if (!(await this._trendOk(candidate))) {
                 if (!this.running) return;
@@ -642,6 +645,15 @@ export class AutoPilotEngine {
                 continue;
             }
             failures = 0;
+            this._emit({
+                phase: 'virtual',
+                virtual_state: 'result',
+                virtual_losses: result ? losses : losses + 1,
+                symbol: candidate.symbol,
+                contract_type: candidate.contract_type,
+                label: candidate.label,
+                result: result ? 'win' : 'loss',
+            });
             if (result) {
                 this.hooks?.onLog?.('success', `Virtual WIN on ${candidate.label} (${candidate.symbol}) after ${losses} virtual loss${losses === 1 ? '' : 'es'}: resuming real trading.`);
                 break;
@@ -652,7 +664,10 @@ export class AutoPilotEngine {
         }
         this.flip_origin = null;
         this.busy = false;
-        if (this.running) this._findAndEnter(resume_stake);
+        if (this.running) {
+            this._emit({ phase: 'virtual', virtual_state: 'end', virtual_losses: losses });
+            this._findAndEnter(resume_stake);
+        }
     }
 
     private _enter(candidate: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag'], waits = 0) {
