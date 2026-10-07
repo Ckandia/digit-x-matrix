@@ -519,6 +519,18 @@ const AiAgentPanel = ({
                     <label className='ai-agent-panel__hint'>
                         <input
                             type='checkbox'
+                            checked={!!config?.virtual_hook}
+                            disabled={!config || status === 'connecting'}
+                            onChange={e => config && setConfig({ ...config, virtual_hook: e.target.checked })}
+                        />{' '}
+                        {localize(
+                            'Virtual hook: after a real loss the AI stops risking money and trades on paper (switching contracts the same way) until a paper trade wins, then resumes real trading.'
+                        )}
+                    </label>
+
+                    <label className='ai-agent-panel__hint'>
+                        <input
+                            type='checkbox'
                             checked={!!config?.auto_flip}
                             disabled={!config || status === 'connecting'}
                             onChange={e => config && setConfig({ ...config, auto_flip: e.target.checked })}

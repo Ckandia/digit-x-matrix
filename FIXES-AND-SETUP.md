@@ -12,6 +12,10 @@
 - **Tab switching**: returning to the AI tab no longer stops a running AI (false account-mismatch check removed), the account watcher
   compares against the account active at start, Deriv connections reconnect when the page wakes/goes online (10 attempts), and Bulk
   Trades keeps recording into the run panel while another tab is open.
+- **Switch after one loss**: every loss switches the contract (contracts with no listed pair switch to Under 5), then back after the next loss.
+- **Virtual hook** (checkbox on the AI Trader tab, default on): after a real loss the AI places no real trades. It paper-trades on live
+  ticks (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch), switching contracts like real trades, until one paper trade wins; then
+  real trading resumes at the stake it would have used. Paper trades move no money and do not count toward capital protection.
 - Not run here (no node_modules/network in the build sandbox): the full `tsc` and jest suites. Run `npm test` and `npm run build` first.
 
 # Digit X Matrix — fixes applied and setup required

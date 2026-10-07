@@ -1,4 +1,4 @@
-import { buildTradeParameters, partnerCandidate, preferOneTick, pickBestGlobalCandidate } from '../autoPilotEngine';
+import { buildTradeParameters, partnerCandidate, paperOutcome, preferOneTick, pickBestGlobalCandidate } from '../autoPilotEngine';
 
 const sig = (contract_type: string, label: string, confidence: number, extra: Record<string, unknown> = {}) =>
     ({ family: 'digits', contract_type, label, confidence, basis: 'x', ...extra }) as never;
@@ -35,5 +35,22 @@ describe('AI Trader: Over 4 / Under 5 and the switch pairs', () => {
     ])('%s switches with %s %s', (from, to, barrier) => {
         const p = partnerCandidate('R_10', cand(from) as never);
         expect([p?.contract_type, p?.prediction]).toEqual([to, barrier]);
+    });
+});
+
+describe('AI Trader: one-loss switch fallback and virtual hook settlement', () => {
+    it('contracts without a listed pair switch to Under 5 after one loss', () => {
+        expect(partnerCandidate('R_10', cand('RUNHIGH') as never)?.contract_type).toBe('DIGITUNDER');
+    });
+    it('settles paper trades like Deriv', () => {
+        expect(paperOutcome('DIGITOVER', 100, [100.08], 2)).toBe(true);
+        expect(paperOutcome('DIGITOVER', 100, [100.04], 2)).toBe(false);
+        expect(paperOutcome('DIGITUNDER', 100, [100.04], 2)).toBe(true);
+        expect(paperOutcome('DIGITEVEN', 100, [100.02], 2)).toBe(true);
+        expect(paperOutcome('CALL', 100, [100.01], 2)).toBe(true);
+        expect(paperOutcome('PUT', 100, [100], 2)).toBe(false);
+        expect(paperOutcome('ONETOUCH', 100, [100.2, 100.6], 2, 5)).toBe(true);
+        expect(paperOutcome('NOTOUCH', 100, [100.1, 100.1, 100.1, 100.1, 100.1], 2, 5)).toBe(true);
+        expect(paperOutcome('ONETOUCH', 100, [100.1], 2, 5)).toBeNull();
     });
 });
