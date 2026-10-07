@@ -59,6 +59,8 @@ export function computeStats(window, symbol) {
     const over5_count = window.digits.filter(d => d > 5).length;
     const under5_count = window.digits.filter(d => d < 5).length;
     const equal5_count = total - over5_count - under5_count;
+    // Over 4 = last digit 5-9, Under 5 = last digit 0-4: exactly complementary, 50% each on a fair digit.
+    const over4_count = window.digits.filter(d => d > 4).length;
 
     const last_digits = window.digits.slice(-30);
 
@@ -74,6 +76,7 @@ export function computeStats(window, symbol) {
             n: m,
             even_pct: pct(slice.filter(d => d % 2 === 0).length),
             odd_pct: pct(slice.filter(d => d % 2 !== 0).length),
+            over4_pct: pct(slice.filter(d => d > 4).length),
             over5_pct: pct(slice.filter(d => d > 5).length),
             under5_pct: pct(slice.filter(d => d < 5).length),
         };
@@ -94,12 +97,14 @@ export function computeStats(window, symbol) {
         cold_digit,
         even_pct: total ? Number(((even_count / total) * 100).toFixed(2)) : 0,
         odd_pct: total ? Number(((odd_count / total) * 100).toFixed(2)) : 0,
+        over4_pct: total ? Number(((over4_count / total) * 100).toFixed(2)) : 0,
         over5_pct: total ? Number(((over5_count / total) * 100).toFixed(2)) : 0,
         under5_pct: total ? Number(((under5_count / total) * 100).toFixed(2)) : 0,
         equal5_pct: total ? Number(((equal5_count / total) * 100).toFixed(2)) : 0,
         streaks: {
             even: trailingStreak(window.digits, d => d % 2 === 0),
             odd: trailingStreak(window.digits, d => d % 2 !== 0),
+            over4: trailingStreak(window.digits, d => d > 4),
             over5: trailingStreak(window.digits, d => d > 5),
             under5: trailingStreak(window.digits, d => d < 5),
             same_as_last: total ? trailingStreak(window.digits, d => d === window.digits[total - 1]) : 0,
@@ -152,24 +157,24 @@ export function computeSignals(stats) {
         });
     }
 
-    // Over 5 / Under 5 — same deviation logic against a 50% baseline (digits 0-4 vs 5-9,
-    // using the "over 5 / under 5" convention DIGITOVER/DIGITUNDER use with barrier 5).
-    const over_conf = deviationConfidence(stats.over5_pct, 50, stats.total_ticks);
-    if (stats.under5_pct >= stats.over5_pct && over_conf >= 15) {
+    // Over 4 / Under 5 — the two halves of the digit range (5-9 vs 0-4), 50% each on a fair digit.
+    // Same deviation logic as Even/Odd: bet the side currently under its 50% baseline.
+    const half_conf = deviationConfidence(stats.under5_pct, 50, stats.total_ticks);
+    if (stats.under5_pct >= stats.over4_pct && half_conf >= 15) {
         signals.push({
             contract_type: 'DIGITOVER',
-            prediction: 5,
-            label: 'Over 5',
-            confidence: over_conf,
-            basis: `Over 5 has printed ${stats.over5_pct}% of the last ${stats.total_ticks} ticks vs a 50% baseline.`,
+            prediction: 4,
+            label: 'Over 4',
+            confidence: half_conf,
+            basis: `Over 4 (digits 5-9) has printed ${stats.over4_pct}% of the last ${stats.total_ticks} ticks vs a 50% baseline.`,
         });
-    } else if (over_conf >= 15) {
+    } else if (half_conf >= 15) {
         signals.push({
             contract_type: 'DIGITUNDER',
             prediction: 5,
             label: 'Under 5',
-            confidence: over_conf,
-            basis: `Under 5 has printed ${stats.under5_pct}% of the last ${stats.total_ticks} ticks vs a 50% baseline.`,
+            confidence: half_conf,
+            basis: `Under 5 (digits 0-4) has printed ${stats.under5_pct}% of the last ${stats.total_ticks} ticks vs a 50% baseline.`,
         });
     }
 

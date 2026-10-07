@@ -180,11 +180,17 @@ const AiAgentPanel = ({
     // account it opened with, so left alone it would show and trade on the OLD account. A running AI
     // is stopped (it must never carry on trading on a different account than the one on screen);
     // then the panel reconnects to the new account and starts learning from that account's own record.
+    const lastLoginidRef = useRef(activeLoginid);
     useEffect(() => {
+        const previous = lastLoginidRef.current;
+        lastLoginidRef.current = activeLoginid;
         const conn = connectionRef.current;
         const bound = conn?.accountInfo?.loginid;
         if (!activeLoginid || !bound || activeLoginid === bound) return;
-        engineRef.current?.stop('the active account was switched in the header');
+        // Coming back to this tab (the panel was re-created) is NOT an account switch: a run that kept going
+        // while another tab was open must never be stopped by it. Only a change made while this panel is on screen counts.
+        if (engineRef.current?.isRunning && previous === activeLoginid) return;
+        if (engineRef.current?.isRunning) engineRef.current.stop('the active account was switched in the header');
         learnerRef.current = null;
         setPresetBalance(null);
         setBalanceLive(false);
@@ -500,8 +506,27 @@ const AiAgentPanel = ({
                                 disabled={status === 'connecting'}
                                 onChange={v => updateField('take_profit', v)}
                             />
+                            <FieldBox
+                                label={localize('Protect capital: first N trades (0 = off)')}
+                                value={config.protect_trades ?? 0}
+                                step={1}
+                                disabled={status === 'connecting'}
+                                onChange={v => updateField('protect_trades', Math.max(0, Math.floor(v)))}
+                            />
                         </div>
                     )}
+
+                    <label className='ai-agent-panel__hint'>
+                        <input
+                            type='checkbox'
+                            checked={!!config?.auto_flip}
+                            disabled={!config || status === 'connecting'}
+                            onChange={e => config && setConfig({ ...config, auto_flip: e.target.checked })}
+                        />{' '}
+                        {localize(
+                            'Auto flip: after a loss the AI switches to the partner contract, and after the next loss it switches back. Pairs: Even / Over 4, Odd / Under 5, Touch / Under 5, No Touch / Over 4, Rise / Under 5, Fall / Over 4.'
+                        )}
+                    </label>
 
                     <label className='ai-agent-panel__hint'>
                         {localize('Stake method')}{' '}
@@ -523,7 +548,7 @@ const AiAgentPanel = ({
                     </p>
                     <p className='ai-agent-panel__hint'>
                         {localize(
-                            'Time frame: 1 tick. Touch/No Touch (barrier contracts) use the shortest duration Deriv offers; contracts Deriv does not sell at 1 tick are skipped.'
+                            'Quick contracts first: 1-tick contracts (Even/Odd, Over 4/Under 5, Rise/Fall) are always preferred; Touch/No Touch (5 ticks, barrier 0.5, or 10 ticks if Deriv refuses 5) is used only when no 1-tick contract is available. Rise needs a higher-high and Fall a lower-low on the 1-tick chart first. Capital protection: for the first N trades the stake stays at the base stake and the run stops if it loses 3 base stakes. It reduces risk; it cannot guarantee profit.'
                         )}
                     </p>
                     <details className='ai-agent-panel__hint'>

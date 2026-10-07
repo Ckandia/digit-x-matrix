@@ -18,10 +18,8 @@ import { DerivClientConnection } from './derivClient';
 import { TDigitSignal, TSnapshotMap } from './analysis-types';
 import { candidatesFromSnapshots, LearningEngine } from './learningEngine';
 import { applyGate, isBlocked, TReviewGate } from '../journal/selfReview';
-import { isMultiplierType, markRefused, MULTIPLIER_TICKS, tradeTicks } from './contractRules';
-import { extraSignals, synthSignal, trendSideOf } from './aiContracts';
-import { MULTIPLIER_TAKE_PROFIT_PCT, pickMultiplier, relativeBarrier, SPECS, SWITCH_PARTNER, specOf } from './contractSpecs';
-import { TickTrendMonitor, trendLabel } from './trendFilter';
+import { markRefused, tradeTicks } from './contractRules';
+import { detectTrend, TREND_WINDOW } from './trendFilter';
 
 export type TRiskLevel = 'conservative' | 'moderate' | 'aggressive';
 
@@ -59,7 +57,15 @@ export type TAutoPilotConfig = {
     max_steps: number;
     stop_loss: number; // absolute currency amount, anchored to balance at start
     take_profit: number; // absolute currency amount, anchored to balance at start
+    /** After a loss, switch to the partner contract (Even<->Over 4 ...); after the next loss, back. Off when undefined/false. */
+    auto_flip?: boolean;
+    /** Capital protection: for the first N trades of a run the stake stays at the base stake (no growth) and a tight early loss limit applies. 0/undefined = off. */
+    protect_trades?: number;
 };
+
+/** The early loss limit during capital protection, in base stakes. */
+export const PROTECT_LOSS_STAKES = 3;
+export const DEFAULT_PROTECT_TRADES = 10;
 
 /** Turns a risk preset + live balance into the absolute numbers shown/edited
  *  in the UI. Editing a field in the UI just overwrites one of these — the
@@ -75,6 +81,8 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         max_steps: preset.max_steps,
         stop_loss: Number(((balance * preset.stop_loss_pct) / 100).toFixed(2)),
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
+        auto_flip: true,
+        protect_trades: DEFAULT_PROTECT_TRADES,
     };
 };
 
@@ -84,21 +92,17 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
 // High/Low Tick, Reset) stay in this list but are filtered out by tradeTicks() === null, so
 // they are never bought, instead of being rejected by Deriv or stretched past 1 tick.
 //
-// Matches is dropped (too hard to program per the user) and Accumulators are deferred. Multipliers are
-// open positions: they have no tick duration, close by themselves at +20% of the stake (a take-profit
-// order sent with the buy) and are sold if the AI is stopped while one is open.
-// Higher/Lower trade 5 ticks with a 0.1 barrier; Touch/No Touch trade 5 ticks with a 0.5 barrier.
+// The 8 contract families in this pass — Matches dropped (too hard to
+// program per the user), Multiplier and Accumulators deferred (they're
+// open-position contracts needing a different execution/monitoring model
+// than every fixed-duration contract here).
 const AUTOPILOT_CONTRACT_TYPES = [
     'DIGITEVEN',
     'DIGITODD',
-    'OVER4',
-    'UNDER5',
+    'DIGITOVER', // Over 4
+    'DIGITUNDER', // Under 5
     'CALL',
     'PUT',
-    'HIGHER',
-    'LOWER',
-    'MULTUP',
-    'MULTDOWN',
     'RUNHIGH',
     'RUNLOW',
     'ONETOUCH',
@@ -136,12 +140,65 @@ const FLIP_PARTNER: Record<string, string> = {
     TICKLOW: 'TICKHIGH',
     RESETCALL: 'RESETPUT',
     RESETPUT: 'RESETCALL',
+    DIGITOVER: 'DIGITUNDER',
+    DIGITUNDER: 'DIGITOVER',
+};
+
+/** Over 4 / Under 5 are digit contracts with a fixed barrier; this is the key the switch table uses for them. */
+const switchKey = (c: { contract_type: string; prediction?: number | string }): string =>
+    c.contract_type === 'DIGITOVER' ? 'OVER4' : c.contract_type === 'DIGITUNDER' ? 'UNDER5' : c.contract_type;
+
+/**
+ * Auto flip (the owner's pairs). After a loss a contract switches with its partner, after the next loss it goes back:
+ *   Even <-> Over 4    Odd <-> Under 5    Touch <-> Under 5    No Touch <-> Over 4
+ *   Rise <-> Under 5   Fall <-> Over 4    (Over 4 <-> Under 5 with each other)
+ * Higher/Lower and Multipliers have the same pairs but are only on the Bulk Trades tab (they are not 1-tick contracts).
+ * Contracts not listed here keep the normal behaviour.
+ */
+export const SWITCH_PARTNER_KEY: Record<string, 'OVER4' | 'UNDER5'> = {
+    DIGITEVEN: 'OVER4',
+    DIGITODD: 'UNDER5',
+    ONETOUCH: 'UNDER5',
+    NOTOUCH: 'OVER4',
+    CALL: 'UNDER5',
+    PUT: 'OVER4',
     OVER4: 'UNDER5',
     UNDER5: 'OVER4',
-    HIGHER: 'LOWER',
-    LOWER: 'HIGHER',
-    MULTUP: 'MULTDOWN',
-    MULTDOWN: 'MULTUP',
+};
+
+export const partnerCandidate = (symbol: string, from: TCandidate): TCandidate | null => {
+    const key = SWITCH_PARTNER_KEY[switchKey(from)];
+    if (!key) return null;
+    const over = key === 'OVER4';
+    return {
+        symbol,
+        family: 'digits',
+        contract_type: over ? 'DIGITOVER' : 'DIGITUNDER',
+        prediction: over ? 4 : 5,
+        duration_ticks: 1,
+        label: over ? 'Over 4' : 'Under 5',
+        confidence: 0,
+        basis: `Auto flip: ${from.label} lost, switching to ${over ? 'Over 4' : 'Under 5'}.`,
+    } as TCandidate;
+};
+
+/** Contracts that wait for a confirmed trend on the 1-tick chart: Rise needs a higher high, Fall a lower low. */
+const TREND_NEEDED: Record<string, 'bullish' | 'bearish'> = { CALL: 'bullish', PUT: 'bearish' };
+
+/**
+ * The owner wants quick 1-tick contracts, not ones that sit open. When any market has a tradable 1-tick signal,
+ * every longer contract (the barrier ones) is left out of the ranking; they are used only when nothing 1-tick exists.
+ */
+export const preferOneTick = (snapshots: TSnapshotMap): TSnapshotMap => {
+    const has_one_tick = Object.entries(snapshots).some(([symbol, snap]) =>
+        snap.signals.some(sig => tradeTicks(symbol, sig.contract_type) === 1)
+    );
+    if (!has_one_tick) return snapshots;
+    const out: TSnapshotMap = {};
+    for (const [symbol, snap] of Object.entries(snapshots)) {
+        out[symbol] = { ...snap, signals: snap.signals.filter(sig => tradeTicks(symbol, sig.contract_type) === 1) };
+    }
+    return out;
 };
 
 /** A quote whose payout is below this multiple of the stake is a guaranteed-loss trade: never buy it. */
@@ -149,23 +206,14 @@ const MIN_PAYOUT_RATIO = 1.05;
 /** Deriv wording for "this contract itself is not available right now" (as opposed to balance/stake/connection errors). */
 const REFUSAL_PATTERN = /not offered|duration|barrier|not available|unavailable|suspended|market is closed|no longer offered|selected tick/i;
 
-export type TCandidate = TDigitSignal & {
-    symbol: string;
-    /** Multipliers only: the x to trade, once known. */
-    multiplier?: number;
-    /** Touch/No Touch only: trade this many ticks instead of 5 (Deriv refused 5 on this market). */
-    ticks_override?: number;
-};
-
-const DEFAULT_MULTIPLIER = 100;
-const round2 = (n: number) => Number(n.toFixed(2));
-const isTouch = (type: string) => type === 'ONETOUCH' || type === 'NOTOUCH';
+export type TCandidate = TDigitSignal & { symbol: string };
 
 /** Best-confidence signal across every symbol, restricted to the families the
  *  auto-pilot is allowed to trade. Used for the very first entry, and again
  *  after every win (the ladder resets and re-scans from scratch). */
-export const pickBestGlobalCandidate = (snapshots: TSnapshotMap): TCandidate | null => {
+export const pickBestGlobalCandidate = (all_snapshots: TSnapshotMap): TCandidate | null => {
     let best: TCandidate | null = null;
+    const snapshots = preferOneTick(all_snapshots);
     for (const [symbol, snapshot] of Object.entries(snapshots)) {
         for (const signal of snapshot.signals) {
             if (!AUTOPILOT_CONTRACT_TYPES.includes(signal.contract_type as (typeof AUTOPILOT_CONTRACT_TYPES)[number]))
@@ -213,12 +261,17 @@ const flipPrediction = (previous: TCandidate): TDigitSignal['prediction'] => {
     return previous.prediction;
 };
 
-const NEEDS_SINGLE_BARRIER = new Set(['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER']);
+const NEEDS_SINGLE_BARRIER = new Set(['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER', 'ONETOUCH', 'NOTOUCH']);
 
 /** The duration to send to Deriv. Throws if this contract may not be traded (see tradeTicks). */
+const touch_ticks = new Map<string, number>(); // symbol|type -> 10 once Deriv refused 5 ticks for it
+const isTouch = (t: string) => t === 'ONETOUCH' || t === 'NOTOUCH';
+const TOUCH_BARRIER = '+0.5';
 const dutyTicks = (symbol: string, contract_type: string): number => {
     const ticks = tradeTicks(symbol, contract_type);
     if (ticks === null) throw new Error(`${contract_type} on ${symbol} is not offered at 1 tick (or is temporarily refused)`);
+    // Touch / No Touch: 5 ticks with a 0.5 barrier, or 10 ticks with 0.5 if Deriv refuses 5 on this market.
+    if (isTouch(contract_type)) return touch_ticks.get(`${symbol}|${contract_type}`) ?? 5;
     return ticks;
 };
 
@@ -231,50 +284,6 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
         currency,
         underlying_symbol: candidate.symbol,
     };
-
-    const type = candidate.contract_type;
-
-    if (isMultiplierType(type)) {
-        // An open position: no duration. Deriv closes it by itself once the profit reaches 20% of the stake.
-        return {
-            ...base,
-            multiplier: candidate.multiplier ?? DEFAULT_MULTIPLIER,
-            limit_order: { take_profit: round2(stake * MULTIPLIER_TAKE_PROFIT_PCT) },
-        };
-    }
-
-    if (type === 'OVER4' || type === 'UNDER5') {
-        // Digit Over/Under with the barrier fixed (Over 4 = digits 5-9, Under 5 = digits 0-4).
-        return {
-            ...base,
-            contract_type: type === 'OVER4' ? 'DIGITOVER' : 'DIGITUNDER',
-            duration: dutyTicks(candidate.symbol, type),
-            duration_unit: 't',
-            barrier: type === 'OVER4' ? '4' : '5',
-        };
-    }
-
-    if (type === 'HIGHER' || type === 'LOWER') {
-        // Deriv's CALL/PUT with a barrier: 5 ticks, 0.1 above (Higher) or below (Lower) the entry price.
-        return {
-            ...base,
-            contract_type: type === 'HIGHER' ? 'CALL' : 'PUT',
-            duration: dutyTicks(candidate.symbol, type),
-            duration_unit: 't',
-            barrier: relativeBarrier(specOf(type)),
-        };
-    }
-
-    if (isTouch(type)) {
-        // 5 ticks with a 0.5 barrier (10 ticks if Deriv refused 5, see _enter). The side of the barrier comes from the signal.
-        const sign = String(candidate.prediction ?? '').trim().startsWith('-') ? '-' : '+';
-        return {
-            ...base,
-            duration: candidate.ticks_override ?? dutyTicks(candidate.symbol, type),
-            duration_unit: 't',
-            barrier: `${sign}${SPECS.ONETOUCH.default_barrier_offset}`,
-        };
-    }
 
     if (candidate.contract_type === 'TICKHIGH' || candidate.contract_type === 'TICKLOW') {
         // High Tick/Low Tick is fixed at 5 ticks with a selected_tick 1-5.
@@ -297,7 +306,13 @@ export const buildTradeParameters = (candidate: TCandidate, stake: number, curre
         duration: dutyTicks(candidate.symbol, candidate.contract_type),
         duration_unit: 't',
     };
-    if (NEEDS_SINGLE_BARRIER.has(candidate.contract_type)) {
+    if (isTouch(candidate.contract_type)) {
+        parameters.barrier = TOUCH_BARRIER;
+    } else if (candidate.contract_type === 'DIGITOVER') {
+        parameters.barrier = '4'; // Over 4
+    } else if (candidate.contract_type === 'DIGITUNDER') {
+        parameters.barrier = '5'; // Under 5
+    } else if (NEEDS_SINGLE_BARRIER.has(candidate.contract_type)) {
         parameters.barrier = String(candidate.prediction);
     }
     return parameters;
@@ -373,11 +388,9 @@ export class AutoPilotEngine {
     private win_streak = 0; // reverse martingale: wins in a row
     private streak_profit = 0; // reverse martingale: what the current win streak has made
     private entry_tag: TAutoPilotEvent['tag']; // why the trade being placed is not a plain fresh pick
-    private monitors = new Map<string, TickTrendMonitor>(); // 1-tick chart trend, per market
-    private switch_pair: { origin: string; partner: string } | null = null; // the contract we switched away from, and to
-    private touch_ticks: Record<string, number> = {}; // markets where Deriv refused 5 ticks for Touch/No Touch
-    private multipliers: Record<string, number> = {}; // multiplier chosen per market
-    private open_multiplier: string | null = null; // contract id of a multiplier that is still open
+    private trade_count = 0; // settled trades in this run (capital protection counts these)
+    private flip_origin: TCandidate | null = null; // auto flip: the contract we flipped away from
+    private blocked = new Map<string, number>(); // symbol|type -> until: no trend confirmed on the 1-tick chart yet
 
     constructor(
         connection: DerivClientConnection,
@@ -408,6 +421,9 @@ export class AutoPilotEngine {
         this.consecutive_losses = 0;
         this.win_streak = 0;
         this.streak_profit = 0;
+        this.trade_count = 0;
+        this.flip_origin = null;
+        this.blocked.clear();
         this._emit({ phase: 'started' });
         this._findAndEnter(this.config.stake);
     }
@@ -419,47 +435,7 @@ export class AutoPilotEngine {
 
     stop(reason = 'stopped by user') {
         this.running = false;
-        this.monitors.forEach(m => m.stop());
-        this.monitors.clear();
-        // A multiplier has no expiry: stopping the AI must close one that is still open.
-        if (this.open_multiplier) {
-            const contract_id = this.open_multiplier;
-            this.open_multiplier = null;
-            this.hooks?.onLog?.('info', `Closing the open multiplier ${contract_id}.`);
-            this.connection
-                .send({ sell: contract_id, price: 0 })
-                .catch((err: Error) => this.hooks?.onLog?.('error', `Could not close multiplier ${contract_id}: ${err.message}`));
-        }
         this._emit({ phase: 'stopped', reason });
-    }
-
-    /** Starts following the 1-tick chart of every market the AI can see (once each). */
-    private _ensureMonitors(symbols: string[]) {
-        for (const symbol of symbols) {
-            if (this.monitors.has(symbol)) continue;
-            const monitor = new TickTrendMonitor(this.connection, symbol);
-            this.monitors.set(symbol, monitor);
-            void monitor.start();
-        }
-    }
-
-    /** Trend contracts are only allowed while their market's 1-tick chart shows the matching trend. */
-    private _trendOk(symbol: string, contract_type: string): boolean {
-        const side = trendSideOf(contract_type);
-        return !side || this.monitors.get(symbol)?.trend() === side;
-    }
-
-    /** The backend's signals plus the AI's own (Over 4 / Under 5, Higher / Lower, Multipliers), minus any trend contract the chart does not back. */
-    private _withExtras(snapshots: TSnapshotMap, skip?: Set<string>): TSnapshotMap {
-        this._ensureMonitors(Object.keys(snapshots));
-        const out: TSnapshotMap = {};
-        for (const [symbol, snap] of Object.entries(snapshots)) {
-            const signals = [...snap.signals, ...extraSignals(snap)].filter(
-                sig => !skip?.has(sig.contract_type) && this._trendOk(symbol, sig.contract_type)
-            );
-            out[symbol] = { ...snap, signals };
-        }
-        return out;
     }
 
     private _emit(event: Partial<TAutoPilotEvent> & { phase: TAutoPilotEvent['phase'] }) {
@@ -472,44 +448,35 @@ export class AutoPilotEngine {
     }
 
     /** The best tradable contract right now (learner-guided when learning is on). Risk style plays no part in this. */
-    private _pick(raw_snapshots: TSnapshotMap, skip?: Set<string>): TCandidate | null {
-        // The AI's own signals are added first, then the self-review: skip contracts its own history proves are losing, rank lagging ones lower.
-        const snapshots = applyGate(this._withExtras(raw_snapshots, skip), this.hooks?.gate?.());
+    private _pick(raw_snapshots: TSnapshotMap): TCandidate | null {
+        // The AI's self-review comes first: skip contracts its own history proves are losing, rank lagging ones lower.
+        const gated = applyGate(raw_snapshots, this.hooks?.gate?.());
+        // Rise/Fall waits until the 1-tick chart confirms a trend: leave out the ones that were just refused for that.
+        const now = Date.now();
+        const unblocked: TSnapshotMap = {};
+        for (const [symbol, snap] of Object.entries(gated)) {
+            unblocked[symbol] = {
+                ...snap,
+                signals: snap.signals.filter(sig => (this.blocked.get(`${symbol}|${sig.contract_type}`) ?? 0) <= now),
+            };
+        }
+        // Quick 1-tick contracts first; longer contracts only when no 1-tick one is available.
+        const snapshots = preferOneTick(unblocked);
         const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
         return learner
             ? learner.pickBest(candidatesFromSnapshots<TDigitSignal>(snapshots, AUTOPILOT_CONTRACT_TYPES) as TCandidate[])
             : pickBestGlobalCandidate(snapshots);
     }
 
-    /**
-     * The contract a loss switches to, from the switch map: Even / No Touch / Fall / Lower <-> Over 4 and
-     * Odd / Touch / Rise / Higher <-> Under 5. A contract we switched TO goes back to the one we left.
-     * Null when the contract has no partner, or the partner cannot be traded right now (not offered, refused,
-     * blocked by the self-review, or a trend contract whose trend is not confirmed): the caller then falls back.
-     */
-    private _partnerCandidate(lost: TCandidate): TCandidate | null {
-        const pair = this.switch_pair;
-        const back = pair && pair.partner === lost.contract_type;
-        const target = back ? pair!.origin : SWITCH_PARTNER[lost.contract_type as keyof typeof SWITCH_PARTNER];
-        if (!target || target === lost.contract_type) return null;
-        const duration = tradeTicks(lost.symbol, target);
-        if (duration === null || !this._trendOk(lost.symbol, target)) return null;
-        const live = this.getSnapshots()[lost.symbol]?.signals.find(sig => sig.contract_type === target);
-        const signal = live ?? synthSignal(target);
-        if (!signal) return null;
-        if (isBlocked(this.hooks?.gate?.(), lost.symbol, target, (signal as { strategy?: string }).strategy)) return null;
-        if (!back) this.switch_pair = { origin: lost.contract_type, partner: target };
-        return { symbol: lost.symbol, ...signal, duration_ticks: duration };
-    }
-
-    /** The contract to switch to after losses: the switch-map partner, else the best contract that is NOT the one that just lost (nor its opposite side). Null if there is none. */
+    /** The best tradable contract that is NOT the one that just lost (nor its opposite side). Null if there is none. */
     private _pickSwitch(lost: TCandidate): TCandidate | null {
-        const partner = this._partnerCandidate(lost);
-        if (partner) return partner;
-        const skip = new Set(
-            [lost.contract_type, FLIP_PARTNER[lost.contract_type], SWITCH_PARTNER[lost.contract_type as keyof typeof SWITCH_PARTNER]].filter(Boolean) as string[]
-        );
-        return this._pick(this.getSnapshots(), skip);
+        const skip = new Set([lost.contract_type, FLIP_PARTNER[lost.contract_type]].filter(Boolean));
+        const snapshots = this.getSnapshots();
+        const others: TSnapshotMap = {};
+        for (const [symbol, snap] of Object.entries(snapshots)) {
+            others[symbol] = { ...snap, signals: snap.signals.filter(sig => !skip.has(sig.contract_type)) };
+        }
+        return this._pick(others);
     }
 
     private _findAndEnter(stake: number, tag?: TAutoPilotEvent['tag']) {
@@ -536,12 +503,47 @@ export class AutoPilotEngine {
         this._enter(candidate, stake, tag);
     }
 
-    private _enter(candidate_in: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag']) {
-        let candidate: TCandidate = candidate_in;
-        // Touch/No Touch: once Deriv has refused 5 ticks on a market, go straight to 10 there.
-        if (isTouch(candidate.contract_type) && !candidate.ticks_override && this.touch_ticks[candidate.symbol]) {
-            candidate = { ...candidate, ticks_override: this.touch_ticks[candidate.symbol] };
+    /** Rise/Fall: bought only once the 1-tick chart shows a higher high (Rise) or a lower low (Fall). */
+    private async _trendOk(candidate: TCandidate): Promise<boolean> {
+        const need = TREND_NEEDED[candidate.contract_type];
+        if (!need) return true;
+        try {
+            const res = await this.connection.send({ ticks_history: candidate.symbol, count: TREND_WINDOW, end: 'latest', style: 'ticks' });
+            const prices: number[] = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            return detectTrend(prices) === need;
+        } catch {
+            return false; // no chart, no trend confirmation, no trade
         }
+    }
+
+    private _enter(candidate: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag'], waits = 0) {
+        if (!TREND_NEEDED[candidate.contract_type]) {
+            this._enterNow(candidate, wanted_stake, tag);
+            return;
+        }
+        this.busy = true;
+        void this._trendOk(candidate).then(ok => {
+            this.busy = false;
+            if (!this.running) return;
+            if (ok) {
+                this._enterNow(candidate, wanted_stake, tag);
+                return;
+            }
+            if (tag === 'flipped' && waits < 20) {
+                if (waits === 0) this.hooks?.onLog?.('info', `Waiting for a ${TREND_NEEDED[candidate.contract_type] === 'bullish' ? 'higher-high' : 'lower-low'} trend on the 1-tick chart before ${candidate.label} on ${candidate.symbol}.`);
+                setTimeout(() => this._enter(candidate, wanted_stake, tag, waits + 1), 1500);
+                return;
+            }
+            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 6000);
+            this._findAndEnter(wanted_stake, tag);
+        });
+    }
+
+    private _enterNow(candidate_in: TCandidate, wanted_stake_in: number, tag?: TAutoPilotEvent['tag']) {
+        const candidate: TCandidate = candidate_in;
+        // Capital protection: the first trades of a run never use more than the base stake.
+        const protect = Math.max(0, Math.floor(this.config.protect_trades ?? 0));
+        const wanted_stake = this.trade_count < protect ? Math.min(wanted_stake_in, this.config.stake) : wanted_stake_in;
         // The small-stake exploration cap applies ONLY to the first trade of a ladder. It used to
         // clamp recovery steps too, which silently turned the martingale into a flat stake.
         const governed = this.learner && this.step === 1 ? this.learner.governStake(wanted_stake, this.config.stake, candidate) : wanted_stake;
@@ -586,26 +588,17 @@ export class AutoPilotEngine {
             setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
             return;
         }
-        const is_multiplier = isMultiplierType(candidate.contract_type);
-        const tried_duration = is_multiplier ? MULTIPLIER_TICKS : Number(parameters.duration);
+        const tried_duration = Number(parameters.duration);
         this.hooks?.onLog?.(
             'info',
-            `Buying ${candidate.contract_type} on ${candidate.symbol}, ` +
-                (is_multiplier ? 'closes at +20% of the stake' : `${tried_duration} tick(s)`) +
-                `, stake ${stake} ${this.currency}` +
-                (candidate.prediction !== undefined ? `, ${typeof candidate.prediction === 'string' ? 'barrier' : 'prediction'} ${candidate.prediction}` : '')
+            `Buying ${candidate.contract_type} on ${candidate.symbol}, ${tried_duration} tick(s), stake ${stake} ${this.currency}` +
+                (candidate.prediction !== undefined ? `, prediction ${candidate.prediction}` : '')
         );
         // Ask Deriv for a price first (the documented contracts_for -> proposal -> buy flow). A proposal
         // costs nothing, so a bad duration/barrier/stake is caught here instead of as a failed buy, and a
         // payout that cannot even cover the stake is never bought.
-        // A multiplier needs its x first (what Deriv offers on this market, closest to 100x).
-        const ready: Promise<unknown> = is_multiplier
-            ? this._multiplierFor(candidate.symbol).then(x => {
-                  parameters.multiplier = x;
-              })
-            : Promise.resolve();
-        ready
-            .then(() => this.connection.send({ proposal: 1, ...parameters }))
+        this.connection
+            .send({ proposal: 1, ...parameters })
             .then(res => {
                 const quote = res?.proposal;
                 if (!quote) throw new Error('Deriv returned no price for this contract');
@@ -624,17 +617,18 @@ export class AutoPilotEngine {
             .catch(err => {
                 this.busy = false;
                 const raw = String(err?.message || 'Failed to place trade');
-                // Touch/No Touch: Deriv refused 5 ticks on this market. Try 10 before giving the contract up.
-                if (isTouch(candidate.contract_type) && tried_duration === 5 && !candidate.ticks_override && REFUSAL_PATTERN.test(raw) && this.running) {
-                    this.touch_ticks[candidate.symbol] = 10;
-                    this.hooks?.onLog?.('info', `${candidate.contract_type} on ${candidate.symbol} was refused at 5 ticks (${raw}); trying 10 ticks.`);
-                    if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
-                    setTimeout(() => this.running && this._enter({ ...candidate, ticks_override: 10 }, wanted_stake, tag), 300);
-                    return;
-                }
                 if (/dropped/i.test(raw)) this.hooks?.onLog?.('error', 'The connection dropped while buying. Check Transactions: that contract may still be open.');
                 const detail = `${candidate.contract_type} on ${candidate.symbol} for ${tried_duration} tick(s): ${raw}`;
                 this.hooks?.onLog?.('error', detail);
+                // Touch / No Touch: Deriv refused 5 ticks here, so use 10 ticks with the same 0.5 barrier before giving up.
+                const touch_key = `${candidate.symbol}|${candidate.contract_type}`;
+                if (isTouch(candidate.contract_type) && tried_duration === 5 && !touch_ticks.has(touch_key) && /duration|tick|barrier|offered/i.test(raw)) {
+                    touch_ticks.set(touch_key, 10);
+                    this.hooks?.onLog?.('info', `${candidate.label} refused at 5 ticks on ${candidate.symbol}; trying 10 ticks with the same 0.5 barrier.`);
+                    if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+                    setTimeout(() => this._enterNow(candidate, wanted_stake, tag), 300);
+                    return;
+                }
                 // A refusal about this contract itself (duration, barrier, market closed, low payout): skip
                 // the combination for 6 hours and search again. Anything else (balance, stake limits, a
                 // dropped connection) stops the session so it cannot keep failing or trading blind.
@@ -652,23 +646,9 @@ export class AutoPilotEngine {
             });
     }
 
-    /** The multiplier (x) to use on a market: of the values Deriv offers, the one closest to 100x. */
-    private async _multiplierFor(symbol: string): Promise<number> {
-        if (this.multipliers[symbol]) return this.multipliers[symbol];
-        let chosen = DEFAULT_MULTIPLIER;
-        try {
-            chosen = pickMultiplier(await this.connection.send({ contracts_for: symbol, currency: this.currency })) ?? DEFAULT_MULTIPLIER;
-        } catch {
-            /* keep the default: Deriv will say if it is not allowed */
-        }
-        this.multipliers[symbol] = chosen;
-        return chosen;
-    }
-
     private _watch(candidate: TCandidate, stake: number, contract_id: string, duration: number) {
         const entry_step = this.step;
         const entry_tag = this.entry_tag;
-        if (isMultiplierType(candidate.contract_type)) this.open_multiplier = String(contract_id);
         const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id }, (data, err) => {
             if (err) {
                 this.busy = false;
@@ -682,7 +662,6 @@ export class AutoPilotEngine {
             this.refused = 0;
 
             this.connection.unsubscribe(sub_id);
-            if (this.open_multiplier === String(contract_id)) this.open_multiplier = null;
             const profit = Number(contract.profit ?? 0);
             const won = profit > 0;
             this.hooks?.onLog?.(won ? 'success' : 'error', `${won ? 'Won' : 'Lost'} ${Math.abs(profit).toFixed(2)} ${this.currency} on ${candidate.symbol} ${candidate.contract_type}`);
@@ -697,6 +676,7 @@ export class AutoPilotEngine {
                 });
             }
             this.total_profit = Number((this.total_profit + profit).toFixed(2));
+            this.trade_count += 1;
 
             const bought = Number(contract.buy_price ?? stake);
             const now = Date.now();
@@ -737,13 +717,19 @@ export class AutoPilotEngine {
                 this.stop('take profit reached');
                 return;
             }
+            // Capital protection: in the first trades of a run the loss allowed is only a few base stakes.
+            const protect = Math.max(0, Math.floor(this.config.protect_trades ?? 0));
+            if (protect > 0 && this.trade_count <= protect && this.total_profit <= -(this.config.stake * PROTECT_LOSS_STAKES)) {
+                this.stop(`capital protection: lost ${PROTECT_LOSS_STAKES} base stakes in the first ${protect} trades`);
+                return;
+            }
 
             const mode = this.config.recovery_mode ?? 'reverse';
             const base_stake = this.config.stake;
 
             if (won) {
                 this.consecutive_losses = 0;
-                this.switch_pair = null; // a win ends the loss run: the next loss starts a fresh switch
+                this.flip_origin = null; // a win ends any auto-flip sequence: next entry is a fresh pick
                 if (mode !== 'reverse') {
                     this.step = 1;
                     this._findAndEnter(base_stake);
@@ -778,6 +764,19 @@ export class AutoPilotEngine {
 
             // Switch to a different contract right now, instead of waiting for the market to turn.
             const switchTo = (next_stake: number): boolean => {
+                // Auto flip (the owner's pairs): loss -> partner contract, next loss -> back to the original.
+                if (this.config.auto_flip) {
+                    const target = this.flip_origin ?? partnerCandidate(candidate.symbol, candidate);
+                    const came_back = !!this.flip_origin;
+                    if (target && !isBlocked(this.hooks?.gate?.(), target.symbol, target.contract_type, (target as { strategy?: string }).strategy)) {
+                        if (!came_back) this.flip_origin = candidate;
+                        else this.flip_origin = null;
+                        this.hooks?.onLog?.('info', `Loss on ${candidate.label}: auto flip to ${target.label} on ${target.symbol}.`);
+                        this._enter(target, next_stake, 'flipped');
+                        return true;
+                    }
+                    this.flip_origin = null;
+                }
                 if (!must_switch) return false;
                 const alt = this._pickSwitch(candidate);
                 if (!alt) {
@@ -814,7 +813,7 @@ export class AutoPilotEngine {
                 this._enter(candidate, next_stake); // same contract, same side, bigger stake
                 return;
             }
-            const flip = this._partnerCandidate(candidate) ?? pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
+            const flip = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
             if (isBlocked(this.hooks?.gate?.(), flip.symbol, flip.contract_type, (flip as { strategy?: string }).strategy)) {
                 this.hooks?.onLog?.('info', `The opposite side (${flip.contract_type}) is skipped: its own results are clearly negative. Picking another contract.`);
                 this._findAndEnter(next_stake);

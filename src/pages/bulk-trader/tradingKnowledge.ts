@@ -49,13 +49,15 @@ export const CONTRACT_NOTES: TContractNote[] = [
     {
         name: 'Higher / Lower',
         group: 'Directional & Trend',
-        types: ['HIGHER', 'LOWER'], // own keys: Deriv sells them as CALL/PUT with a barrier, same codes as Rise/Fall
+        types: [], // Deriv uses CALL/PUT with a barrier: the same codes as Rise/Fall, so it cannot be told apart here
         how: 'Win if the exit price finishes above (Higher) or below (Lower) a barrier you choose.',
         tip: 'Best when a strong breakout past a clear structural level is expected.',
         tick: 'multi_tick',
         barrier: true,
         regime: 'balanced',
-        supported: true,
+        supported: false,
+        unsupported_reason:
+            'Deriv sells it under the same CALL/PUT codes as Rise/Fall, so the shared refusal list could switch Rise/Fall off by mistake. Needs its own contract key first.',
     },
     {
         name: 'Only Ups / Only Downs',
@@ -187,18 +189,10 @@ export const CONTRACT_NOTES: TContractNote[] = [
         group: 'Growth & Risk Management',
         types: ['MULTUP', 'MULTDOWN'],
         how: 'Long/short position with a multiplier (x100, x500). Profit and loss are magnified; the loss cannot exceed the stake.',
-        tip: 'Trend-following; here it closes by itself at +20% of the stake.',
+        tip: 'Trend-following with a predefined stop loss.',
         tick: 'multi_tick',
-        supported: true,
-    },
-    {
-        name: 'Over 4 / Under 5',
-        group: 'Mathematical & Averaging',
-        types: ['OVER4', 'UNDER5'],
-        how: 'Win if the last digit of the exit tick is above 4 (5-9) or below 5 (0-4). The two sides are exact opposites, 50/50 minus the payout margin.',
-        tip: 'The partner contract the others switch with after losses (Even/No Touch/Fall/Lower <-> Over 4, Odd/Touch/Rise/Higher <-> Under 5).',
-        tick: 'one_tick',
-        supported: true,
+        supported: false,
+        unsupported_reason: 'A CFD-style position held for seconds to hours. It needs its own monitoring and exit logic, which the fixed-duration engine does not have.',
     },
 ];
 
@@ -238,9 +232,6 @@ export const playbookLines = (): string[] => [
     'Suited for 1 tick: Even/Odd and Rise/Fall. Everything else needs more than 1 tick and is skipped, because Deriv does not sell it at 1 tick.',
     'Quiet / ranging market: prefers Stays Between, No Touch and Ends Between. Volatile / trending market: prefers Touch, Goes Outside and Ends Outside.',
     `Even/Odd streaks: waits for a rare ${STREAK_PLAYBOOK.min_streak}+ streak AND for tick speed to slow before betting the reversal, never after just 2.`,
-    'Higher/Lower trade 5 ticks with a 0.1 barrier. Touch/No Touch trade 5 ticks with a 0.5 barrier (10 ticks if Deriv refuses 5). Multipliers close by themselves at +20% of the stake.',
-    'Rise/Fall, Higher/Lower and Multipliers are only bought when the 1-tick chart shows a higher high (bullish) or a lower low (bearish).',
-    'After losses a contract switches with its partner: Even/No Touch/Fall/Lower <-> Over 4, Odd/Touch/Rise/Higher <-> Under 5.',
-    'Not yet tradable: Accumulators (they need their own execution logic).',
+    'Not yet tradable: Higher/Lower, Accumulators, Multipliers (they need their own execution logic).',
     'Every idea above is tested on your own account results; in "Only trade a proven edge" mode the AI trades only what has actually beaten break-even.',
 ];

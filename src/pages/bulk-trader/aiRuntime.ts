@@ -122,12 +122,15 @@ export const holdSignals = () => {
  */
 export const watchAccount = () => {
     stopWatchingAccount();
+    // Compare against the account that was active when the run STARTED, not against the connection's id: the two can
+    // be written differently (or the connection can have fallen back to the first account), and a false mismatch
+    // here used to stop a healthy run. Only a real change of the active account stops it.
+    const baseline = activeAccount();
     account_timer = setInterval(() => {
         const engine = aiRuntime.engineRef.current;
-        const bound = aiRuntime.connectionRef.current?.accountInfo?.loginid;
         if (!engine?.isRunning) return stopWatchingAccount();
         const now = activeAccount();
-        if (bound && now !== 'unknown' && now !== bound) {
+        if (baseline !== 'unknown' && now !== 'unknown' && now !== baseline) {
             engine.stop('the active account was switched in the header');
         }
     }, 2000);

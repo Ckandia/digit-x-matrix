@@ -12,8 +12,7 @@ export type TContractFamily =
     | 'range'
     | 'asians'
     | 'high_low_tick'
-    | 'reset'
-    | 'multiplier';
+    | 'reset';
 
 export type TContractType =
     | TDigitContractType
@@ -32,16 +31,7 @@ export type TContractType =
     | 'TICKHIGH'
     | 'TICKLOW'
     | 'RESETCALL'
-    | 'RESETPUT'
-    // Keys of our own (see contractSpecs.ts): Over 4 / Under 5 are digit Over/Under with the barrier fixed,
-    // Higher / Lower are CALL / PUT with a barrier (own keys so the shared refusal list can tell them
-    // apart from Rise / Fall), and the multipliers are open positions that close at +20% of the stake.
-    | 'OVER4'
-    | 'UNDER5'
-    | 'HIGHER'
-    | 'LOWER'
-    | 'MULTUP'
-    | 'MULTDOWN';
+    | 'RESETPUT';
 
 export type TDigitStats = {
     symbol: string;
@@ -50,7 +40,7 @@ export type TDigitStats = {
     last_updated: string | null;
     last_digit: number | null;
     last_digits: number[];
-    recent?: Record<string, { n: number; even_pct: number; odd_pct: number; over5_pct: number; under5_pct: number }>;
+    recent?: Record<string, { n: number; even_pct: number; odd_pct: number; over4_pct?: number; over5_pct: number; under5_pct: number }>;
     digit_counts: number[];
     digit_percentages: number[];
     expected_pct: number;
@@ -58,12 +48,14 @@ export type TDigitStats = {
     cold_digit: number;
     even_pct: number;
     odd_pct: number;
+    over4_pct?: number;
     over5_pct: number;
     under5_pct: number;
     equal5_pct: number;
     streaks: {
         even: number;
         odd: number;
+        over4?: number;
         over5: number;
         under5: number;
         same_as_last: number;

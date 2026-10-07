@@ -1,20 +1,7 @@
-// One table describing the contracts added to the AI auto-pilot: what Deriv calls each, how long it runs,
-// what barrier it needs, whether it must wait for a trend, and which contract it switches with.
-// The AI engine reads its numbers from here, so changing a rule here changes it everywhere.
-import type { TDigitContractType } from './types';
-
-export type TBulkContractType =
-    | TDigitContractType
-    | 'OVER4'
-    | 'UNDER5'
-    | 'CALL'
-    | 'PUT'
-    | 'HIGHER'
-    | 'LOWER'
-    | 'ONETOUCH'
-    | 'NOTOUCH'
-    | 'MULTUP'
-    | 'MULTDOWN';
+// One table describing every contract the Bulk Trader tab can run: what Deriv calls it, how long it
+// runs, what barrier it needs, whether it must wait for a trend, and which contract it switches with.
+// The strategy engine and the UI both read from here, so changing a rule here changes it everywhere.
+import { TBulkContractType } from './types';
 
 export type TBulkFamily = 'digit' | 'rise_fall' | 'higher_lower' | 'touch' | 'multiplier';
 export type TTrendSide = 'bullish' | 'bearish';

@@ -91,29 +91,15 @@ const isRefused = (symbol: string, type: string) => {
     return !!at && Date.now() - at < REFUSED_MS;
 };
 
-// Our own contract keys and the Deriv contract whose tick rules they follow.
-const RULES_FROM: Record<string, string> = { OVER4: 'DIGITOVER', UNDER5: 'DIGITUNDER', HIGHER: 'CALL', LOWER: 'PUT' };
-/** Multipliers are open positions: no tick duration, so the "ticks" the AI records for them is 0. */
-export const MULTIPLIER_TICKS = 0;
-export const isMultiplierType = (type: string) => type === 'MULTUP' || type === 'MULTDOWN';
-
 /**
  * THE duration the AI trades this contract for, in ticks, or null if it must not be traded:
- *  - Higher/Lower: 5 ticks (null if Deriv does not offer 5 for this market);
- *  - Touch/No Touch: 5 ticks, or the shortest Deriv offers if 5 is not offered (the engine retries at 10
- *    ticks if Deriv still refuses 5);
- *  - other barrier contracts: the shortest tick duration Deriv offers (null if not offered in ticks);
- *  - Multipliers: no duration (MULTIPLIER_TICKS), tradable wherever Deriv has not refused them;
+ *  - barrier contracts: the shortest tick duration Deriv offers (null if not offered in ticks);
  *  - every other contract: exactly 1 tick, only if Deriv offers 1 tick for it on this market.
  * Null also while the combination is in the 6-hour refused list.
  */
 export const tradeTicks = (symbol: string, type: string): number | null => {
-    if (isRefused(symbol, type)) return null;
-    if (isMultiplierType(type)) return MULTIPLIER_TICKS;
-    const r = tickRange(symbol, RULES_FROM[type] ?? type);
-    if (!r) return null;
-    if (type === 'HIGHER' || type === 'LOWER') return r.min <= 5 && r.max >= 5 ? 5 : null;
-    if (type === 'ONETOUCH' || type === 'NOTOUCH') return r.min <= 5 && r.max >= 5 ? 5 : r.min;
+    const r = tickRange(symbol, type);
+    if (!r || isRefused(symbol, type)) return null;
     if (isBarrierContract(type)) return r.min; // which contracts need a barrier comes from the owner's notes (tradingKnowledge.ts)
     return r.min <= 1 && r.max >= 1 ? 1 : null;
 };
@@ -126,13 +112,13 @@ export const isTickTradable = (symbol: string, type: string) => tradeTicks(symbo
  * following (or fading) a skew has actually paid on this account.
  */
 export const skewBucket = (
-    recent: { n50?: { n: number; even_pct: number; odd_pct: number; over5_pct: number; under5_pct: number } } | undefined,
+    recent: { n50?: { n: number; even_pct: number; odd_pct: number; over4_pct?: number; over5_pct: number; under5_pct: number } } | undefined,
     type: string
 ): string | undefined => {
     const w = recent?.n50;
     if (!w || w.n < 50) return undefined;
     const pct =
-        type === 'DIGITEVEN' ? w.even_pct : type === 'DIGITODD' ? w.odd_pct : type === 'DIGITOVER' ? w.over5_pct : type === 'DIGITUNDER' ? w.under5_pct : undefined;
+        type === 'DIGITEVEN' ? w.even_pct : type === 'DIGITODD' ? w.odd_pct : type === 'DIGITOVER' ? w.over4_pct ?? w.over5_pct : type === 'DIGITUNDER' ? w.under5_pct : undefined;
     if (pct === undefined) return undefined;
     return pct < 50 ? 'min' : pct < 60 ? 'flat' : pct < 70 ? 'lean' : 'strong';
 };

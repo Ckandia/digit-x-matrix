@@ -62,6 +62,8 @@ export class DerivClientConnection {
     /** False until Deriv has actually sent a balance; until then `accountInfo.balance` is only the login-time cache. */
     balanceLive = false;
     private closed_on_purpose = false;
+    private reconnecting = false;
+    private wake: (() => void) | null = null;
     private keepalive: ReturnType<typeof setInterval> | null = null;
     accountInfo: TDerivAccountInfo | null = null;
 
@@ -84,6 +86,17 @@ export class DerivClientConnection {
         // The balance in the stored accounts list is a snapshot from login time. Replace it with the
         // real one from Deriv and keep it updating, so the AI sees what the account really holds.
         await this._startBalanceStream();
+        // A background tab or a sleeping phone can have its socket closed while its timers are paused.
+        // The moment the page is visible / online again, bring the connection back instead of waiting.
+        if (typeof window !== 'undefined' && !this.wake) {
+            this.wake = () => {
+                if (this.closed_on_purpose || this.isReady || this.reconnecting) return;
+                if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+                void this._reconnect();
+            };
+            window.addEventListener('online', this.wake);
+            document.addEventListener('visibilitychange', this.wake);
+        }
         return { authorize: this.accountInfo as TDerivAccountInfo };
     }
 
@@ -190,8 +203,18 @@ export class DerivClientConnection {
 
     /** Up to 5 attempts with a fresh login URL each time (the URL is single-use), then gives up. */
     private async _reconnect() {
+        if (this.reconnecting) return;
+        this.reconnecting = true;
+        try {
+            await this._reconnectLoop();
+        } finally {
+            this.reconnecting = false;
+        }
+    }
+
+    private async _reconnectLoop() {
         this.onReconnecting?.();
-        for (let attempt = 0; attempt < 5; attempt++) {
+        for (let attempt = 0; attempt < 10; attempt++) {
             if (this.closed_on_purpose) return;
             await new Promise(r => setTimeout(r, Math.min(1000 * 2 ** attempt, 8000)));
             try {
@@ -291,6 +314,11 @@ export class DerivClientConnection {
 
     close() {
         this.closed_on_purpose = true;
+        if (this.wake && typeof window !== 'undefined') {
+            window.removeEventListener('online', this.wake);
+            document.removeEventListener('visibilitychange', this.wake);
+            this.wake = null;
+        }
         this.onBalance = null;
         this._stopKeepAlive();
         this.isReady = false;
