@@ -221,59 +221,69 @@ first.
 
 ---
 
-## 6. Bulk Trades: Over 4 / Under 5, new contracts, switching, trend gate (2026-10-06)
+## 6. AI tab: Over 4 / Under 5, new contracts, switching, trend gate (2026-10-07)
 
-Verified: `tsc --noEmit` clean, `npm run build` succeeds, `npx jest` 44/44 suites (450 tests; new ones in
-`src/pages/bulk-trader/__tests__/`: `bulk-contracts.spec.ts` and `ai-runtime.spec.tsx`). **Not yet verified against live Deriv** (no network in
-the build sandbox): test on a demo account first, see "Check on demo" below.
+Verified: `tsc --noEmit` clean, `npm run build` succeeds, `npx jest` 45/45 suites (461 tests; new ones in
+`src/pages/bulk-trader/__tests__/`: `ai-contracts.spec.ts`, `contract-specs.spec.ts`, `ai-runtime.spec.tsx`).
+**Not yet verified against live Deriv** (the build sandbox has no network): run it on a demo account first, see
+"Check on demo". The Bulk Trades tab is unchanged (apart from one stale-settings fix, last paragraph).
 
-### What was added (Bulk Trades tab, Strategy dropdown, grouped)
+### What the AI can trade now
 
 | Contract | Deriv request | Ticks | Barrier |
 |---|---|---|---|
-| Over 4 / Under 5 | `DIGITOVER` / `DIGITUNDER` | form value (default 1) | digit 4 / digit 5 |
-| Rise / Fall | `CALL` / `PUT` | form value (default 1) | none |
-| Higher / Lower | `CALL` / `PUT` | 5 | `+0.1` / `-0.1` (editable) |
-| Touch / No Touch | `ONETOUCH` / `NOTOUCH` | 5, then 10 if Deriv refuses 5 | `+0.5` (editable) |
-| Multiplier Up / Down | `MULTUP` / `MULTDOWN` | none (open position) | take profit = 20% of stake |
+| Over 4 / Under 5 | `DIGITOVER` / `DIGITUNDER` | 1 | digit 4 / digit 5 (exact opposites: 5-9 vs 0-4) |
+| Higher / Lower | `CALL` / `PUT` | 5 | `+0.1` / `-0.1` |
+| Touch / No Touch | `ONETOUCH` / `NOTOUCH` | 5, then 10 if Deriv refuses 5 on that market | 0.5 (side taken from the signal, `+` by default) |
+| Multiplier Up / Down | `MULTUP` / `MULTDOWN` | none (open position) | take profit = 20% of the stake, sent with the buy |
 
-### Auto Flip (switch after a loss, and back after the next loss)
+Over 4 / Under 5 enter the AI's pool as a signal for whichever side is printing less than 50% (same deviation score
+as the backend's Even/Odd and Over/Under signals; needs 60 ticks). Higher, Lower and the multipliers have no digit
+statistics behind them: they are in the pool with a fixed low score and are only available while the trend gate
+allows them. The learner scores every one of them on its own record (own keys: `OVER4`, `UNDER5`, `HIGHER`,
+`LOWER`, `MULTUP`, `MULTDOWN`; Higher/Lower are not mixed up with Rise/Fall in the refusal list).
 
-Even <-> Over 4 · Odd <-> Under 5 · Touch <-> Under 5 · No Touch <-> Over 4 · Rise <-> Under 5 ·
-Fall <-> Over 4 · Higher <-> Under 5 · Lower <-> Over 4. Over 4 / Under 5 started directly switch with each other;
-Multiplier Up / Down switch with each other. **This replaces the old Even <-> Odd flip.** The table lives in
-`contractSpecs.ts` (`SWITCH_PARTNER`).
+### Switching (`SWITCH_PARTNER` in `contractSpecs.ts`)
 
-### Trend gate (`trendFilter.ts`)
+Even <-> Over 4 · Odd <-> Under 5 · Touch <-> Under 5 · No Touch <-> Over 4 · Rise <-> Under 5 · Fall <-> Over 4 ·
+Higher <-> Under 5 · Lower <-> Over 4 (Over 4 <-> Under 5 and Multiplier Up <-> Down when they start the run).
 
-Rise/Fall, Higher/Lower and Multipliers are bought only after the 1-tick chart (each tick = one candle) confirms:
-- bullish (Rise, Higher, Multiplier Up): the last two swing highs are rising (higher high);
-- bearish (Fall, Lower, Multiplier Down): the last two swing lows are falling (lower low);
-- if both happen at once (range widening both ways) neither side is confirmed and nothing is bought.
+It plugs into the AI's existing switch rules, it does not replace them: in the default reverse/flat/martingale modes
+the switch happens after 2 losses in a row (`SWITCH_AFTER_LOSSES`); in "flip" mode every loss switches. A contract
+we switched TO goes back to the one we left at the next switch. A win ends the loss run. If the partner cannot be
+traded right then (not offered, refused, blocked by the self-review, or a trend contract whose trend is not
+confirmed) the AI falls back to its old behaviour (best other contract). Contracts with no entry in the map
+(Over/Under with a chosen digit, Only Ups/Downs, Asians, ...) behave as before.
 
-A swing point is a tick above/below the 2 ticks either side, so it confirms 2 ticks after it forms. Until the trend
-shows, the Activity log says it is waiting. Touch/No Touch and the digit contracts are not gated. After a switch to
-Over 4 / Under 5 no gate applies; switching back to a trend contract gates again.
+### Trend gate (`trendFilter.ts`, `autoPilotEngine._trendOk`)
+
+The AI follows the 1-tick chart (one tick = one candle) of every market it can see. A directional contract is
+only offered while its market shows the matching trend:
+- bullish (Rise, Higher, Multiplier Up, plus Only Ups / Asian Up / Reset Call): the last two swing highs rising;
+- bearish (Fall, Lower, Multiplier Down, plus the Down versions): the last two swing lows falling;
+- if both happen at once, or there is not enough history yet, neither is confirmed and the contract is skipped.
+
+A swing point is a tick above/below the 2 ticks on each side, so it confirms 2 ticks after it forms. Touch / No
+Touch and the digit contracts are not gated. Switching back to a trend contract is gated too.
 
 ### Multipliers
 
-- The multiplier (x) is picked from what Deriv offers for the market (closest to 100x), or type one in the form.
-- Closing at +20% is a Deriv take-profit order sent with the buy, so it works even if the tab is closed.
-- A multiplier has no expiry: pressing Stop sells any that are still open. If the tab is closed mid-trade they stay
-  open until they hit +20% or are stopped out at the stake; close them on Deriv if needed.
+- x is picked from what Deriv offers for the market (closest to 100x), 100x if the list cannot be read.
+- A multiplier has no expiry and the AI trades one contract at a time, so the AI waits until it closes (+20% or
+  Deriv's stop-out at the stake). Pressing Stop (or any stop reason) sells a multiplier that is still open.
+  Closing the browser tab leaves it open on Deriv until it hits +20% or stops out.
 
 ### Check on demo before real money
 
-1. Higher/Lower at 0.1 and Touch/No Touch at 0.5 may be below Deriv's minimum barrier distance on some markets.
-   Touch retries at 10 ticks automatically; if Deriv still refuses, the Activity log shows its message: raise the
-   Barrier field.
-2. Multipliers are not offered on every market (the log shows Deriv's reply if so).
-3. `contracts_for` and `ticks_history` are sent as in the classic API. If the new Options API names them differently,
-   multipliers fall back to 100x and the trend gate fills from live ticks (about 10 ticks of warm-up).
+1. Higher/Lower at 0.1 and Touch/No Touch at 0.5 may be under Deriv's minimum barrier distance on some markets.
+   Touch retries at 10 ticks; any other refusal puts that market/contract on the AI's 6-hour skip list, and the
+   Activity log shows Deriv's message.
+2. Multipliers are not offered on every market (same: refusal -> skip list).
+3. `contracts_for` and `ticks_history` are sent as in the classic API. If the new Options API names them
+   differently, multipliers fall back to 100x and the trend gate fills from live ticks (about 10 ticks of warm-up).
 
-Also fixed on the way: `buildStrategyConfigs` ignored changes to "Fire all at once" and "Max entry ticks" because
-they were missing from its dependency list.
-
+Also fixed: the Bulk Trades tab ignored changes to "Fire all at once" and "Max entry ticks" (missing from
+`buildStrategyConfigs`' dependency list).
 
 ---
 

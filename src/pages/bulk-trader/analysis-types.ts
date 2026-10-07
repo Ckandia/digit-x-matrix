@@ -12,7 +12,8 @@ export type TContractFamily =
     | 'range'
     | 'asians'
     | 'high_low_tick'
-    | 'reset';
+    | 'reset'
+    | 'multiplier';
 
 export type TContractType =
     | TDigitContractType
@@ -31,7 +32,16 @@ export type TContractType =
     | 'TICKHIGH'
     | 'TICKLOW'
     | 'RESETCALL'
-    | 'RESETPUT';
+    | 'RESETPUT'
+    // Keys of our own (see contractSpecs.ts): Over 4 / Under 5 are digit Over/Under with the barrier fixed,
+    // Higher / Lower are CALL / PUT with a barrier (own keys so the shared refusal list can tell them
+    // apart from Rise / Fall), and the multipliers are open positions that close at +20% of the stake.
+    | 'OVER4'
+    | 'UNDER5'
+    | 'HIGHER'
+    | 'LOWER'
+    | 'MULTUP'
+    | 'MULTDOWN';
 
 export type TDigitStats = {
     symbol: string;

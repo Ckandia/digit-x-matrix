@@ -1,5 +1,4 @@
-import { SPEC_ORDER, SWITCH_PARTNER } from './contractSpecs';
-import { TBulkContractType, TMoneyManagement, TStrategyConfig } from './types';
+import { TDigitContractType, TMoneyManagement, TStrategyConfig } from './types';
 
 export const BULK_TRADER_MAX_STRATEGIES = 5;
 
@@ -24,17 +23,18 @@ export const SYMBOL_OPTIONS: { value: string; label: string }[] = [
     { value: 'JD100', label: 'Jump 100 Index' },
 ];
 
-export const CONTRACT_TYPE_OPTIONS: { value: TBulkContractType; label: string; needs_prediction: boolean; group: string }[] =
-    SPEC_ORDER.map(spec => ({
-        value: spec.key,
-        label: spec.label,
-        needs_prediction: spec.needs_prediction,
-        group: spec.group,
-    }));
+export const CONTRACT_TYPE_OPTIONS: { value: TDigitContractType; label: string; needs_prediction: boolean }[] = [
+    { value: 'DIGITDIFF', label: 'Differs', needs_prediction: true },
+    { value: 'DIGITMATCH', label: 'Matches', needs_prediction: true },
+    { value: 'DIGITOVER', label: 'Over', needs_prediction: true },
+    { value: 'DIGITUNDER', label: 'Under', needs_prediction: true },
+    { value: 'DIGITEVEN', label: 'Even', needs_prediction: false },
+    { value: 'DIGITODD', label: 'Odd', needs_prediction: false },
+];
 
-export const CONTRACT_TYPE_LABELS: Record<TBulkContractType, string> = CONTRACT_TYPE_OPTIONS.reduce(
+export const CONTRACT_TYPE_LABELS: Record<TDigitContractType, string> = CONTRACT_TYPE_OPTIONS.reduce(
     (acc, opt) => ({ ...acc, [opt.value]: opt.label }),
-    {} as Record<TBulkContractType, string>
+    {} as Record<TDigitContractType, string>
 );
 
 export const MONEY_MANAGEMENT_OPTIONS: { value: TMoneyManagement; label: string }[] = [
@@ -43,13 +43,13 @@ export const MONEY_MANAGEMENT_OPTIONS: { value: TMoneyManagement; label: string 
     { value: 'dalembert', label: "D'Alembert (step stake after a loss/win)" },
 ];
 
-// The partner each contract switches with (Auto Flip) and runs alongside in "Both Sides" mode:
-// Even<->Over 4, Odd<->Under 5, Touch<->Under 5, No Touch<->Over 4, Rise<->Under 5, Fall<->Over 4,
-// Higher<->Under 5, Lower<->Over 4. Over/Under with a chosen digit keep their plain opposite here.
-// Matches/Differs have no natural opposite (it depends on the predicted digit), so they fall back to a
-// single "Start bulk run" button.
-export const FLIP_PAIR: Partial<Record<TBulkContractType, TBulkContractType>> = {
-    ...SWITCH_PARTNER,
+// The two-sided contract families the quick "Bulk <X> / AI / Bulk <Y>" action
+// row understands. Matches/Differs aren't a natural opposite pair (the
+// counterpart depends on the predicted digit, not just the contract type), so
+// they fall back to a single "Start bulk run" button instead of this row.
+export const FLIP_PAIR: Partial<Record<TDigitContractType, TDigitContractType>> = {
+    DIGITEVEN: 'DIGITODD',
+    DIGITODD: 'DIGITEVEN',
     DIGITOVER: 'DIGITUNDER',
     DIGITUNDER: 'DIGITOVER',
 };
