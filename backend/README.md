@@ -159,3 +159,18 @@ same way — just set `DATABASE_URL` to its connection string.
 - There's no authentication on the backend — it never sees anything
   sensitive, so CORS restricted to `ALLOWED_ORIGIN` is the only real
   boundary it needs.
+
+
+## The offline paper trader (`paperTrader.js`)
+
+Runs 24/7 on the live tick feed, with no token and no money. For every market it keeps one virtual trade open per
+contract (Even, Odd, Over 4, Under 5, Rise, Fall, Touch, No Touch), settles it like Deriv would, records win/loss and
+opens the next. It records conditions too (signal strength, top-ranked or not, the previous paper result, and the
+1-tick trend for Rise/Fall) so the AI can see *when* a contract works. The AI Trader reads `GET /api/paper/stats`
+and counts these results as evidence in its learner (1-tick contracts), and shows them on its tab.
+
+- Stored: aggregates only (counts per market/contract/condition, and per hour). No ticks, quotes or digits are kept,
+  because Deriv's terms limit caching of API-derived content to 24 hours (see `signal_history` purge in `db.js`).
+- Needs `DATABASE_URL` (Neon) to survive restarts; without it the counts live in memory.
+- It only runs while this service runs. On Render's free plan a web service is put to sleep when nothing calls it, so
+  either use an always-on instance or have an uptime monitor call `/health` every ~10 minutes.

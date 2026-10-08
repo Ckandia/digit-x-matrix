@@ -19,6 +19,14 @@
 - **Fix (Oct 7, later):** the auto flip no longer passes through the self-review gate. The gate blocks contracts the journal shows as
   losers, and it was silently cancelling the one-loss switch. The virtual hook now has its own card on the AI Trader tab
   ("Virtual hook (paper trades, no money)": PAUSED / live status, every paper trade WIN or LOSS, running totals).
+- **Stake default is now flat** (`recovery_mode: 'flat'`). From the Oct 8 transactions: 37 wins in 64 trades (57.8%), wins paid
+  0.78-0.85x the stake (break-even is about 54.9%), yet the balance fell 533.20 because 28 of 64 trades ran at grown stakes
+  (339 / 610) and the 610-stake trades lost five times. The same outcomes at a flat 188.34 stake would have made +698.74.
+  64 trades is a small sample, so this shows the staking hurt, not that the win rate is a real edge. 'reverse' is still selectable.
+- **Backend paper trader** (backend/src/paperTrader.js, endpoint `/api/paper/stats`): virtual trades on every market and contract,
+  24/7, no token. Redeploy the backend (and set DATABASE_URL) for it to run while you are offline. The AI Trader tab has a new card
+  with its results and a "virtual-hook check", and the learner counts the paper results as evidence for the 1-tick contracts.
+  Set Learning mode to "edge gate" if you want the AI to trade only contracts that beat the payout in that data.
 - Not run here (no node_modules/network in the build sandbox): the full `tsc` and jest suites. Run `npm test` and `npm run build` first.
 
 # Digit X Matrix — fixes applied and setup required

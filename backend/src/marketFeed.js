@@ -94,6 +94,7 @@ export class MarketFeed {
         this.req_id_counter = 1;
         this.pending = new Map();
         this.listeners = new Set();
+        this.tickListeners = new Set();
         this._reconnectTimer = null;
         this._endpoint_index = 0;
         this._got_valid_data = false;
@@ -110,6 +111,12 @@ export class MarketFeed {
     onUpdate(fn) {
         this.listeners.add(fn);
         return () => this.listeners.delete(fn);
+    }
+
+    /** Called for every live tick with (symbol, { quote, pip_size, epoch }, snapshot). Used by the paper trader. */
+    onTick(fn) {
+        this.tickListeners.add(fn);
+        return () => this.tickListeners.delete(fn);
     }
 
     start() {
@@ -330,7 +337,7 @@ export class MarketFeed {
             if (Number.isInteger(pip_size)) this.pip_sizes.set(symbol, pip_size);
             pushDigit(window, lastDigitOf(quote, this.pip_sizes.get(symbol)));
             pushPrice(priceWindow, quote);
-            this._emit(symbol);
+            this._emit(symbol, { quote: Number(quote), pip_size: this.pip_sizes.get(symbol), epoch: data.tick.epoch });
         }
     }
 
@@ -355,9 +362,19 @@ export class MarketFeed {
         this._emit(symbol);
     }
 
-    _emit(symbol) {
+    _emit(symbol, tick) {
         const snapshot = this.getSnapshot(symbol);
         if (!snapshot) return;
         for (const fn of this.listeners) fn(symbol, snapshot.stats, snapshot.signals);
+        if (tick) {
+            for (const fn of this.tickListeners) {
+                try {
+                    fn(symbol, tick, snapshot);
+                } catch (err) {
+                    // eslint-disable-next-line no-console
+                    console.error('[marketFeed] tick listener failed:', err.message);
+                }
+            }
+        }
     }
 }

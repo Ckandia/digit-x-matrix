@@ -17,6 +17,7 @@ import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow } from './tradeHistory';
 import type { TRecoveryMode } from './autoPilotEngine';
+import { PaperLearningCard } from './PaperLearningCard';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { keepScreenAwake } from './wakeLock';
 import { loadLiveRules } from './contractRules';
@@ -319,6 +320,7 @@ const AiAgentPanel = ({
                 learnerRef.current = learner;
             }
             learnerRef.current.mode = learnMode;
+            await learnerRef.current.syncPaper(); // the backend's 24/7 paper results count as evidence too
             setLearnInfo(learnerRef.current.summary());
 
             const journal_account = connection.accountInfo?.loginid || activeLoginid || activeAccount();
@@ -777,6 +779,8 @@ const AiAgentPanel = ({
                     </button>
                 </div>
             )}
+
+            <PaperLearningCard />
 
             {(virtual.active || virtual.rows.length > 0) && (
                 <div className='ai-agent-panel__history ai-agent-panel__virtual'>

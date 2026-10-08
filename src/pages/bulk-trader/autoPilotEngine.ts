@@ -75,7 +75,9 @@ export const DEFAULT_PROTECT_TRADES = 10;
 export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
     const preset = RISK_PRESETS[level];
     return {
-        recovery_mode: 'reverse',
+        // Flat stake by default: raising the stake after wins only multiplies whatever edge there is, and a proven edge
+        // does not exist yet. (In one recorded session the same 64 outcomes made +699 at a flat stake and -533 with growth.)
+        recovery_mode: 'flat',
         stake: Number(((balance * preset.stake_pct) / 100).toFixed(2)),
         streak_multiplier: preset.streak_multiplier,
         max_streak: preset.max_streak,

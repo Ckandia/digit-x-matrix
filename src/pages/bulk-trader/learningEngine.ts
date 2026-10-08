@@ -16,6 +16,7 @@
 import { TSnapshotMap } from './analysis-types';
 import { STREAK_PLAYBOOK } from './tradingKnowledge';
 import { isTickTradable, loadLiveRules, markRefused, skewBucket, tradeTicks } from './contractRules';
+import { fetchPaperReport, ONE_TICK_PAPER_TYPES } from './paperStats';
 
 export type TLearningMode = 'off' | 'learn' | 'edge_gate';
 type TCell = { wins: number; losses: number; staked: number; profit: number; payout_ratio_sum: number };
@@ -26,6 +27,8 @@ const MIN_EXPLORE = 20; // trades per combination before it stops counting as "e
 const MIN_PROVEN = 30; // trades before an edge can be called proven
 const Z_LOWER = 1.96; // ~97.5% one-sided lower bound
 const DEFAULT_PAYOUT_MULT = 1.95;
+const PAPER_PAYOUT_MULT = 1.82; // a 1-tick win paid 0.78-0.85x the stake in the owner's history
+const PAPER_REFRESH_MS = 10 * 60_000;
 const STORE_KEY = 'dxm_learning_v1';
 const rest_base = (process.env.NEXT_PUBLIC_BULK_TRADER_API_URL || '').trim().replace(/\/$/, '');
 
@@ -72,6 +75,9 @@ export const makeProfileId = async (loginid: string): Promise<string> => {
 export class LearningEngine {
     mode: TLearningMode;
     private cells: Record<string, TCell> = {};
+    /** Results of the backend's 24/7 paper trading, per contract type, every market pooled (1-tick contracts only). */
+    private paper: Record<string, { wins: number; losses: number }> = {};
+    private paper_at = 0;
     private profile: string;
 
     constructor(profile: string, mode: TLearningMode = 'learn') {
@@ -110,6 +116,41 @@ export class LearningEngine {
         } catch {
             /* offline backend: keep working from the browser copy */
         }
+    }
+
+    /**
+     * Pulls what the backend's paper trader has seen (it trades virtually on every market around the clock, token-free)
+     * and counts it as evidence next to this account's own trades. A paper trade is the same win/lose event as a real
+     * one, so it is added to the same win/loss counts; payout comes from the real trades (or a typical 1-tick payout).
+     * Touch / No Touch are left out: their payout swings with the barrier, so a win rate alone says nothing.
+     */
+    async syncPaper() {
+        this.paper_at = Date.now();
+        const report = await fetchPaperReport();
+        if (!report) return;
+        const next: Record<string, { wins: number; losses: number }> = {};
+        for (const c of report.cells) {
+            if (!ONE_TICK_PAPER_TYPES.includes(c.contract_type)) continue;
+            const r = (next[c.contract_type] ||= { wins: 0, losses: 0 });
+            r.wins += c.wins;
+            r.losses += c.n - c.wins;
+        }
+        this.paper = next;
+    }
+
+    /** The account's own cell for this key, plus the backend's paper evidence for the same contract. */
+    private merged(key: string, type: string): TCell | undefined {
+        const own = this.cells[key];
+        const p = this.paper[type];
+        if (!p) return own;
+        const paper_n = p.wins + p.losses;
+        return {
+            wins: (own?.wins ?? 0) + p.wins,
+            losses: (own?.losses ?? 0) + p.losses,
+            staked: own?.staked ?? 0,
+            profit: own?.profit ?? 0,
+            payout_ratio_sum: (own?.payout_ratio_sum ?? 0) + paper_n * PAPER_PAYOUT_MULT,
+        };
     }
 
     /** Deriv refused this symbol/contract: skip it for the next 6 hours (shared list, see contractRules). */
@@ -186,10 +227,11 @@ export class LearningEngine {
     pickBest<T extends TCandidateLike>(candidates: T[]): T | null {
         let best: T | null = null;
         let bestScore = -Infinity;
+        if (Date.now() - this.paper_at > PAPER_REFRESH_MS) void this.syncPaper(); // keep the backend's evidence fresh during a long run
         for (const cand of candidates) {
             const duration = this.chooseDuration(cand.symbol, cand.contract_type);
             if (duration < 0) continue;
-            const c = this.cells[cellKey(cand.symbol, statType(cand.contract_type, cand.bucket), duration)];
+            const c = this.merged(cellKey(cand.symbol, statType(cand.contract_type, cand.bucket), duration), cand.contract_type);
             if (this.mode === 'edge_gate' && !(n_of(c) >= MIN_PROVEN && this.lowerBound(c) > this.breakeven(c))) continue;
             // Signal confidence is only a tiny tie-breaker: it is a deviation score, not a win probability.
             const score = this.sampleEdge(c) + (cand.confidence / 100) * 0.01;
