@@ -32,7 +32,22 @@
   budget. The first N "Protect capital" trades stay at the base stake, so the 1.2 growth starts after them. Switch back in the
   "Stake method" box (Flat / Reverse). On the 101 trades of the Oct 8 08:40 CSV (50.5% wins) it made no difference to the result
   on that order (-1,344 vs -1,363 flat) and was worse on average when the same results were reshuffled (-1,598, worst -8,146).
-- Not run here (no node_modules/network in the build sandbox): the full `tsc` and jest suites. Run `npm test` and `npm run build` first.
+- **Virtual hook now needs two paper wins in a row (owner's request, Oct 8).** After a real loss the contract the AI wants next is
+  paper-traded and must win `virtual_confirmations` paper trades IN A ROW (default **2**, field "Paper wins in a row before going live",
+  1-5; 1 = the old behaviour). A paper loss resets the count and switches contract the same way real trades do (Even <-> Over 4 ...), and
+  the new contract has to win its own run. When one has passed, **that same contract on that same market** is bought for real, at the
+  stake the AI would have used (it used to re-pick a fresh contract). If paper trading cannot run (no ticks), the AI does not stay
+  paused: it picks fresh like before. The card shows "PAUSED: paper trading X, 1/2 wins in a row".
+  **Learning:** every paper result of the hook is also given to the learner (`LearningEngine.recordVirtual`, kept in the browser between
+  sessions), next to the backend paper trader's results, as evidence for the 1-tick contracts (Touch/No Touch excluded, as for the
+  backend). It steers which contract the AI picks (Thompson sampling / edge gate); it does not change the number of confirmations.
+  **What it can and cannot do:** it throttles live trading after a loss and keeps the AI off a contract that is currently failing on
+  paper. It cannot predict the next trade: on the 37 trades of the Oct 8 10:01-10:08 CSV a win followed a loss 9 times in 16 (56%) and a
+  win 11 times in 20 (55%), i.e. no link, and the two runs of 4 losses are within what chance produces at ~57% wins. The 1.2 martingale
+  was what made them expensive (stakes 117 -> 140 -> 169 -> 203 -> 243).
+- Verified (Oct 8): `tsc --noEmit` clean, `npm run build` succeeds, `npx jest` 47/47 suites (473 tests; new: `virtual-hook.spec.ts`).
+  `ai-runtime.spec.tsx` was updated for the account watcher that compares against the account active at start. Not verified against live
+  Deriv or the deployed backend.
 
 # Digit X Matrix — fixes applied and setup required
 

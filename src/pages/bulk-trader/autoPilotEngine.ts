@@ -61,14 +61,19 @@ export type TAutoPilotConfig = {
     auto_flip?: boolean;
     /** Capital protection: for the first N trades of a run the stake stays at the base stake (no growth) and a tight early loss limit applies. 0/undefined = off. */
     protect_trades?: number;
-    /** Virtual hook: after a real loss, trade on paper (no money) until a paper trade wins, then resume real trading. */
+    /** Virtual hook: after a real loss, trade on paper (no money) until the contract wins `virtual_confirmations` paper trades in a row, then trade THAT contract for real. */
     virtual_hook?: boolean;
+    /** Paper wins in a row a contract needs before it is traded for real again (1-5, default 2). */
+    virtual_confirmations?: number;
 };
 
 /** The early loss limit during capital protection, in base stakes. */
 export const PROTECT_LOSS_STAKES = 3;
 export const DEFAULT_PROTECT_TRADES = 10;
 export const DEFAULT_MARTINGALE_MULTIPLIER = 1.2;
+/** The virtual hook asks for two paper wins in a row, not one: one paper win is a coin flip's worth of evidence. */
+export const DEFAULT_VIRTUAL_CONFIRMATIONS = 2;
+export const MAX_VIRTUAL_CONFIRMATIONS = 5;
 
 /** Turns a risk preset + live balance into the absolute numbers shown/edited
  *  in the UI. Editing a field in the UI just overwrites one of these — the
@@ -89,6 +94,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         auto_flip: true,
         protect_trades: DEFAULT_PROTECT_TRADES,
         virtual_hook: true,
+        virtual_confirmations: DEFAULT_VIRTUAL_CONFIRMATIONS,
     };
 };
 
@@ -398,6 +404,9 @@ export type TAutoPilotEvent = {
     /** For phase 'virtual': the hook paused real trading ('start'), is about to paper trade ('paper'), settled one ('result'), or resumed real trading ('end'). */
     virtual_state?: 'start' | 'paper' | 'result' | 'end';
     virtual_losses?: number;
+    /** For phase 'virtual': paper wins in a row so far, and how many the contract needs before it goes live. */
+    virtual_wins?: number;
+    virtual_needed?: number;
     step?: number;
     symbol?: string;
     contract_type?: string;
@@ -608,20 +617,33 @@ export class AutoPilotEngine {
         });
     }
 
-    /** Real trading is paused after a loss; paper trades (switching like real ones) run until one wins, then real trading resumes. */
+    /**
+     * Real trading is paused after a loss. The contract the AI wants to trade next is paper-traded on live ticks and must
+     * win `virtual_confirmations` paper trades IN A ROW (default 2). A paper loss resets the count and switches contract
+     * (like real trades do), which then has to win its own run. Once a contract has passed, it is the one traded for
+     * real, on the same market, at the stake it would have used. Every paper result is also given to the learner.
+     */
     private async _virtualHook(first: TCandidate, resume_stake: number) {
         this.busy = true; // nothing else may place a real trade meanwhile
-        this.hooks?.onLog?.('info', `Virtual hook: real trading paused after a loss. Paper-trading until one wins, then back to real at stake ${resume_stake}.`);
-        this._emit({ phase: 'virtual', virtual_state: 'start', virtual_losses: 0, symbol: first.symbol, label: first.label, contract_type: first.contract_type });
+        const needed = Math.min(MAX_VIRTUAL_CONFIRMATIONS, Math.max(1, Math.floor(this.config.virtual_confirmations ?? DEFAULT_VIRTUAL_CONFIRMATIONS)));
+        this.hooks?.onLog?.(
+            'info',
+            `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} must win ${needed} paper trade${needed === 1 ? '' : 's'} in a row before it is traded for real again at stake ${resume_stake}.`
+        );
+        this._emit({ phase: 'virtual', virtual_state: 'start', virtual_losses: 0, virtual_wins: 0, virtual_needed: needed, symbol: first.symbol, label: first.label, contract_type: first.contract_type });
         let candidate = first;
         let losses = 0;
+        let wins = 0; // paper wins in a row for `candidate`
         let failures = 0;
         let trend_waits = 0;
+        let confirmed: TCandidate | null = null;
         while (this.running) {
             this._emit({
                 phase: 'virtual',
                 virtual_state: 'paper',
                 virtual_losses: losses,
+                virtual_wins: wins,
+                virtual_needed: needed,
                 symbol: candidate.symbol,
                 contract_type: candidate.contract_type,
                 label: candidate.label,
@@ -635,7 +657,10 @@ export class AutoPilotEngine {
                 }
                 trend_waits = 0;
                 const other = this._pick(this.getSnapshots());
-                if (other) candidate = other;
+                if (other) {
+                    candidate = other;
+                    wins = 0; // a different contract starts its own run
+                }
                 continue;
             }
             trend_waits = 0;
@@ -648,28 +673,38 @@ export class AutoPilotEngine {
                 continue;
             }
             failures = 0;
+            this.learner?.recordVirtual(candidate.contract_type, result); // the AI learns from its own paper trades too
+            wins = result ? wins + 1 : 0;
+            if (!result) losses += 1;
             this._emit({
                 phase: 'virtual',
                 virtual_state: 'result',
-                virtual_losses: result ? losses : losses + 1,
+                virtual_losses: losses,
+                virtual_wins: wins,
+                virtual_needed: needed,
                 symbol: candidate.symbol,
                 contract_type: candidate.contract_type,
                 label: candidate.label,
                 result: result ? 'win' : 'loss',
             });
             if (result) {
-                this.hooks?.onLog?.('success', `Virtual WIN on ${candidate.label} (${candidate.symbol}) after ${losses} virtual loss${losses === 1 ? '' : 'es'}: resuming real trading.`);
-                break;
+                if (wins >= needed) {
+                    confirmed = candidate;
+                    this.hooks?.onLog?.('success', `Virtual hook: ${candidate.label} on ${candidate.symbol} won ${wins} paper trade${wins === 1 ? '' : 's'} in a row: trading it for real now.`);
+                    break;
+                }
+                this.hooks?.onLog?.('info', `Virtual win ${wins}/${needed} on ${candidate.label} (${candidate.symbol}); confirming again before going live.`);
+                continue; // same contract, same market: it has to pass again
             }
-            losses += 1;
-            this.hooks?.onLog?.('info', `Virtual loss #${losses} on ${candidate.label} (${candidate.symbol}); still paper trading.`);
+            this.hooks?.onLog?.('info', `Virtual loss #${losses} on ${candidate.label} (${candidate.symbol}); the count restarts on the next contract.`);
             candidate = this._autoFlipTarget(candidate) ?? this._pick(this.getSnapshots()) ?? candidate;
         }
         this.flip_origin = null;
         this.busy = false;
         if (this.running) {
-            this._emit({ phase: 'virtual', virtual_state: 'end', virtual_losses: losses });
-            this._findAndEnter(resume_stake);
+            this._emit({ phase: 'virtual', virtual_state: 'end', virtual_losses: losses, virtual_wins: wins, virtual_needed: needed });
+            if (confirmed) this._enter(confirmed, resume_stake);
+            else this._findAndEnter(resume_stake); // paper trading could not run: do not stay paused, pick fresh
         }
     }
 

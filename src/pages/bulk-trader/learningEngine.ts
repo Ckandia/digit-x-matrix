@@ -78,6 +78,8 @@ export class LearningEngine {
     /** Results of the backend's 24/7 paper trading, per contract type, every market pooled (1-tick contracts only). */
     private paper: Record<string, { wins: number; losses: number }> = {};
     private paper_at = 0;
+    /** The AI's own virtual-hook paper trades (this browser), per 1-tick contract type. Kept between sessions. */
+    private virtual: Record<string, { wins: number; losses: number }> = {};
     private profile: string;
 
     constructor(profile: string, mode: TLearningMode = 'learn') {
@@ -89,6 +91,32 @@ export class LearningEngine {
             this.cells = {};
         }
         this.cells = poolCells(this.cells);
+        try {
+            this.virtual = JSON.parse(localStorage.getItem(`${STORE_KEY}:${profile}:virtual`) || '{}');
+        } catch {
+            this.virtual = {};
+        }
+    }
+
+    /**
+     * A paper trade made by the virtual hook on live ticks. It is the same win/lose event as a real trade, so it counts
+     * as evidence for the contract (like the backend paper trader's results). Touch / No Touch are left out, see syncPaper.
+     */
+    recordVirtual(contract_type: string, won: boolean) {
+        if (!ONE_TICK_PAPER_TYPES.includes(contract_type)) return;
+        const r = (this.virtual[contract_type] ||= { wins: 0, losses: 0 });
+        if (won) r.wins += 1;
+        else r.losses += 1;
+        try {
+            localStorage.setItem(`${STORE_KEY}:${this.profile}:virtual`, JSON.stringify(this.virtual));
+        } catch {
+            /* storage full or blocked */
+        }
+    }
+
+    /** What the hook's own paper trades have shown so far, per contract type. */
+    virtualEvidence() {
+        return this.virtual;
     }
 
     /** Merges what the backend remembers (Neon) with the browser's copy: whichever has more trades wins per cell. */
@@ -141,8 +169,10 @@ export class LearningEngine {
     /** The account's own cell for this key, plus the backend's paper evidence for the same contract. */
     private merged(key: string, type: string): TCell | undefined {
         const own = this.cells[key];
-        const p = this.paper[type];
-        if (!p) return own;
+        const b = this.paper[type];
+        const v = this.virtual[type];
+        if (!b && !v) return own;
+        const p = { wins: (b?.wins ?? 0) + (v?.wins ?? 0), losses: (b?.losses ?? 0) + (v?.losses ?? 0) };
         const paper_n = p.wins + p.losses;
         return {
             wins: (own?.wins ?? 0) + p.wins,

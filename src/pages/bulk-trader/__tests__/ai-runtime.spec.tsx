@@ -118,10 +118,28 @@ describe('run housekeeping while the tab is closed', () => {
         const engine = fakeEngine(true);
         aiRuntime.engineRef.current = engine;
         aiRuntime.connectionRef.current = fakeConnection('VRTC1');
-        localStorage.setItem('active_loginid', 'CR999');
+        localStorage.setItem('active_loginid', 'VRTC1'); // the account active when the run starts is the baseline
         watchAccount();
         jest.advanceTimersByTime(2100);
+        expect((engine as any).stop).not.toHaveBeenCalled();
+        localStorage.setItem('active_loginid', 'CR999'); // the user switches account in the header
+        jest.advanceTimersByTime(2100);
         expect((engine as any).stop).toHaveBeenCalledWith('the active account was switched in the header');
+        localStorage.removeItem('active_loginid');
+        jest.useRealTimers();
+    });
+
+    it('does not stop a healthy run just because the connection writes the account id differently', () => {
+        jest.useFakeTimers();
+        const engine = fakeEngine(true);
+        aiRuntime.engineRef.current = engine;
+        aiRuntime.connectionRef.current = fakeConnection('cr-different-spelling');
+        localStorage.setItem('active_loginid', 'VRTC1');
+        watchAccount();
+        jest.advanceTimersByTime(6100);
+        expect((engine as any).stop).not.toHaveBeenCalled();
+        (engine as any).isRunning = false;
+        jest.advanceTimersByTime(2100);
         localStorage.removeItem('active_loginid');
         jest.useRealTimers();
     });

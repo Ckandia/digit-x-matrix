@@ -8,6 +8,8 @@ import { aiRuntime, aiSet, holdSignals, releaseRun, useAiRuntime, watchAccount }
 import {
     AutoPilotEngine,
     buildConfigFromPreset,
+    DEFAULT_VIRTUAL_CONFIRMATIONS,
+    MAX_VIRTUAL_CONFIRMATIONS,
     RISK_PRESETS,
     TAutoPilotConfig,
     TAutoPilotEvent,
@@ -219,16 +221,29 @@ const AiAgentPanel = ({
             keepScreenAwake('ai', true);
             setLadder([]);
             setTotalProfit(0);
-            setVirtual(prev => ({ ...prev, active: false, current: '', losses: 0 }));
+            setVirtual(prev => ({ ...prev, active: false, current: '', losses: 0, wins: 0 }));
         } else if (event.phase === 'virtual') {
             const what = `${event.label ?? event.contract_type ?? ''} on ${event.symbol ?? ''}`.trim();
             if (event.virtual_state === 'result' && event.result) {
                 const row = { ts: Date.now(), symbol: event.symbol ?? '', label: event.label ?? '', result: event.result };
-                setVirtual(prev => ({ ...prev, losses: event.virtual_losses ?? prev.losses, rows: [row, ...prev.rows].slice(0, 50) }));
+                setVirtual(prev => ({
+                    ...prev,
+                    losses: event.virtual_losses ?? prev.losses,
+                    wins: event.virtual_wins ?? prev.wins,
+                    needed: event.virtual_needed ?? prev.needed,
+                    rows: [row, ...prev.rows].slice(0, 50),
+                }));
             } else if (event.virtual_state === 'end') {
                 setVirtual(prev => ({ ...prev, active: false, current: '' }));
             } else {
-                setVirtual(prev => ({ ...prev, active: true, current: what, losses: event.virtual_losses ?? prev.losses }));
+                setVirtual(prev => ({
+                    ...prev,
+                    active: true,
+                    current: what,
+                    losses: event.virtual_losses ?? prev.losses,
+                    wins: event.virtual_wins ?? prev.wins,
+                    needed: event.virtual_needed ?? prev.needed,
+                }));
             }
         } else if (event.phase === 'entering' && event.symbol && event.contract_type) {
             setLadder(prev => [
@@ -540,9 +555,18 @@ const AiAgentPanel = ({
                             onChange={e => config && setConfig({ ...config, virtual_hook: e.target.checked })}
                         />{' '}
                         {localize(
-                            'Virtual hook: after a real loss the AI stops risking money and trades on paper (switching contracts the same way) until a paper trade wins, then resumes real trading.'
+                            'Virtual hook: after a real loss the AI stops risking money and trades on paper (switching contracts the same way). A contract must win the paper trades below IN A ROW; then that same contract is traded for real.'
                         )}
                     </label>
+                    {config?.virtual_hook && (
+                        <FieldBox
+                            label={localize('Paper wins in a row before going live (1-{{max}})', { max: MAX_VIRTUAL_CONFIRMATIONS })}
+                            value={config.virtual_confirmations ?? DEFAULT_VIRTUAL_CONFIRMATIONS}
+                            step={1}
+                            disabled={status === 'connecting'}
+                            onChange={v => updateField('virtual_confirmations', Math.min(MAX_VIRTUAL_CONFIRMATIONS, Math.max(1, Math.floor(v))))}
+                        />
+                    )}
 
                     <label className='ai-agent-panel__hint'>
                         <input
@@ -788,7 +812,12 @@ const AiAgentPanel = ({
                         <strong>{localize('Virtual hook (paper trades, no money)')}</strong>
                         <span className={virtual.active ? 'is-loss' : 'is-win'}>
                             {virtual.active
-                                ? localize('PAUSED: paper trading {{what}} ({{n}} virtual losses so far)', { what: virtual.current, n: virtual.losses })
+                                ? localize('PAUSED: paper trading {{what}}, {{w}}/{{need}} wins in a row ({{n}} virtual losses so far)', {
+                                      what: virtual.current,
+                                      w: virtual.wins,
+                                      need: virtual.needed,
+                                      n: virtual.losses,
+                                  })
                                 : localize('Real trading is live')}
                         </span>
                         <span>

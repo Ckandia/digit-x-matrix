@@ -35,6 +35,9 @@ export type TVirtualState = {
     current: string;
     /** Virtual losses since the pause started. */
     losses: number;
+    /** Paper wins in a row for the contract being tested, and how many it needs before it goes live. */
+    wins: number;
+    needed: number;
     rows: TVirtualRow[];
 };
 
@@ -60,7 +63,7 @@ let state: TAiState = {
     ladder: [],
     history: [],
     activity: [],
-    virtual: { active: false, current: '', losses: 0, rows: [] },
+    virtual: { active: false, current: '', losses: 0, wins: 0, needed: 2, rows: [] },
     config: null,
     riskLevel: 'moderate',
     learnMode: 'learn',
