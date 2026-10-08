@@ -63,20 +63,12 @@ export type TAutoPilotConfig = {
     protect_trades?: number;
     /** Virtual hook: after a real loss, trade on paper (no money) until a paper trade wins, then resume real trading. */
     virtual_hook?: boolean;
-    /** Daily loss limit, % of the day's starting balance, across every run today (enforced by the panel; 0/undefined = off). */
-    daily_loss_pct?: number;
-    /** Profit lock: once a run is up 3 base stakes, stop if it gives back half of its best profit. */
-    profit_lock?: boolean;
 };
 
 /** The early loss limit during capital protection, in base stakes. */
 export const PROTECT_LOSS_STAKES = 3;
 export const DEFAULT_PROTECT_TRADES = 10;
 export const DEFAULT_MARTINGALE_MULTIPLIER = 1.2;
-export const DEFAULT_DAILY_LOSS_PCT = 5;
-/** Profit lock arms at this many base stakes of profit, and stops when this share of the peak is given back. */
-export const PROFIT_LOCK_ARM_STAKES = 3;
-export const PROFIT_LOCK_GIVEBACK = 0.5;
 
 /** Turns a risk preset + live balance into the absolute numbers shown/edited
  *  in the UI. Editing a field in the UI just overwrites one of these — the
@@ -97,8 +89,6 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         auto_flip: true,
         protect_trades: DEFAULT_PROTECT_TRADES,
         virtual_hook: true,
-        daily_loss_pct: DEFAULT_DAILY_LOSS_PCT,
-        profit_lock: true,
     };
 };
 
@@ -445,7 +435,6 @@ export class AutoPilotEngine {
     private streak_profit = 0; // reverse martingale: what the current win streak has made
     private entry_tag: TAutoPilotEvent['tag']; // why the trade being placed is not a plain fresh pick
     private hook_pending = false; // a real loss just happened: the next entry is paper-traded first (virtual hook)
-    private peak_profit = 0; // best total profit of this run (profit lock)
     private trade_count = 0; // settled trades in this run (capital protection counts these)
     private flip_origin: TCandidate | null = null; // auto flip: the contract we flipped away from
     private blocked = new Map<string, number>(); // symbol|type -> until: no trend confirmed on the 1-tick chart yet
@@ -480,7 +469,6 @@ export class AutoPilotEngine {
         this.win_streak = 0;
         this.streak_profit = 0;
         this.busy = false;
-        this.peak_profit = 0;
         this.trade_count = 0;
         this.hook_pending = false;
         this.flip_origin = null;
@@ -892,16 +880,6 @@ export class AutoPilotEngine {
             }
             if (this.total_profit >= this.config.take_profit) {
                 this.stop('take profit reached');
-                return;
-            }
-            // Profit lock: a run that got well ahead does not hand it all back.
-            if (this.total_profit > this.peak_profit) this.peak_profit = this.total_profit;
-            if (
-                this.config.profit_lock &&
-                this.peak_profit >= this.config.stake * PROFIT_LOCK_ARM_STAKES &&
-                this.total_profit <= this.peak_profit * (1 - PROFIT_LOCK_GIVEBACK)
-            ) {
-                this.stop(`profit lock: kept ${Math.round((1 - PROFIT_LOCK_GIVEBACK) * 100)}% of the peak profit (${this.peak_profit.toFixed(2)})`);
                 return;
             }
             // Capital protection: in the first trades of a run the loss allowed is only a few base stakes.

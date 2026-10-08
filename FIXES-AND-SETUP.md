@@ -32,12 +32,6 @@
   budget. The first N "Protect capital" trades stay at the base stake, so the 1.2 growth starts after them. Switch back in the
   "Stake method" box (Flat / Reverse). On the 101 trades of the Oct 8 08:40 CSV (50.5% wins) it made no difference to the result
   on that order (-1,344 vs -1,363 flat) and was worse on average when the same results were reshuffled (-1,598, worst -8,146).
-- **Capital protection for unattended runs (Oct 8):** (1) Daily loss limit across ALL runs today (default 5% of the day's starting
-  balance, UTC day; a restart no longer gets a fresh allowance; the next run's stop-loss is capped at what is left; the AI refuses
-  to start when it is used up). Stored in the browser, so clearing site data or another device resets it; Deriv's own account
-  limits are the hard backstop. (2) Profit lock (stop if a run that was up 3 base stakes gives back half of its best profit).
-  (3) Default risk is now Conservative (1% stake, 10% per-run stop-loss). The per-run stop-loss is checked after each trade, so a
-  run can overshoot it by one stake. Nothing here creates an edge: it limits how much can be lost.
 - Not run here (no node_modules/network in the build sandbox): the full `tsc` and jest suites. Run `npm test` and `npm run build` first.
 
 # Digit X Matrix — fixes applied and setup required

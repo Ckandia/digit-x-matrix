@@ -62,7 +62,7 @@ let state: TAiState = {
     activity: [],
     virtual: { active: false, current: '', losses: 0, rows: [] },
     config: null,
-    riskLevel: 'conservative', // the smallest stake and loss limits: capital first
+    riskLevel: 'moderate',
     learnMode: 'learn',
 };
 

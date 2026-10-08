@@ -18,7 +18,6 @@ import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow } from './tradeHistory';
 import type { TRecoveryMode } from './autoPilotEngine';
 import { PaperLearningCard } from './PaperLearningCard';
-import { dailyAllowance, recordDayResult } from './dailyLimit';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { keepScreenAwake } from './wakeLock';
 import { loadLiveRules } from './contractRules';
@@ -183,7 +182,6 @@ const AiAgentPanel = ({
     // account it opened with, so left alone it would show and trade on the OLD account. A running AI
     // is stopped (it must never carry on trading on a different account than the one on screen);
     // then the panel reconnects to the new account and starts learning from that account's own record.
-    const dayInfo = config && activeLoginid && presetBalance != null ? dailyAllowance(activeLoginid, presetBalance, config.daily_loss_pct ?? 0) : null;
     const lastLoginidRef = useRef(activeLoginid);
     useEffect(() => {
         const previous = lastLoginidRef.current;
@@ -326,19 +324,6 @@ const AiAgentPanel = ({
             setLearnInfo(learnerRef.current.summary());
 
             const journal_account = connection.accountInfo?.loginid || activeLoginid || activeAccount();
-            // Daily loss limit across every run today: a restart does not get a fresh allowance.
-            const day_account = activeLoginid || journal_account;
-            const day_balance = live_balance ?? connection.accountInfo?.balance ?? 0;
-            const allowance = dailyAllowance(day_account, day_balance, config.daily_loss_pct ?? 0);
-            if (allowance && allowance.remaining <= 0) {
-                throw new Error(
-                    localize('Daily loss limit reached: today this account has lost {{used}} of the {{limit}} allowed. The AI will not start again until 00:00 UTC (or raise the limit).', {
-                        used: allowance.used.toFixed(2),
-                        limit: allowance.limit.toFixed(2),
-                    })
-                );
-            }
-            const run_config = allowance ? { ...config, stop_loss: Math.min(config.stop_loss, allowance.remaining) } : config;
             const logLine = (kind: 'info' | 'success' | 'error', message: string) => {
                 setActivity(prev => [{ ts: Date.now(), kind, text: message }, ...prev].slice(0, 40));
                 journal.pushMessage(
@@ -349,7 +334,7 @@ const AiAgentPanel = ({
             const engine = new AutoPilotEngine(
                 connection,
                 trade_currency,
-                run_config,
+                config,
                 getSignalSnapshots,
                 handleEngineEvent,
                 learnerRef.current,
@@ -363,8 +348,7 @@ const AiAgentPanel = ({
                     },
                     onLog: logLine,
                     // Every settled trade goes into the journal with the AI's own context, so it can review itself.
-                    onSettled: s => {
-                        recordDayResult(day_account, day_balance, s.profit);
+                    onSettled: s =>
                         journalStore.addAi(
                             {
                                 id: s.contract_id,
@@ -380,8 +364,7 @@ const AiAgentPanel = ({
                                 source: 'ai',
                             },
                             { strategy: s.strategy, step: s.step, base_stake: s.base_stake, mode: s.mode, confidence: s.confidence, tag: s.tag }
-                        );
-                    },
+                        ),
                     // Before each pick the AI consults its own record: skip proven losers, rank lagging ones lower.
                     gate: () => journalStore.gate(journal_account),
                 }
@@ -540,13 +523,6 @@ const AiAgentPanel = ({
                                 onChange={v => updateField('take_profit', v)}
                             />
                             <FieldBox
-                                label={localize('Daily loss limit, % of today\'s starting balance (0 = off)')}
-                                value={config.daily_loss_pct ?? 0}
-                                step={0.5}
-                                disabled={status === 'connecting'}
-                                onChange={v => updateField('daily_loss_pct', Math.max(0, v))}
-                            />
-                            <FieldBox
                                 label={localize('Protect capital: first N trades (0 = off)')}
                                 value={config.protect_trades ?? 0}
                                 step={1}
@@ -555,26 +531,6 @@ const AiAgentPanel = ({
                             />
                         </div>
                     )}
-
-                    {dayInfo && (
-                        <div className='ai-agent-panel__hint'>
-                            {localize('Today (all runs): lost {{used}} of the {{limit}} daily limit; the next run may lose at most {{rem}}. Resets at 00:00 UTC.', {
-                                used: dayInfo.used.toFixed(2),
-                                limit: dayInfo.limit.toFixed(2),
-                                rem: dayInfo.remaining.toFixed(2),
-                            })}
-                        </div>
-                    )}
-
-                    <label className='ai-agent-panel__hint'>
-                        <input
-                            type='checkbox'
-                            checked={!!config?.profit_lock}
-                            disabled={!config || status === 'connecting'}
-                            onChange={e => config && setConfig({ ...config, profit_lock: e.target.checked })}
-                        />{' '}
-                        {localize('Profit lock: once a run is up 3 base stakes, stop if it gives back half of its best profit.')}
-                    </label>
 
                     <label className='ai-agent-panel__hint'>
                         <input
