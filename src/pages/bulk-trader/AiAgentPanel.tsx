@@ -555,19 +555,9 @@ const AiAgentPanel = ({
                             onChange={e => config && setConfig({ ...config, virtual_hook: e.target.checked })}
                         />{' '}
                         {localize(
-                            'Virtual hook: after a real loss the AI stops risking money and trades on paper (switching contracts the same way). A contract must win the paper trades below IN A ROW; then that same contract is traded for real.'
+                            'Virtual hook: after a real loss the AI stops risking money and trades on paper. When a paper trade loses, the AI buys the OPPOSITE contract for real (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch). If that real trade loses, it goes back to paper, and so on.'
                         )}
                     </label>
-                    {config?.virtual_hook && (
-                        <FieldBox
-                            label={localize('Paper wins in a row before going live (1-{{max}})', { max: MAX_VIRTUAL_CONFIRMATIONS })}
-                            value={config.virtual_confirmations ?? DEFAULT_VIRTUAL_CONFIRMATIONS}
-                            step={1}
-                            disabled={status === 'connecting'}
-                            onChange={v => updateField('virtual_confirmations', Math.min(MAX_VIRTUAL_CONFIRMATIONS, Math.max(1, Math.floor(v))))}
-                        />
-                    )}
-
                     <label className='ai-agent-panel__hint'>
                         <input
                             type='checkbox'

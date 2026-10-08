@@ -66,6 +66,7 @@ const make = (cfg: Partial<TAutoPilotConfig> = {}, learner?: LearningEngine, sym
         auto_flip: true,
         protect_trades: 0,
         virtual_hook: true,
+        virtual_mode: 'confirm', // the two-wins rule is suspended by default; these older tests still exercise it explicitly
         ...cfg,
     };
     const engine = new AutoPilotEngine(conn as never, 'USD', config, () => snapshots, e => events.push(e), learner);
@@ -196,5 +197,63 @@ describe('virtual hook: the AI learns from its paper trades', () => {
         learner.recordVirtual('ONETOUCH', true);
         learner.recordVirtual('NOTOUCH', false);
         expect(learner.virtualEvidence()).toEqual({});
+    });
+});
+
+
+describe('virtual hook: opposite mode (a paper loss buys the opposite for real)', () => {
+    const lastBuyType = (h: ReturnType<typeof make>) => h.conn.buys_()[h.conn.buys_().length - 1].parameters.contract_type;
+
+    it('a paper loss buys the opposite of the paper contract for real, on the same market', async () => {
+        const h = make({ virtual_mode: 'opposite' });
+        await loseFirstTrade(h); // Even lost -> Over 4 is paper-traded
+        expect(h.conn.buys_()).toHaveLength(1);
+        h.conn.paper(h.symbol, OVER_LOSS); // paper Over 4 loses -> buy Under 5 live
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(2);
+        expect(lastBuyType(h)).toBe('DIGITUNDER');
+        expect(h.conn.buys_()[1].parameters.underlying_symbol).toBe(h.symbol);
+        h.engine.stop();
+    });
+
+    it('is the default: no virtual_mode set means opposite mode, no two-wins rule', async () => {
+        const h = make({ virtual_mode: undefined });
+        await loseFirstTrade(h);
+        h.conn.paper(h.symbol, OVER_WIN);
+        await wait(60);
+        h.conn.paper(h.symbol, OVER_WIN);
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(1); // two paper wins did NOT take it live
+        h.conn.paper(h.symbol, OVER_LOSS);
+        await wait(60);
+        expect(lastBuyType(h)).toBe('DIGITUNDER');
+        h.engine.stop();
+    });
+
+    it('paper wins do not go live: it keeps paper trading until one loses', async () => {
+        const h = make({ virtual_mode: 'opposite' });
+        await loseFirstTrade(h);
+        h.conn.paper(h.symbol, OVER_WIN);
+        await wait(60);
+        h.conn.paper(h.symbol, OVER_WIN);
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(1);
+        h.conn.paper(h.symbol, OVER_LOSS);
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(2);
+        expect(lastBuyType(h)).toBe('DIGITUNDER');
+        h.engine.stop();
+    });
+
+    it('and so on: a loss on the opposite trade starts the hook again', async () => {
+        const h = make({ virtual_mode: 'opposite' });
+        await loseFirstTrade(h);
+        h.conn.paper(h.symbol, OVER_LOSS);
+        await wait(60);
+        h.conn.settle('c2', -1); // the opposite lost for real
+        await wait(60);
+        expect(virtualEvents(h, 'start').length).toBeGreaterThanOrEqual(2);
+        expect(h.conn.buys_()).toHaveLength(2); // paused again, nothing new bought
+        h.engine.stop();
     });
 });

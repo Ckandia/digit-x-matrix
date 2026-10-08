@@ -1,3 +1,20 @@
+# Virtual hook: "opposite" mode (October 2026)
+
+- **Update:** the two-paper-wins rule is SUSPENDED. Opposite mode is the only active rule: no dropdown, no confirmations field, and the engine defaults to it. The old rule remains in code (`virtual_mode: 'confirm'`) and tests, not selectable in the UI.
+
+- New field `virtual_mode` on the AI config and a dropdown under the Virtual hook checkbox on the AI Trader tab:
+  **Buy the opposite after a paper loss** (new default) or **Wait for paper wins in a row** (the old rule, unchanged).
+- Opposite mode: after a real loss the AI paper-trades the contract it wants next. The moment a paper trade LOSES, the
+  opposite contract is bought for real on the same market at the stake the AI would have used
+  (Even<->Odd, Over 4<->Under 5, Rise<->Fall, Touch<->No Touch). If that real trade loses, the hook starts again, and so on.
+  A real win ends the cycle. Paper wins just keep paper trading; after 25 paper wins in a row with no loss it picks a fresh contract.
+- Rise/Fall opposites still wait for the 1-tick trend gate (up to 20 tries), then pick fresh if no trend appears.
+- Paper results still go to the learner. Paper trades move no money.
+- Honest note: a 1-tick Even/Odd or Over/Under outcome is independent of the previous tick, so the opposite of a paper loss has
+  no built-in edge (your own Oct 8 data showed no win-after-loss link). It changes WHEN and WHAT you trade, not the win rate.
+  Test on demo first.
+- Verified: `tsc --noEmit` clean, `npx jest` 47/47 suites (476 tests; 3 new in `virtual-hook.spec.ts`). Not run against live Deriv.
+
 # AI Trader update (October 2026)
 
 - **Over 4 / Under 5** are now AI Trader contracts (backend signals + fixed barriers 4 and 5, 1 tick).

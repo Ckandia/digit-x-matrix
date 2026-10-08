@@ -65,6 +65,14 @@ export type TAutoPilotConfig = {
     virtual_hook?: boolean;
     /** Paper wins in a row a contract needs before it is traded for real again (1-5, default 2). */
     virtual_confirmations?: number;
+    /**
+     * What the hook does with its paper results.
+     * 'opposite' (default, the active rule): the contract is paper-traded; the moment a paper trade LOSES, the OPPOSITE contract (Even<->Odd,
+     * Over 4<->Under 5, Rise<->Fall, Touch<->No Touch) is bought for real on the same market. If that real trade loses, the
+     * hook starts again, and so on. Paper wins just keep paper-trading.
+     * 'confirm': the older rule, SUSPENDED (kept in code and tests, not selectable in the UI), `virtual_confirmations` paper wins in a row, then the same contract is traded for real.
+     */
+    virtual_mode?: 'opposite' | 'confirm';
 };
 
 /** The early loss limit during capital protection, in base stakes. */
@@ -74,6 +82,8 @@ export const DEFAULT_MARTINGALE_MULTIPLIER = 1.2;
 /** The virtual hook asks for two paper wins in a row, not one: one paper win is a coin flip's worth of evidence. */
 export const DEFAULT_VIRTUAL_CONFIRMATIONS = 2;
 export const MAX_VIRTUAL_CONFIRMATIONS = 5;
+/** Opposite mode: if this many paper trades in a row win, stop waiting for a loss and pick a fresh contract. */
+export const MAX_OPPOSITE_PAPER_WINS = 25;
 
 /** Turns a risk preset + live balance into the absolute numbers shown/edited
  *  in the UI. Editing a field in the UI just overwrites one of these — the
@@ -95,6 +105,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         protect_trades: DEFAULT_PROTECT_TRADES,
         virtual_hook: true,
         virtual_confirmations: DEFAULT_VIRTUAL_CONFIRMATIONS,
+        virtual_mode: 'opposite',
     };
 };
 
@@ -195,6 +206,17 @@ export const partnerCandidate = (symbol: string, from: TCandidate): TCandidate |
 };
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+const OPPOSITE_LABEL: Record<string, string> = {
+    DIGITEVEN: 'Even',
+    DIGITODD: 'Odd',
+    DIGITOVER: 'Over 4',
+    DIGITUNDER: 'Under 5',
+    CALL: 'Rise',
+    PUT: 'Fall',
+    ONETOUCH: 'Touch',
+    NOTOUCH: 'No Touch',
+};
 
 /** Contracts the virtual hook can settle from live ticks. Others are only ever traded for real. */
 export const PAPER_SUPPORTED = new Set(['DIGITEVEN', 'DIGITODD', 'DIGITOVER', 'DIGITUNDER', 'CALL', 'PUT', 'ONETOUCH', 'NOTOUCH']);
@@ -626,9 +648,12 @@ export class AutoPilotEngine {
     private async _virtualHook(first: TCandidate, resume_stake: number) {
         this.busy = true; // nothing else may place a real trade meanwhile
         const needed = Math.min(MAX_VIRTUAL_CONFIRMATIONS, Math.max(1, Math.floor(this.config.virtual_confirmations ?? DEFAULT_VIRTUAL_CONFIRMATIONS)));
+        const opposite_mode = (this.config.virtual_mode ?? 'opposite') === 'opposite';
         this.hooks?.onLog?.(
             'info',
-            `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} must win ${needed} paper trade${needed === 1 ? '' : 's'} in a row before it is traded for real again at stake ${resume_stake}.`
+            opposite_mode
+                ? `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} is paper-traded; when a paper trade loses, the opposite contract is bought for real at stake ${resume_stake}.`
+                : `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} must win ${needed} paper trade${needed === 1 ? '' : 's'} in a row before it is traded for real again at stake ${resume_stake}.`
         );
         this._emit({ phase: 'virtual', virtual_state: 'start', virtual_losses: 0, virtual_wins: 0, virtual_needed: needed, symbol: first.symbol, label: first.label, contract_type: first.contract_type });
         let candidate = first;
@@ -687,6 +712,21 @@ export class AutoPilotEngine {
                 label: candidate.label,
                 result: result ? 'win' : 'loss',
             });
+            if (opposite_mode) {
+                if (!result) {
+                    // The paper trade lost: buy its OPPOSITE for real, same market, at the stake the AI would have used.
+                    confirmed = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
+                    confirmed = { ...confirmed, label: OPPOSITE_LABEL[confirmed.contract_type] ?? confirmed.label, basis: `Virtual hook: paper ${candidate.label} lost, buying the opposite.` };
+                    this.hooks?.onLog?.('info', `Virtual loss on ${candidate.label} (${candidate.symbol}): buying the opposite, ${confirmed.label}, for real.`);
+                    break;
+                }
+                if (wins >= MAX_OPPOSITE_PAPER_WINS) {
+                    this.hooks?.onLog?.('info', `Virtual hook: ${wins} paper wins in a row on ${candidate.label}; no loss to trade against. Picking a fresh contract.`);
+                    break;
+                }
+                this.hooks?.onLog?.('info', `Virtual win ${wins} on ${candidate.label} (${candidate.symbol}); still paper trading, waiting for a paper loss.`);
+                continue;
+            }
             if (result) {
                 if (wins >= needed) {
                     confirmed = candidate;
@@ -703,7 +743,7 @@ export class AutoPilotEngine {
         this.busy = false;
         if (this.running) {
             this._emit({ phase: 'virtual', virtual_state: 'end', virtual_losses: losses, virtual_wins: wins, virtual_needed: needed });
-            if (confirmed) this._enter(confirmed, resume_stake);
+            if (confirmed) this._enter(confirmed, resume_stake, opposite_mode ? 'flipped' : undefined);
             else this._findAndEnter(resume_stake); // paper trading could not run: do not stay paused, pick fresh
         }
     }
