@@ -27,6 +27,11 @@
   24/7, no token. Redeploy the backend (and set DATABASE_URL) for it to run while you are offline. The AI Trader tab has a new card
   with its results and a "virtual-hook check", and the learner counts the paper results as evidence for the 1-tick contracts.
   Set Learning mode to "edge gate" if you want the AI to trade only contracts that beat the payout in that data.
+- **Small martingale (owner's request, Oct 8):** default Stake method is now Martingale with multiplier 1.2 (10 -> 12 -> 14.4, back to
+  the base stake after a win). It is capped by "max recovery steps" (the run STOPS after that many losses in a row) and by the stop-loss
+  budget. The first N "Protect capital" trades stay at the base stake, so the 1.2 growth starts after them. Switch back in the
+  "Stake method" box (Flat / Reverse). On the 101 trades of the Oct 8 08:40 CSV (50.5% wins) it made no difference to the result
+  on that order (-1,344 vs -1,363 flat) and was worse on average when the same results were reshuffled (-1,598, worst -8,146).
 - Not run here (no node_modules/network in the build sandbox): the full `tsc` and jest suites. Run `npm test` and `npm run build` first.
 
 # Digit X Matrix — fixes applied and setup required

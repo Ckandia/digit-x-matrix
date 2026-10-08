@@ -68,6 +68,7 @@ export type TAutoPilotConfig = {
 /** The early loss limit during capital protection, in base stakes. */
 export const PROTECT_LOSS_STAKES = 3;
 export const DEFAULT_PROTECT_TRADES = 10;
+export const DEFAULT_MARTINGALE_MULTIPLIER = 1.2;
 
 /** Turns a risk preset + live balance into the absolute numbers shown/edited
  *  in the UI. Editing a field in the UI just overwrites one of these — the
@@ -75,13 +76,13 @@ export const DEFAULT_PROTECT_TRADES = 10;
 export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
     const preset = RISK_PRESETS[level];
     return {
-        // Flat stake by default: raising the stake after wins only multiplies whatever edge there is, and a proven edge
-        // does not exist yet. (In one recorded session the same 64 outcomes made +699 at a flat stake and -533 with growth.)
-        recovery_mode: 'flat',
+        // The owner's choice: a small martingale (stake x1.2 after a loss, back to the base stake after a win), capped by
+        // max_steps and the stop-loss budget. It changes how much each trade is worth, never the win rate.
+        recovery_mode: 'martingale',
         stake: Number(((balance * preset.stake_pct) / 100).toFixed(2)),
         streak_multiplier: preset.streak_multiplier,
         max_streak: preset.max_streak,
-        martingale_multiplier: preset.martingale_multiplier,
+        martingale_multiplier: DEFAULT_MARTINGALE_MULTIPLIER,
         max_steps: preset.max_steps,
         stop_loss: Number(((balance * preset.stop_loss_pct) / 100).toFixed(2)),
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
