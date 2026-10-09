@@ -1,3 +1,10 @@
+# Both sides for Only Ups/Downs and Touch/No Touch (October 2026)
+
+- After the virtual hook clears an Only Ups, Only Downs, Touch or No Touch trade, the AI buys BOTH sides live on the same market: same stake on each, same duration (Only Ups/Downs 2 ticks; Touch/No Touch 5 ticks, 0.5 barrier, or 10 if Deriv refuses 5). The first side is bought, then the second one right after; if the second is refused the first runs alone.
+- The two legs settle as ONE trade: the stake ladder, stop loss, take profit and the hook all see the combined (net) result. Both legs still appear separately in the journal and the learner.
+- Even/Odd and Over/Under are unchanged (one contract). New checkbox "Both sides" on the AI Trader tab (on by default); `both_sides: false` in the config turns it off.
+- Honest note: Touch + No Touch means exactly one side wins, so the net is positive only if the winning payout is more than 2x one stake. Only Ups + Only Downs can both lose (mixed ticks) and then you lose both stakes. Check the payouts in your results before leaning on it.
+
 # 1-second volatilities only (October 2026)
 
 - The Bulk Trader market picker now lists only the 1-second indices (1HZ10V, 15, 25, 30, 50, 75, 90, 100) and defaults to Volatility 10 (1s).

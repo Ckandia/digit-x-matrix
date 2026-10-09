@@ -395,8 +395,9 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
         h.conn.history = BEAR; // by the time the opposite is bought, the chart shows a lower-low (Only Downs needs it)
         h.conn.ticks(h.symbol, [100, 100, 99]); // first tick after entry falls: Only Ups loses
         await wait(60);
-        expect(h.conn.buys_()).toHaveLength(1);
-        expect(lastBuy(h)).toMatchObject({ contract_type: 'RUNLOW', duration: 2, duration_unit: 't' });
+        expect(h.conn.buys_()).toHaveLength(2); // both sides: Only Downs (the opposite) + Only Ups
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'RUNLOW', duration: 2, duration_unit: 't' });
+        expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'RUNHIGH', duration: 2, duration_unit: 't' });
         h.engine.stop();
     });
 
@@ -409,8 +410,60 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
         expect(h.conn.buys_()).toHaveLength(0); // 1 of 2 ticks: not settled yet
         h.conn.ticks(h.symbol, [102]);
         await wait(60);
+        expect(h.conn.buys_()).toHaveLength(2); // both sides
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'RUNHIGH', duration: 2 });
+        expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'RUNLOW', duration: 2 });
+        h.engine.stop();
+    });
+
+    it('both sides: the two legs settle as ONE trade (net result), and only then does the hook start again', async () => {
+        const h = hookMake({}, 'R_UH11', 'RUNHIGH');
+        h.conn.history = BULL;
+        await startOnPaper(h);
+        h.conn.ticks(h.symbol, [100, 100, 101, 102]); // paper win
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(2);
+        const starts = virtualEvents(h, 'start').length;
+        h.conn.settle('c1', 9); // Only Ups wins
+        await wait(60);
+        expect(virtualEvents(h, 'start')).toHaveLength(starts); // the other side is still open: nothing new yet
+        h.conn.settle('c2', -1); // Only Downs loses
+        await wait(60);
+        expect(virtualEvents(h, 'start')).toHaveLength(starts + 1); // net +8: a win -> back to paper first
+        expect(h.conn.buys_()).toHaveLength(2);
+        h.engine.stop();
+    });
+
+    it('both sides off: Only Ups is bought alone', async () => {
+        const h = hookMake({ both_sides: false }, 'R_UH12', 'RUNHIGH');
+        h.conn.history = BULL;
+        await startOnPaper(h);
+        h.conn.ticks(h.symbol, [100, 100, 101, 102]);
+        await wait(60);
         expect(h.conn.buys_()).toHaveLength(1);
-        expect(lastBuy(h)).toMatchObject({ contract_type: 'RUNHIGH', duration: 2 });
+        h.engine.stop();
+    });
+
+    it('both sides does not apply to Even/Odd or Over/Under (one contract only)', async () => {
+        const h = hookMake({}, 'R_UH13');
+        await startOnPaper(h);
+        h.conn.paper(h.symbol, EVEN_WIN);
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(1);
+        h.engine.stop();
+    });
+
+    it('both sides: Touch + No Touch are bought together on the same market, same barrier and duration', async () => {
+        const h = hookMake({ contract_families: ['touch'], rotate_contracts: true }, 'R_UH14', 'DIGITEVEN');
+        await startOnPaper(h);
+        await wait(150);
+        h.conn.ticks(h.symbol, [100, 100, 100, 100, 100, 100, 100, 100]); // never touches +0.5: paper Touch loses -> No Touch is the live contract
+        await wait(150);
+        expect(h.conn.buys_()).toHaveLength(2);
+        const types = h.conn.buys_().map(b => b.parameters.contract_type).sort();
+        expect(types).toEqual(['NOTOUCH', 'ONETOUCH']);
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ barrier: '+0.5', duration: 5 });
+        expect(h.conn.buys_()[1].parameters).toMatchObject({ barrier: '+0.5', duration: 5 });
         h.engine.stop();
     });
 
@@ -533,8 +586,9 @@ describe('Touch / No Touch: "This contract offers no return"', () => {
         expect(h.engine.isRunning).toBe(true);
         h.conn.ticks(h.symbol, [100, 100, ...flat(10)]); // never reaches +0.5: Touch loses on paper -> opposite (No Touch) live
         await wait(400);
-        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()).toHaveLength(2); // both sides, both at 10 ticks
         expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'NOTOUCH', duration: 10, barrier: '+0.5' });
+        expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'ONETOUCH', duration: 10, barrier: '+0.5' });
         h.engine.stop();
     });
 
@@ -555,8 +609,9 @@ describe('Touch / No Touch: "This contract offers no return"', () => {
         h.engine.start();
         await wait(600); // the 5 -> 10 tick retry waits 300 ms
         expect(h.engine.isRunning).toBe(true);
-        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()).toHaveLength(2); // both sides, both at 10 ticks
         expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'NOTOUCH', duration: 10, barrier: '+0.5' });
+        expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'ONETOUCH', duration: 10, barrier: '+0.5' });
         h.engine.stop();
     });
 });

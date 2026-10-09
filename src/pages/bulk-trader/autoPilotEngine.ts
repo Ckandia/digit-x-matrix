@@ -82,6 +82,8 @@ export type TAutoPilotConfig = {
     contract_families?: string[];
     /** Hook rules: after every live trade the next paper test is on the next allowed family, so every ticked contract gets its turn. Default on. */
     rotate_contracts?: boolean;
+    /** Only Ups/Only Downs and Touch/No Touch: once the virtual hook clears the trade, BOTH sides are bought live (same market, same stake each). Default on. */
+    both_sides?: boolean;
 };
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
@@ -104,6 +106,10 @@ export const MAX_VIRTUAL_CONFIRMATIONS = 5;
 /** Opposite mode: if this many paper trades in a row win, stop waiting for a loss and pick a fresh contract. */
 export const MAX_OPPOSITE_PAPER_WINS = 25;
 /** Hook mode, Even/Odd: the live trade follows the paper result (paper win -> same contract live; paper loss -> keep paper trading). */
+/** Live trades that fire BOTH sides at once (after the virtual hook): Only Ups + Only Downs, Touch + No Touch. */
+const BOTH_SIDES_TYPES = new Set(['RUNHIGH', 'RUNLOW', 'ONETOUCH', 'NOTOUCH']);
+/** Two live legs that settle together as ONE trade (the stake ladder, stop loss and hook see the combined result). */
+type TPair = { pending: number; profit: number; stake: number };
 const FOLLOW_HOOK_TYPES = new Set(['DIGITEVEN', 'DIGITODD']);
 const MAX_FOLLOW_PAPER_LOSSES = 25;
 
@@ -130,6 +136,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         virtual_mode: 'hook',
         contract_families: ALL_FAMILY_KEYS,
         rotate_contracts: true,
+        both_sides: true,
     };
 };
 
@@ -1070,6 +1077,24 @@ export class AutoPilotEngine {
             return;
         }
         const tried_duration = Number(parameters.duration);
+        // Both sides: the opposite contract is bought too, on the same market, same stake and same duration.
+        let partner: TCandidate | null = null;
+        let partner_parameters: Record<string, unknown> | null = null;
+        if (this.config.both_sides !== false && BOTH_SIDES_TYPES.has(candidate.contract_type)) {
+            const opposite_type = FLIP_PARTNER[candidate.contract_type];
+            const live = this.connection.accountInfo?.balance;
+            if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
+                this.hooks?.onLog?.('info', `Both sides skipped: two stakes of ${stake} ${this.currency} are more than the balance (${live.toFixed(2)}).`);
+            } else if (opposite_type) {
+                try {
+                    const opposite: TCandidate = { ...candidate, contract_type: opposite_type as TCandidate['contract_type'], label: OPPOSITE_LABEL[opposite_type] ?? opposite_type, basis: `Both sides: ${candidate.label} and ${OPPOSITE_LABEL[opposite_type] ?? opposite_type}.` };
+                    partner_parameters = { ...buildTradeParameters(opposite, stake, this.currency), duration: tried_duration };
+                    partner = opposite;
+                } catch (err) {
+                    this.hooks?.onLog?.('info', `Both sides skipped: ${err instanceof Error ? err.message : 'the opposite contract could not be built'}`);
+                }
+            }
+        }
         this.hooks?.onLog?.(
             'info',
             `Buying ${candidate.contract_type} on ${candidate.symbol}, ${tried_duration} tick(s), stake ${stake} ${this.currency}` +
@@ -1090,10 +1115,31 @@ export class AutoPilotEngine {
                 }
                 return this.connection.send({ buy: '1', price: stake, parameters });
             })
-            .then(res => {
+            .then(async res => {
                 const contract_id = res?.buy?.contract_id;
                 if (!contract_id) throw new Error('Buy did not return a contract id');
-                this._watch(candidate, stake, contract_id, tried_duration);
+                if (!partner || !partner_parameters) {
+                    this._watch(candidate, stake, contract_id, tried_duration);
+                    return;
+                }
+                // The first side is bought: fire the other side right away. If it cannot be bought, the first side runs alone.
+                let partner_id: string | null = null;
+                try {
+                    await this.connection.send({ proposal: 1, ...partner_parameters });
+                    const bought = await this.connection.send({ buy: '1', price: stake, parameters: partner_parameters });
+                    partner_id = bought?.buy?.contract_id ?? null;
+                } catch (err) {
+                    this.hooks?.onLog?.('error', `Second side ${partner.label} could not be bought: ${err instanceof Error ? err.message : 'refused'}. ${candidate.label} runs alone.`);
+                }
+                if (!partner_id) {
+                    this._watch(candidate, stake, contract_id, tried_duration);
+                    return;
+                }
+                this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
+                this.hooks?.onLog?.('info', `Both sides fired: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
+                const pair: TPair = { pending: 2, profit: 0, stake: Number((stake * 2).toFixed(2)) };
+                this._watch(candidate, stake, contract_id, tried_duration, pair);
+                this._watch(partner, stake, partner_id, tried_duration, pair);
             })
             .catch(err => {
                 this.busy = false;
@@ -1128,7 +1174,7 @@ export class AutoPilotEngine {
             });
     }
 
-    private _watch(candidate: TCandidate, stake: number, contract_id: string, duration: number) {
+    private _watch(candidate: TCandidate, stake: number, contract_id: string, duration: number, pair?: TPair) {
         const entry_step = this.step;
         const entry_tag = this.entry_tag;
         const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id }, (data, err) => {
@@ -1188,6 +1234,19 @@ export class AutoPilotEngine {
                 profit: Number(profit.toFixed(2)),
             });
 
+            // Both sides: the two legs are one trade. Nothing happens until the second one settles, then the COMBINED result drives the ladder.
+            let net_profit = profit;
+            let net_stake = stake;
+            if (pair) {
+                pair.profit = Number((pair.profit + profit).toFixed(2));
+                pair.pending -= 1;
+                if (pair.pending > 0) return; // still waiting for the other side (busy stays on)
+                net_profit = pair.profit;
+                net_stake = pair.stake;
+                this.hooks?.onLog?.(net_profit > 0 ? 'success' : 'error', `Both sides closed: net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)} ${this.currency} on ${candidate.symbol}.`);
+            }
+            const net_won = net_profit > 0;
+
             this.busy = false;
             if (!this.running) return;
 
@@ -1209,7 +1268,7 @@ export class AutoPilotEngine {
             const mode = this.config.recovery_mode ?? 'reverse';
             const base_stake = this.config.stake;
 
-            if (won) {
+            if (net_won) {
                 this.consecutive_losses = 0;
                 this.flip_origin = null; // a win ends any auto-flip sequence: next entry is a fresh pick
                 const hook = this._hookMode();
@@ -1224,7 +1283,7 @@ export class AutoPilotEngine {
                 }
                 // Reverse martingale: the stake grows only after a win, and only by what the streak has won.
                 this.win_streak += 1;
-                this.streak_profit = Number((this.streak_profit + profit).toFixed(2));
+                this.streak_profit = Number((this.streak_profit + net_profit).toFixed(2));
                 const max_streak = Math.max(1, Math.floor(this.config.max_streak ?? 3));
                 if (this.win_streak >= max_streak) {
                     this.hooks?.onLog?.('success', `${this.win_streak} wins in a row: gain banked, stake goes back to ${base_stake}.`);
@@ -1236,7 +1295,7 @@ export class AutoPilotEngine {
                 }
                 const growth = Math.max(1, this.config.streak_multiplier ?? 1.8);
                 // Never risk more than the base stake plus what this streak has already won.
-                const next_stake = Number(Math.max(base_stake, Math.min(stake * growth, base_stake + this.streak_profit)).toFixed(2));
+                const next_stake = Number(Math.max(base_stake, Math.min(net_stake / (pair ? 2 : 1) * growth, base_stake + this.streak_profit)).toFixed(2));
                 this.step = this.win_streak + 1;
                 next(next_stake, 'streak');
                 return;
@@ -1290,7 +1349,7 @@ export class AutoPilotEngine {
                 return;
             }
 
-            const next_stake = Number((stake * this.config.martingale_multiplier).toFixed(2));
+            const next_stake = Number((net_stake / (pair ? 2 : 1) * this.config.martingale_multiplier).toFixed(2));
             // Ladder budget: the whole recovery run may risk at most stop_loss in total.
             if (this.ladder_spent + next_stake > Math.abs(this.config.stop_loss)) {
                 this.stop('recovery ladder would exceed the stop-loss budget');

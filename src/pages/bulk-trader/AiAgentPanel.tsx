@@ -593,6 +593,17 @@ const AiAgentPanel = ({
                                 'Rotate: after every live trade the next paper test is on the next ticked contract, so each one gets its turn. Off = the AI stays on the contract it just traded. Rise/Fall and Only Ups/Downs wait for a higher-high / lower-low on the 1-tick chart.'
                             )}
                         </label>
+                        <label style={{ display: 'block' }}>
+                            <input
+                                type='checkbox'
+                                checked={config?.both_sides !== false}
+                                disabled={!config || status === 'connecting'}
+                                onChange={e => config && setConfig({ ...config, both_sides: e.target.checked })}
+                            />{' '}
+                            {localize(
+                                'Both sides: once the virtual hook clears an Only Ups/Only Downs or Touch/No Touch trade, the AI buys BOTH sides on the live account (same market, same stake each). The two results count as one trade.'
+                            )}
+                        </label>
                     </div>
                     <label className='ai-agent-panel__hint'>
                         <input
