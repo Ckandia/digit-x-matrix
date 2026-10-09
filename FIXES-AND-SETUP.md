@@ -1,3 +1,9 @@
+# Both sides after the virtual hook, except Touch / No Touch (October 2026)
+
+- A live trade released by the virtual hook now buys BOTH sides on the same market (same stake each, same duration): Even + Odd, Over 4 + Under 5, Rise + Fall, Only Ups + Only Downs. Touch / No Touch are never both-sided (one contract only). The two legs settle as one trade, as before. A first trade of a run (no hook yet) is a single contract.
+- Checkbox "Both sides" (default on) / `both_sides: false` turns it off.
+- Honest note (your theory test): Even+Odd and Over 4+Under 5 always have exactly one winner, so each pair returns one payout for two stakes: with payouts of about 1.8-1.95x the stake the net is a guaranteed loss of roughly 5-20% of one stake per pair. Rise+Fall also loses both on an unchanged tick. The hook can change what you trade, not that arithmetic. Rise/Fall: only the first leg is trend-gated; the opposite leg is bought alongside it.
+
 # Both sides for Only Ups/Downs and Touch/No Touch (October 2026)
 
 - After the virtual hook clears an Only Ups, Only Downs, Touch or No Touch trade, the AI buys BOTH sides live on the same market: same stake on each, same duration (Only Ups/Downs 2 ticks; Touch/No Touch 5 ticks, 0.5 barrier, or 10 if Deriv refuses 5). The first side is bought, then the second one right after; if the second is refused the first runs alone.

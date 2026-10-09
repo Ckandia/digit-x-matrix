@@ -106,8 +106,11 @@ export const MAX_VIRTUAL_CONFIRMATIONS = 5;
 /** Opposite mode: if this many paper trades in a row win, stop waiting for a loss and pick a fresh contract. */
 export const MAX_OPPOSITE_PAPER_WINS = 25;
 /** Hook mode, Even/Odd: the live trade follows the paper result (paper win -> same contract live; paper loss -> keep paper trading). */
-/** Live trades that fire BOTH sides at once (after the virtual hook): Only Ups + Only Downs, Touch + No Touch. */
-const BOTH_SIDES_TYPES = new Set(['RUNHIGH', 'RUNLOW', 'ONETOUCH', 'NOTOUCH']);
+/**
+ * Both sides: a live trade released by the virtual hook fires the contract AND its opposite at once (Even + Odd, Over 4 + Under 5,
+ * Rise + Fall, Only Ups + Only Downs). Touch / No Touch are the exception: they are always bought on one side only.
+ */
+const bothSidesType = (type: string): boolean => PAPER_SUPPORTED.has(type) && !!FLIP_PARTNER[type] && type !== 'ONETOUCH' && type !== 'NOTOUCH';
 /** Two live legs that settle together as ONE trade (the stake ladder, stop loss and hook see the combined result). */
 type TPair = { pending: number; profit: number; stake: number };
 const FOLLOW_HOOK_TYPES = new Set(['DIGITEVEN', 'DIGITODD']);
@@ -507,6 +510,7 @@ export class AutoPilotEngine {
     private win_streak = 0; // reverse martingale: wins in a row
     private streak_profit = 0; // reverse martingale: what the current win streak has made
     private entry_tag: TAutoPilotEvent['tag']; // why the trade being placed is not a plain fresh pick
+    private hook_release = false; // the next live entry was just released by the virtual hook (only those fire both sides)
     private hook_pending = false; // a real loss just happened: the next entry is paper-traded first (virtual hook)
     private trade_count = 0; // settled trades in this run (capital protection counts these)
     private flip_origin: TCandidate | null = null; // auto flip: the contract we flipped away from
@@ -974,7 +978,10 @@ export class AutoPilotEngine {
         this.busy = false;
         if (this.running) {
             this._emit({ phase: 'virtual', virtual_state: 'end', virtual_losses: losses, virtual_wins: wins, virtual_needed: needed });
-            if (confirmed) this._enter(confirmed, resume_stake, opposite_mode || via_opposite ? 'flipped' : undefined);
+            if (confirmed) {
+                this.hook_release = true;
+                this._enter(confirmed, resume_stake, opposite_mode || via_opposite ? 'flipped' : undefined);
+            }
             else this._findAndEnter(resume_stake); // paper trading could not run: do not stay paused, pick fresh
         }
     }
@@ -1021,6 +1028,7 @@ export class AutoPilotEngine {
                 return;
             }
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 6000);
+            this.hook_release = false;
             if (this._hookMode()) this.hook_pending = true; // a fresh contract is paper-tested before any real money
             this._findAndEnter(wanted_stake, tag);
         });
@@ -1028,6 +1036,8 @@ export class AutoPilotEngine {
 
     private _enterNow(candidate_in: TCandidate, wanted_stake_in: number, tag?: TAutoPilotEvent['tag']) {
         const candidate: TCandidate = candidate_in;
+        const from_hook = this.hook_release;
+        this.hook_release = false;
         // Capital protection: the first trades of a run never use more than the base stake.
         const protect = Math.max(0, Math.floor(this.config.protect_trades ?? 0));
         const wanted_stake = this.trade_count < protect ? Math.min(wanted_stake_in, this.config.stake) : wanted_stake_in;
@@ -1080,14 +1090,14 @@ export class AutoPilotEngine {
         // Both sides: the opposite contract is bought too, on the same market, same stake and same duration.
         let partner: TCandidate | null = null;
         let partner_parameters: Record<string, unknown> | null = null;
-        if (this.config.both_sides !== false && BOTH_SIDES_TYPES.has(candidate.contract_type)) {
+        if (from_hook && this.config.both_sides !== false && bothSidesType(candidate.contract_type)) {
             const opposite_type = FLIP_PARTNER[candidate.contract_type];
             const live = this.connection.accountInfo?.balance;
             if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
                 this.hooks?.onLog?.('info', `Both sides skipped: two stakes of ${stake} ${this.currency} are more than the balance (${live.toFixed(2)}).`);
             } else if (opposite_type) {
                 try {
-                    const opposite: TCandidate = { ...candidate, contract_type: opposite_type as TCandidate['contract_type'], label: OPPOSITE_LABEL[opposite_type] ?? opposite_type, basis: `Both sides: ${candidate.label} and ${OPPOSITE_LABEL[opposite_type] ?? opposite_type}.` };
+                    const opposite: TCandidate = { ...candidate, prediction: opposite_type === 'DIGITOVER' ? 4 : opposite_type === 'DIGITUNDER' ? 5 : candidate.prediction, contract_type: opposite_type as TCandidate['contract_type'], label: OPPOSITE_LABEL[opposite_type] ?? opposite_type, basis: `Both sides: ${candidate.label} and ${OPPOSITE_LABEL[opposite_type] ?? opposite_type}.` };
                     partner_parameters = { ...buildTradeParameters(opposite, stake, this.currency), duration: tried_duration };
                     partner = opposite;
                 } catch (err) {

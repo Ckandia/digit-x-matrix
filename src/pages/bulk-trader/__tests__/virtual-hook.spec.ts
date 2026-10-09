@@ -444,26 +444,24 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
         h.engine.stop();
     });
 
-    it('both sides does not apply to Even/Odd or Over/Under (one contract only)', async () => {
+    it('both sides now applies to Even/Odd after the hook: Even + Odd are bought together', async () => {
         const h = hookMake({}, 'R_UH13');
         await startOnPaper(h);
         h.conn.paper(h.symbol, EVEN_WIN);
         await wait(60);
-        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()).toHaveLength(2);
+        expect(h.conn.buys_().map(b => b.parameters.contract_type).sort()).toEqual(['DIGITEVEN', 'DIGITODD']);
         h.engine.stop();
     });
 
-    it('both sides: Touch + No Touch are bought together on the same market, same barrier and duration', async () => {
+    it('Touch / No Touch are the exception: one side only, never both', async () => {
         const h = hookMake({ contract_families: ['touch'], rotate_contracts: true }, 'R_UH14', 'DIGITEVEN');
         await startOnPaper(h);
         await wait(150);
         h.conn.ticks(h.symbol, [100, 100, 100, 100, 100, 100, 100, 100]); // never touches +0.5: paper Touch loses -> No Touch is the live contract
         await wait(150);
-        expect(h.conn.buys_()).toHaveLength(2);
-        const types = h.conn.buys_().map(b => b.parameters.contract_type).sort();
-        expect(types).toEqual(['NOTOUCH', 'ONETOUCH']);
-        expect(h.conn.buys_()[0].parameters).toMatchObject({ barrier: '+0.5', duration: 5 });
-        expect(h.conn.buys_()[1].parameters).toMatchObject({ barrier: '+0.5', duration: 5 });
+        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'NOTOUCH', barrier: '+0.5', duration: 5 });
         h.engine.stop();
     });
 
