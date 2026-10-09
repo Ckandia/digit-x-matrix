@@ -1,7 +1,12 @@
 import { useEffect, useSyncExternalStore } from 'react';
+import { isOneSecondSymbol } from './constants';
 import { TConnectionState, TSnapshotMap, TSymbolSnapshot } from './analysis-types';
 
 const RECONNECT_DELAY_MS = 3000;
+
+/** The app trades 1-second volatility indices only: every other symbol is dropped before the AI or the tabs can see it. */
+const only1s = (map: TSnapshotMap): TSnapshotMap =>
+    Object.fromEntries(Object.entries(map ?? {}).filter(([symbol]) => isOneSecondSymbol(symbol))) as TSnapshotMap;
 
 // Injected at build time (see rsbuild.config.ts source.define), same pattern as
 // NEXT_PUBLIC_BULK_TRADER_API_URL. Falls back to deriving it from the REST base
@@ -48,7 +53,7 @@ const openFeed = () => {
             fetch(REST_SNAPSHOT_URL)
                 .then(r => r.json())
                 .then(body => {
-                    if (holders > 0 && body?.data) setState({ snapshots: body.data });
+                    if (holders > 0 && body?.data) setState({ snapshots: only1s(body.data) });
                 })
                 .catch(() => undefined);
         }
@@ -69,8 +74,8 @@ const openFeed = () => {
             try {
                 const parsed = JSON.parse(event.data);
                 if (parsed.type === 'snapshot') {
-                    setState({ snapshots: parsed.data as TSnapshotMap });
-                } else if (parsed.type === 'update' && parsed.symbol) {
+                    setState({ snapshots: only1s(parsed.data as TSnapshotMap) });
+                } else if (parsed.type === 'update' && parsed.symbol && isOneSecondSymbol(parsed.symbol)) {
                     setState({ snapshots: { ...state.snapshots, [parsed.symbol]: parsed.data as TSymbolSnapshot } });
                 }
             } catch {

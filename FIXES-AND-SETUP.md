@@ -1,3 +1,11 @@
+# 1-second volatilities only (October 2026)
+
+- The Bulk Trader market picker now lists only the 1-second indices (1HZ10V, 15, 25, 30, 50, 75, 90, 100) and defaults to Volatility 10 (1s).
+- The backend analysis feed (`backend/src/marketFeed.js`) streams only the five 1HZ markets (10/25/50/75/100). R_ (2-second) and Jump indices are gone.
+- The live signal feed drops any non-1HZ symbol before the AI or the tabs see it, so the AI Trader can only pick, paper-test and trade 1-second markets.
+- Redeploy the backend (Render) so it stops streaming the R_ markets.
+- Not changed: the stock Deriv Bot builder/charts pages still list every market.
+
 # Virtual hook: Even/Odd follows the hook (October 2026)
 
 - In the active hook mode, **Even/Odd now trades what the virtual hook shows**: a paper WIN on Even buys Even live (Odd buys Odd). A paper LOSS no longer buys the opposite: nothing is bought, and the same contract keeps paper-testing until it wins, then it goes live.

@@ -31,7 +31,7 @@ export type TVirtualRow = { ts: number; symbol: string; label: string; result: '
 export type TVirtualState = {
     /** Real trading is paused and the AI is paper trading right now. */
     active: boolean;
-    /** The paper trade in progress, e.g. "Over 4 on R_10". */
+    /** The paper trade in progress, e.g. "Over 4 on 1HZ10V". */
     current: string;
     /** Virtual losses since the pause started. */
     losses: number;
