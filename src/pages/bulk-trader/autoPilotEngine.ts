@@ -306,7 +306,7 @@ export const preferOneTick = (snapshots: TSnapshotMap): TSnapshotMap => {
 /** A quote whose payout is below this multiple of the stake is a guaranteed-loss trade: never buy it. */
 const MIN_PAYOUT_RATIO = 1.05;
 /** Deriv wording for "this contract itself is not available right now" (as opposed to balance/stake/connection errors). */
-const REFUSAL_PATTERN = /not offered|duration|barrier|not available|unavailable|suspended|market is closed|no longer offered|selected tick/i;
+const REFUSAL_PATTERN = /not offered|duration|barrier|not available|unavailable|suspended|market is closed|no longer offered|selected tick|no return|offers no/i;
 
 export type TCandidate = TDigitSignal & { symbol: string };
 
@@ -677,8 +677,21 @@ export class AutoPilotEngine {
                 if (family.types.includes(sig.contract_type) && (!best_real || sig.confidence > best_real.confidence)) best_real = { symbol: sym, ...sig };
             }
         }
-        const symbol = best_real?.symbol ?? (prefer_symbol && symbols.includes(prefer_symbol) ? prefer_symbol : symbols[0]);
+        let symbol = best_real?.symbol ?? (prefer_symbol && symbols.includes(prefer_symbol) ? prefer_symbol : symbols[0]);
         let type: string = best_real?.contract_type ?? family.types[0];
+        if (isTouch(type)) {
+            // Only a market where Deriv actually prices the touch contract (5 or 10 ticks, barrier 0.5) is used.
+            let priced: string | null = null;
+            for (const sym of [symbol, ...symbols.filter(s => s !== symbol)].slice(0, 6)) {
+                if (await this._probeTouch(sym, type)) {
+                    priced = sym;
+                    break;
+                }
+                if (!this.running) return null;
+            }
+            if (!priced) return null;
+            symbol = priced;
+        }
         if (family.trend) {
             let trend: string = 'none';
             try {
@@ -692,7 +705,7 @@ export class AutoPilotEngine {
         }
         const ticks = tradeTicks(symbol, type);
         if (ticks === null) return null;
-        if (best_real && best_real.contract_type === type) return { ...best_real, symbol, duration_ticks: ticks };
+        if (best_real && best_real.contract_type === type && best_real.symbol === symbol) return { ...best_real, symbol, duration_ticks: ticks };
         const kind = type.startsWith('DIGIT') ? 'digits' : type === 'ONETOUCH' || type === 'NOTOUCH' ? 'touch' : type.startsWith('RUN') ? 'only_up_down' : 'rise_fall';
         return {
             symbol,
@@ -704,6 +717,43 @@ export class AutoPilotEngine {
             confidence: 1,
             basis: 'Contract rotation: the next ticked contract gets its paper test.',
         } as TCandidate;
+    }
+
+    /**
+     * Touch / No Touch: asks Deriv for a price before any paper or live trade. A barrier of 0.5 can be too far (No Touch) or too
+     * near (Touch) on a quiet market, and Deriv then answers "This contract offers no return". 5 ticks is tried first, then 10 ticks
+     * with the same 0.5 barrier; if neither prices, the market/contract is skipped for 6 hours. True = priced and safe to use.
+     */
+    private async _probeTouch(symbol: string, type: string): Promise<boolean> {
+        const key = `${symbol}|${type}`;
+        const first = touch_ticks.get(key) ?? 5;
+        for (const ticks of first === 5 ? [5, 10] : [first]) {
+            try {
+                const res = await this.connection.send({
+                    proposal: 1,
+                    amount: this.config.stake,
+                    basis: 'stake',
+                    contract_type: type,
+                    currency: this.currency,
+                    underlying_symbol: symbol,
+                    duration: ticks,
+                    duration_unit: 't',
+                    barrier: TOUCH_BARRIER,
+                });
+                const ask = Number(res?.proposal?.ask_price);
+                const payout = Number(res?.proposal?.payout);
+                if (!res?.proposal || (ask > 0 && payout > 0 && payout / ask < MIN_PAYOUT_RATIO)) throw new Error('payout does not beat the stake');
+                if (ticks !== 5) touch_ticks.set(key, ticks);
+                else touch_ticks.delete(key);
+                return true;
+            } catch (err) {
+                if (!this.running) return false;
+                this.hooks?.onLog?.('info', `${OPPOSITE_LABEL[type] ?? type} on ${symbol} for ${ticks} tick(s), barrier ${TOUCH_BARRIER}: ${err instanceof Error ? err.message : 'not priced'}`);
+            }
+        }
+        markRefused(symbol, type);
+        this.hooks?.onLog?.('info', `${OPPOSITE_LABEL[type] ?? type} has no usable price on ${symbol} (5 or 10 ticks, barrier ${TOUCH_BARRIER}). Skipping it for 6 hours.`);
+        return false;
     }
 
     /** Hook rules: after a live trade, paper-test the next contract (rotation) or the same one again. */
@@ -911,6 +961,21 @@ export class AutoPilotEngine {
         if (this.hook_pending) {
             this.hook_pending = false;
             if (PAPER_SUPPORTED.has(candidate.contract_type)) {
+                if (isTouch(candidate.contract_type)) {
+                    // Ask Deriv for a price first: no paper test (and no live buy) on a touch contract it would call "no return".
+                    this.busy = true;
+                    void this._probeTouch(candidate.symbol, candidate.contract_type).then(ok => {
+                        this.busy = false;
+                        if (!this.running) return;
+                        if (ok) {
+                            void this._virtualHook(candidate, wanted_stake);
+                        } else {
+                            this.hook_pending = true; // another contract is picked and paper-tested instead
+                            setTimeout(() => this._findAndEnter(wanted_stake, tag), 300);
+                        }
+                    });
+                    return;
+                }
                 void this._virtualHook(candidate, wanted_stake);
                 return;
             }
@@ -1023,7 +1088,7 @@ export class AutoPilotEngine {
                 this.hooks?.onLog?.('error', detail);
                 // Touch / No Touch: Deriv refused 5 ticks here, so use 10 ticks with the same 0.5 barrier before giving up.
                 const touch_key = `${candidate.symbol}|${candidate.contract_type}`;
-                if (isTouch(candidate.contract_type) && tried_duration === 5 && !touch_ticks.has(touch_key) && /duration|tick|barrier|offered/i.test(raw)) {
+                if (isTouch(candidate.contract_type) && tried_duration === 5 && !touch_ticks.has(touch_key) && /duration|tick|barrier|offered|no return|offers no/i.test(raw)) {
                     touch_ticks.set(touch_key, 10);
                     this.hooks?.onLog?.('info', `${candidate.label} refused at 5 ticks on ${candidate.symbol}; trying 10 ticks with the same 0.5 barrier.`);
                     if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);

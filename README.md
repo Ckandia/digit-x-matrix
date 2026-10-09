@@ -1,3 +1,12 @@
+# Fix: "This contract offers no return" (October 2026)
+
+- Cause: Deriv prices a Touch / No Touch with a 0.5 barrier at almost no profit when the barrier is far (No Touch) or very near (Touch) for a quiet market
+  like R_50 over 5 ticks. The AI treated that reply as a fatal error and STOPPED the run ("trade placement failed").
+- Now: "no return" is handled like a refused duration. 5 ticks fails -> the same 0.5 barrier is tried at 10 ticks; if that fails too, that market/contract is
+  skipped for 6 hours and the AI carries on with another contract. Bulk Trades does the same 5 -> 10 retry.
+- Virtual hook: before any paper or live Touch / No Touch the AI asks Deriv for a price (5, then 10 ticks), and only paper-tests it if it is priced.
+- Tests: 3 new in `virtual-hook.spec.ts` (30 + 24 + 12 + 2 pass in the stand-alone runner). The Bulk Trades retry change is untested. Full tsc / build / jest not run here: run them first.
+
 # Contract picker, rotation and Only Ups/Downs (October 2026)
 
 - **AI Trader tab, new "Contracts the AI may trade" list** (all ticked by default): Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs.

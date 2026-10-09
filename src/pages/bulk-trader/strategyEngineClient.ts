@@ -24,7 +24,9 @@ const DEFAULT_MULTIPLIER = 100;
 
 // Deriv's wording when a duration / barrier is not offered for a market. Only then is the next
 // duration in the list (Touch / No Touch: 5 ticks, then 10) tried; any other error stops the strategy.
-const DURATION_ERROR = /duration|barrier|offered|tick/i;
+// "This contract offers no return" = the barrier is so far (No Touch) or so near (Touch) that the payout would not beat the stake;
+// a longer duration widens the odds, so 5 -> 10 ticks is tried for that too.
+const DURATION_ERROR = /duration|barrier|offered|tick|no return/i;
 
 const round2 = (n: number) => Number(n.toFixed(2));
 

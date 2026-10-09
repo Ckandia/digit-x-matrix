@@ -13,12 +13,17 @@ class FakeConnection {
     private buys = 0;
     accountInfo = { balance: 100000, loginid: 'VRTC1', currency: 'USD' };
     history: number[] = [];
+    proposalError?: (req: any) => string | null;
     onFatalError: any;
     onReconnecting: any;
     onReconnect: any;
     async send(req: any) {
         this.sent.push(req);
-        if (req.proposal) return { proposal: { ask_price: 1, payout: 1.9 } };
+        if (req.proposal) {
+            const bad = this.proposalError?.(req);
+            if (bad) throw new Error(bad);
+            return { proposal: { ask_price: 1, payout: 1.9 } };
+        }
         if (req.buy) return { buy: { contract_id: `c${++this.buys}` } };
         if (req.ticks_history) return { history: { prices: this.history, times: [] } };
         return {};
@@ -471,6 +476,50 @@ describe('AI Trader contract picker and rotation', () => {
         await wait(120);
         expect(lastStart(h).contract_type).toBe('ONETOUCH');
         expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
+    });
+});
+
+
+describe('Touch / No Touch: "This contract offers no return"', () => {
+    const NO_RETURN = 'This contract offers no return';
+    const isTouchReq = (r: any) => r.contract_type === 'ONETOUCH' || r.contract_type === 'NOTOUCH';
+    const mk = (cfg: Partial<TAutoPilotConfig>, symbol: string, signal: string) => make({ virtual_mode: undefined, ...cfg }, undefined, symbol, signal);
+    const flat = (n: number) => Array.from({ length: n }, () => 100);
+
+    it('5 ticks has no return -> the hook prices 10 ticks (barrier 0.5), paper-tests it and buys it live at 10 ticks', async () => {
+        const h = mk({ contract_families: ['touch'], rotate_contracts: true }, 'R_NR1', 'DIGITEVEN');
+        h.conn.proposalError = r => (isTouchReq(r) && r.duration === 5 ? NO_RETURN : null);
+        h.engine.start();
+        await wait(150);
+        expect(virtualEvents(h, 'start').slice(-1)[0].contract_type).toBe('ONETOUCH');
+        expect(h.engine.isRunning).toBe(true);
+        h.conn.ticks(h.symbol, [100, 100, ...flat(10)]); // never reaches +0.5: Touch loses on paper -> opposite (No Touch) live
+        await wait(400);
+        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'NOTOUCH', duration: 10, barrier: '+0.5' });
+        h.engine.stop();
+    });
+
+    it('no return at 5 AND 10 ticks: the market is skipped, the run keeps going and does not stop', async () => {
+        const h = mk({ contract_families: ['touch'], rotate_contracts: true }, 'R_NR2', 'DIGITEVEN');
+        h.conn.proposalError = r => (isTouchReq(r) ? NO_RETURN : null);
+        h.engine.start();
+        await wait(200);
+        expect(h.engine.isRunning).toBe(true);
+        expect(h.conn.buys_()).toHaveLength(0);
+        expect(virtualEvents(h, 'start')).toHaveLength(0); // nothing was paper-traded on a contract that cannot be priced
+        h.engine.stop();
+    });
+
+    it('a live buy refused with "no return" at 5 ticks is retried at 10 ticks instead of stopping the run', async () => {
+        const h = mk({ virtual_hook: false, auto_flip: false }, 'R_NR3', 'NOTOUCH');
+        h.conn.proposalError = r => (isTouchReq(r) && r.duration === 5 ? NO_RETURN : null);
+        h.engine.start();
+        await wait(600); // the 5 -> 10 tick retry waits 300 ms
+        expect(h.engine.isRunning).toBe(true);
+        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'NOTOUCH', duration: 10, barrier: '+0.5' });
         h.engine.stop();
     });
 });
