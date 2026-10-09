@@ -77,7 +77,21 @@ export type TAutoPilotConfig = {
      * 'confirm': the older rule, SUSPENDED (kept in code and tests, not selectable in the UI), `virtual_confirmations` paper wins in a row, then the same contract is traded for real.
      */
     virtual_mode?: 'hook' | 'opposite' | 'confirm';
+    /** Which contract families the AI may trade (keys of CONTRACT_FAMILIES). Undefined = no restriction (the older behaviour). */
+    contract_families?: string[];
+    /** Hook rules: after every live trade the next paper test is on the next allowed family, so every ticked contract gets its turn. Default on. */
+    rotate_contracts?: boolean;
 };
+
+/** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
+export const CONTRACT_FAMILIES: { key: string; label: string; types: [string, string]; trend?: boolean }[] = [
+    { key: 'even_odd', label: 'Even / Odd', types: ['DIGITEVEN', 'DIGITODD'] },
+    { key: 'over_under', label: 'Over 4 / Under 5', types: ['DIGITOVER', 'DIGITUNDER'] },
+    { key: 'rise_fall', label: 'Rise / Fall', types: ['CALL', 'PUT'], trend: true },
+    { key: 'touch', label: 'Touch / No Touch', types: ['ONETOUCH', 'NOTOUCH'] },
+    { key: 'only_ups_downs', label: 'Only Ups / Only Downs', types: ['RUNHIGH', 'RUNLOW'], trend: true },
+];
+export const ALL_FAMILY_KEYS = CONTRACT_FAMILIES.map(f => f.key);
 
 /** The early loss limit during capital protection, in base stakes. */
 export const PROTECT_LOSS_STAKES = 3;
@@ -110,6 +124,8 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         virtual_hook: true,
         virtual_confirmations: DEFAULT_VIRTUAL_CONFIRMATIONS,
         virtual_mode: 'hook',
+        contract_families: ALL_FAMILY_KEYS,
+        rotate_contracts: true,
     };
 };
 
@@ -269,7 +285,7 @@ export const paperOutcome = (type: string, entry: number, after: number[], pip: 
 };
 
 /** Contracts that wait for a confirmed trend on the 1-tick chart: Rise needs a higher high, Fall a lower low. */
-const TREND_NEEDED: Record<string, 'bullish' | 'bearish'> = { CALL: 'bullish', PUT: 'bearish' };
+const TREND_NEEDED: Record<string, 'bullish' | 'bearish'> = { CALL: 'bullish', PUT: 'bearish', RUNHIGH: 'bullish', RUNLOW: 'bearish' };
 
 /**
  * The owner wants quick 1-tick contracts, not ones that sit open. When any market has a tradable 1-tick signal,
@@ -297,9 +313,9 @@ export type TCandidate = TDigitSignal & { symbol: string };
 /** Best-confidence signal across every symbol, restricted to the families the
  *  auto-pilot is allowed to trade. Used for the very first entry, and again
  *  after every win (the ladder resets and re-scans from scratch). */
-export const pickBestGlobalCandidate = (all_snapshots: TSnapshotMap): TCandidate | null => {
+export const pickBestGlobalCandidate = (all_snapshots: TSnapshotMap, prefer_one_tick = true): TCandidate | null => {
     let best: TCandidate | null = null;
-    const snapshots = preferOneTick(all_snapshots);
+    const snapshots = prefer_one_tick ? preferOneTick(all_snapshots) : all_snapshots;
     for (const [symbol, snapshot] of Object.entries(snapshots)) {
         for (const signal of snapshot.signals) {
             if (!AUTOPILOT_CONTRACT_TYPES.includes(signal.contract_type as (typeof AUTOPILOT_CONTRACT_TYPES)[number]))
@@ -560,12 +576,21 @@ export class AutoPilotEngine {
                 signals: snap.signals.filter(sig => (this.blocked.get(`${symbol}|${sig.contract_type}`) ?? 0) <= now),
             };
         }
-        // Quick 1-tick contracts first; longer contracts only when no 1-tick one is available.
-        const snapshots = preferOneTick(unblocked);
+        // The contract families ticked on the AI Trader tab (undefined = no restriction).
+        const allowed = this._allowedTypes();
+        let pool = unblocked;
+        if (allowed) {
+            pool = {};
+            for (const [symbol, snap] of Object.entries(unblocked)) pool[symbol] = { ...snap, signals: snap.signals.filter(sig => allowed.has(sig.contract_type)) };
+        }
+        // Quick 1-tick contracts first; longer contracts only when no 1-tick one is available. When the owner has ticked Touch /
+        // No Touch or Only Ups / Downs, those are wanted on purpose, so the 1-tick-first rule is lifted.
+        const wants_longer = !!allowed && ['ONETOUCH', 'NOTOUCH', 'RUNHIGH', 'RUNLOW'].some(t => allowed.has(t));
+        const snapshots = wants_longer ? pool : preferOneTick(pool);
         const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
         return learner
             ? learner.pickBest(candidatesFromSnapshots<TDigitSignal>(snapshots, AUTOPILOT_CONTRACT_TYPES) as TCandidate[])
-            : pickBestGlobalCandidate(snapshots);
+            : pickBestGlobalCandidate(snapshots, !wants_longer);
     }
 
     /** The best tradable contract that is NOT the one that just lost (nor its opposite side). Null if there is none. */
@@ -584,6 +609,17 @@ export class AutoPilotEngine {
 
         const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
         const candidate = this._pick(this.getSnapshots());
+        if (!candidate && this._hookMode() && this._allowedTypes()) {
+            // No signal for a ticked contract right now: the hook can still paper-test it, so build the candidate directly.
+            this.busy = true;
+            void this._nextHookCandidate(null).then(c => {
+                this.busy = false;
+                if (!this.running) return;
+                if (c) this._enter(c, stake, tag);
+                else setTimeout(() => this._findAndEnter(stake, tag), 1500);
+            });
+            return;
+        }
         if (!candidate) {
             if (Date.now() - this.last_wait_emit > 30_000) {
                 this.last_wait_emit = Date.now();
@@ -601,6 +637,83 @@ export class AutoPilotEngine {
             return;
         }
         this._enter(candidate, stake, tag);
+    }
+
+    /** The contract types the ticked families allow, or null when no restriction is set. */
+    private _allowedTypes(): Set<string> | null {
+        const keys = this.config.contract_families;
+        if (!keys) return null;
+        return new Set(CONTRACT_FAMILIES.filter(f => keys.includes(f.key)).flatMap(f => f.types));
+    }
+
+    /**
+     * Hook rules, contract rotation: the candidate for the NEXT paper test. With rotation on (default) and more than one family
+     * ticked, it is the next ticked family after the one just traded, on the market with the best signal for it (or the same
+     * market when there is none). Rise/Fall and Only Ups/Downs take the side the 1-tick chart confirms (higher-high -> Rise /
+     * Only Ups, lower-low -> Fall / Only Downs); with no trend that family is skipped this round. Null = keep the same contract.
+     */
+    private async _nextHookCandidate(prev: TCandidate | null): Promise<TCandidate | null> {
+        const keys = this.config.contract_families;
+        const families = CONTRACT_FAMILIES.filter(f => !keys || keys.includes(f.key));
+        if (!families.length) return null;
+        if (prev && (!keys || this.config.rotate_contracts === false || families.length < 2)) return null;
+        const start = prev ? families.findIndex(f => f.types.includes(prev.contract_type)) : -1;
+        for (let i = 1; i <= families.length; i++) {
+            const family = families[(start + i + families.length) % families.length];
+            const candidate = await this._candidateForFamily(family, prev?.symbol);
+            if (!this.running) return null;
+            if (candidate) return candidate;
+        }
+        return null;
+    }
+
+    private async _candidateForFamily(family: (typeof CONTRACT_FAMILIES)[number], prefer_symbol?: string): Promise<TCandidate | null> {
+        const snapshots = this.getSnapshots();
+        const symbols = Object.keys(snapshots).filter(sym => family.types.some(t => tradeTicks(sym, t) !== null));
+        if (!symbols.length) return null;
+        let best_real: TCandidate | null = null;
+        for (const sym of symbols) {
+            for (const sig of snapshots[sym].signals) {
+                if (family.types.includes(sig.contract_type) && (!best_real || sig.confidence > best_real.confidence)) best_real = { symbol: sym, ...sig };
+            }
+        }
+        const symbol = best_real?.symbol ?? (prefer_symbol && symbols.includes(prefer_symbol) ? prefer_symbol : symbols[0]);
+        let type: string = best_real?.contract_type ?? family.types[0];
+        if (family.trend) {
+            let trend: string = 'none';
+            try {
+                const res = await this.connection.send({ ticks_history: symbol, count: TREND_WINDOW, end: 'latest', style: 'ticks' });
+                trend = detectTrend(((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite));
+            } catch {
+                trend = 'none';
+            }
+            if (trend === 'none') return null; // no confirmed trend: this family waits for its next turn
+            type = trend === 'bullish' ? family.types[0] : family.types[1];
+        }
+        const ticks = tradeTicks(symbol, type);
+        if (ticks === null) return null;
+        if (best_real && best_real.contract_type === type) return { ...best_real, symbol, duration_ticks: ticks };
+        const kind = type.startsWith('DIGIT') ? 'digits' : type === 'ONETOUCH' || type === 'NOTOUCH' ? 'touch' : type.startsWith('RUN') ? 'only_up_down' : 'rise_fall';
+        return {
+            symbol,
+            family: kind,
+            contract_type: type,
+            duration_ticks: ticks,
+            prediction: type === 'DIGITOVER' ? 4 : type === 'DIGITUNDER' ? 5 : type === 'ONETOUCH' || type === 'NOTOUCH' ? TOUCH_BARRIER : undefined,
+            label: OPPOSITE_LABEL[type] ?? type,
+            confidence: 1,
+            basis: 'Contract rotation: the next ticked contract gets its paper test.',
+        } as TCandidate;
+    }
+
+    /** Hook rules: after a live trade, paper-test the next contract (rotation) or the same one again. */
+    private _hookNext(candidate: TCandidate, stake: number, tag?: TAutoPilotEvent['tag']) {
+        this.busy = true;
+        void this._nextHookCandidate(candidate).then(next => {
+            this.busy = false;
+            if (!this.running) return;
+            this._enter(next ?? candidate, stake, tag);
+        });
     }
 
     /** Rise/Fall: bought only once the 1-tick chart shows a higher high (Rise) or a lower low (Fall). */
@@ -1023,7 +1136,7 @@ export class AutoPilotEngine {
                 this.hook_pending = hook; // hook rules: even after a live win, the next live trade is paper-tested first
                 // Hook rules: the same contract on the same market is tested on paper again, then bought live if the paper trade wins.
                 const next = (next_stake: number, tag?: TAutoPilotEvent['tag']) =>
-                    hook ? this._enter(candidate, next_stake, tag) : this._findAndEnter(next_stake, tag);
+                    hook ? this._hookNext(candidate, next_stake, tag) : this._findAndEnter(next_stake, tag);
                 if (mode !== 'reverse') {
                     this.step = 1;
                     next(base_stake);
@@ -1085,7 +1198,7 @@ export class AutoPilotEngine {
                 this.step = 1;
                 if (switchTo(base_stake)) return;
                 if (hook_rules) {
-                    this._enter(candidate, base_stake); // test the market that just lost on paper first
+                    this._hookNext(candidate, base_stake); // paper-test first (the next ticked contract, or the same one)
                     return;
                 }
                 this._findAndEnter(base_stake);
@@ -1105,8 +1218,12 @@ export class AutoPilotEngine {
             }
             this.step += 1;
             if (switchTo(next_stake)) return;
-            if (mode === 'martingale' || hook_rules) {
-                this._enter(candidate, next_stake); // same contract, same side, bigger stake (hook rules: paper-tested first)
+            if (hook_rules) {
+                this._hookNext(candidate, next_stake);
+                return;
+            }
+            if (mode === 'martingale') {
+                this._enter(candidate, next_stake); // same contract, same side, bigger stake
                 return;
             }
             const flip = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);

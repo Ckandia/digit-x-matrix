@@ -16,6 +16,8 @@ export type TBulkContractType =
     | 'LOWER'
     | 'ONETOUCH'
     | 'NOTOUCH'
+    | 'RUNHIGH'
+    | 'RUNLOW'
     | 'MULTUP'
     | 'MULTDOWN';
 

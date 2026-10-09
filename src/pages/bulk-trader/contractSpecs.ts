@@ -3,7 +3,7 @@
 // The strategy engine and the UI both read from here, so changing a rule here changes it everywhere.
 import { TBulkContractType } from './types';
 
-export type TBulkFamily = 'digit' | 'rise_fall' | 'higher_lower' | 'touch' | 'multiplier';
+export type TBulkFamily = 'digit' | 'rise_fall' | 'higher_lower' | 'touch' | 'multiplier' | 'only_up_down';
 export type TTrendSide = 'bullish' | 'bearish';
 
 export type TBulkSpec = {
@@ -113,6 +113,26 @@ const SPEC_LIST: TBulkSpec[] = [
         default_barrier_offset: 0.5,
     },
     {
+        key: 'RUNHIGH',
+        api_type: 'RUNHIGH',
+        label: 'Only Ups',
+        group: 'Only Ups / Only Downs',
+        family: 'only_up_down',
+        needs_prediction: false,
+        ticks: [2, 3, 4, 5], // Deriv sells Only Ups / Downs from 2 to 5 ticks; the shortest first
+        trend: 'bullish', // every tick must rise, so wait for a higher-high on the 1-tick chart first
+    },
+    {
+        key: 'RUNLOW',
+        api_type: 'RUNLOW',
+        label: 'Only Downs',
+        group: 'Only Ups / Only Downs',
+        family: 'only_up_down',
+        needs_prediction: false,
+        ticks: [2, 3, 4, 5],
+        trend: 'bearish',
+    },
+    {
         key: 'MULTUP',
         api_type: 'MULTUP',
         label: 'Multiplier Up',
@@ -159,6 +179,8 @@ export const SWITCH_PARTNER: Partial<Record<TBulkContractType, TBulkContractType
     PUT: 'OVER4',
     HIGHER: 'UNDER5',
     LOWER: 'OVER4',
+    RUNHIGH: 'RUNLOW',
+    RUNLOW: 'RUNHIGH',
     OVER4: 'UNDER5',
     UNDER5: 'OVER4',
     MULTUP: 'MULTDOWN',

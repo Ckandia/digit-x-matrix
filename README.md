@@ -1,3 +1,18 @@
+# Contract picker, rotation and Only Ups/Downs (October 2026)
+
+- **AI Trader tab, new "Contracts the AI may trade" list** (all ticked by default): Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs.
+  At least one must stay ticked. Before this, the AI only started on whatever had the strongest signal, which was almost always a digit contract
+  (the 1-tick-first rule left Touch/No Touch out, and Only Ups/Downs had no signal at all).
+- **Rotate** checkbox (default on): after every live trade the next paper test is on the next ticked contract. Rise/Fall and Only Ups/Downs take the side
+  the 1-tick chart confirms (higher-high -> Rise / Only Ups, lower-low -> Fall / Only Downs); with no trend that contract is skipped for that round.
+  Off = the AI stays on the contract it just traded. A ticked contract with no live signal can still be paper-tested.
+- Ticking Touch/No Touch or Only Ups/Downs lifts the 1-tick-first rule, so they can be chosen on purpose.
+- Only Ups / Only Downs are now trend contracts like Rise/Fall (they wait for the higher-high / lower-low).
+- **Bulk Trades tab:** Only Ups and Only Downs added to the contract list (2 ticks, tries up to 5 if Deriv refuses; trend-gated; they switch with each other).
+- The virtual-hook rules from v4 are unchanged (paper trade before every live trade: win -> same, loss -> opposite).
+- Verified: 27 tests in `virtual-hook.spec.ts`, 24 in `bulk-contracts.spec.ts`, 12 in `ai-trader-rules.spec.ts`, 2 in `paper-stats.spec.ts` pass in a stand-alone
+  runner. The full `tsc`, `npm run build` and the whole jest suite were NOT run here: run `npm install && npx tsc --noEmit && npx jest`. Not tested on live Deriv.
+
 # Virtual hook v4: one paper trade before EVERY live trade (October 2026)
 
 On by default (AI Trader tab, "Virtual hook" checkbox).

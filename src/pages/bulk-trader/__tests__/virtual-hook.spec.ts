@@ -12,6 +12,7 @@ class FakeConnection {
     private n = 1;
     private buys = 0;
     accountInfo = { balance: 100000, loginid: 'VRTC1', currency: 'USD' };
+    history: number[] = [];
     onFatalError: any;
     onReconnecting: any;
     onReconnect: any;
@@ -19,7 +20,7 @@ class FakeConnection {
         this.sent.push(req);
         if (req.proposal) return { proposal: { ask_price: 1, payout: 1.9 } };
         if (req.buy) return { buy: { contract_id: `c${++this.buys}` } };
-        if (req.ticks_history) return { history: { prices: [], times: [] } };
+        if (req.ticks_history) return { history: { prices: this.history, times: [] } };
         return {};
     }
     subscribe(req: any, cb: any) {
@@ -52,6 +53,8 @@ class FakeConnection {
     buys_ = () => this.sent.filter(r => r.buy);
 }
 
+const BULL = [100, 101, 102, 101, 100, 101, 103, 104, 103, 102, 103, 105, 107, 105, 104]; // a higher-high on the 1-tick chart
+const BEAR = BULL.map(x => 200 - x); // a lower-low
 const OVER_WIN = 100.08; // last digit 8: Over 4 wins, Even wins
 const OVER_LOSS = 100.03; // last digit 3: Over 4 loses, Even loses
 const EVEN_WIN = 100.02; // last digit 2: Even wins
@@ -344,8 +347,10 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
 
     it('rule 4: Only Ups <-> Only Downs are opposites (paper Only Ups loses -> Only Downs live, 2 ticks)', async () => {
         const h = hookMake({}, 'R_UH8', 'RUNHIGH');
+        h.conn.history = BULL; // Only Ups waits for a higher-high on the 1-tick chart
         await startOnPaper(h);
         expect(virtualEvents(h, 'start')[0]).toMatchObject({ contract_type: 'RUNHIGH' });
+        h.conn.history = BEAR; // by the time the opposite is bought, the chart shows a lower-low (Only Downs needs it)
         h.conn.ticks(h.symbol, [100, 100, 99]); // first tick after entry falls: Only Ups loses
         await wait(60);
         expect(h.conn.buys_()).toHaveLength(1);
@@ -355,6 +360,7 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
 
     it('Only Ups: a paper win (every tick rises) buys Only Ups live', async () => {
         const h = hookMake({}, 'R_UH9', 'RUNHIGH');
+        h.conn.history = BULL;
         await startOnPaper(h);
         h.conn.ticks(h.symbol, [100, 100, 101]);
         await wait(60);
@@ -390,5 +396,81 @@ describe('paperOutcome: Only Ups / Only Downs', () => {
         expect(paperOutcome('RUNLOW', 100, [99, 98], 2, 2)).toBe(true);
         expect(paperOutcome('RUNLOW', 100, [99, 99], 2, 2)).toBe(false);
         expect(paperOutcome('RUNLOW', 100, [101], 2, 2)).toBe(false);
+    });
+});
+
+
+describe('AI Trader contract picker and rotation', () => {
+    const FAMS_ALL = ['even_odd', 'over_under', 'rise_fall', 'touch', 'only_ups_downs'];
+    const mk = (cfg: Partial<TAutoPilotConfig>, symbol: string, signal = 'DIGITEVEN') => make({ virtual_mode: undefined, ...cfg }, undefined, symbol, signal);
+    const lastStart = (h: ReturnType<typeof make>) => virtualEvents(h, 'start').slice(-1)[0];
+
+    it('after every live trade the next paper test is on the next ticked contract (Even -> Over 4 -> Touch, Rise/Fall skipped without a trend)', async () => {
+        const h = mk({ contract_families: FAMS_ALL, rotate_contracts: true }, 'R_RT1');
+        h.engine.start();
+        await wait(80);
+        expect(lastStart(h)).toMatchObject({ contract_type: 'DIGITEVEN' });
+        h.conn.paper(h.symbol, EVEN_WIN); // paper win -> live Even
+        await wait(80);
+        expect(h.conn.buys_()).toHaveLength(1);
+        h.conn.settle('c1', 1);
+        await wait(120);
+        expect(lastStart(h)).toMatchObject({ contract_type: 'DIGITOVER' }); // next family: Over 4 / Under 5
+        h.conn.paper(h.symbol, OVER_WIN); // digit 8: Over 4 wins -> live Over 4
+        await wait(80);
+        expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'DIGITOVER', barrier: '4' });
+        h.conn.settle('c2', 1);
+        await wait(150);
+        expect(lastStart(h)).toMatchObject({ contract_type: 'ONETOUCH' }); // Rise/Fall had no confirmed trend, so it was skipped
+        h.engine.stop();
+    });
+
+    it('Rise/Fall and Only Ups/Downs take the side the 1-tick chart confirms', async () => {
+        const up = mk({ contract_families: ['rise_fall', 'only_ups_downs'], rotate_contracts: true }, 'R_RT2');
+        up.conn.history = BULL;
+        up.engine.start();
+        await wait(120);
+        expect(lastStart(up).contract_type).toBe('CALL'); // higher-high -> Rise
+        up.engine.stop();
+
+        const down = mk({ contract_families: ['only_ups_downs'], rotate_contracts: true }, 'R_RT3');
+        down.conn.history = BEAR;
+        down.engine.start();
+        await wait(120);
+        expect(lastStart(down).contract_type).toBe('RUNLOW'); // lower-low -> Only Downs
+        down.engine.stop();
+    });
+
+    it('only the ticked families are traded: with Even/Odd alone it never leaves it', async () => {
+        const h = mk({ contract_families: ['even_odd'], rotate_contracts: true }, 'R_RT4');
+        h.engine.start();
+        await wait(80);
+        h.conn.paper(h.symbol, EVEN_WIN);
+        await wait(80);
+        h.conn.settle('c1', 1);
+        await wait(120);
+        expect(lastStart(h)).toMatchObject({ contract_type: 'DIGITEVEN' });
+        h.engine.stop();
+    });
+
+    it('rotation off: the AI stays on the contract it just traded', async () => {
+        const h = mk({ contract_families: FAMS_ALL, rotate_contracts: false }, 'R_RT5');
+        h.engine.start();
+        await wait(80);
+        h.conn.paper(h.symbol, EVEN_WIN);
+        await wait(80);
+        h.conn.settle('c1', 1);
+        await wait(120);
+        expect(lastStart(h)).toMatchObject({ contract_type: 'DIGITEVEN' });
+        h.engine.stop();
+    });
+
+    it('a ticked contract with no live signal can still be paper-tested (Touch only, signals only for Even)', async () => {
+        const h = mk({ contract_families: ['touch'], rotate_contracts: true }, 'R_RT6');
+        h.engine.start();
+        await wait(120);
+        expect(lastStart(h).contract_type).toBe('ONETOUCH');
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
     });
 });

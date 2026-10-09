@@ -8,6 +8,8 @@ import { aiRuntime, aiSet, holdSignals, releaseRun, useAiRuntime, watchAccount }
 import {
     AutoPilotEngine,
     buildConfigFromPreset,
+    ALL_FAMILY_KEYS,
+    CONTRACT_FAMILIES,
     DEFAULT_VIRTUAL_CONFIRMATIONS,
     MAX_VIRTUAL_CONFIRMATIONS,
     RISK_PRESETS,
@@ -558,6 +560,40 @@ const AiAgentPanel = ({
                             'Virtual hook: before EVERY live trade the AI makes one paper trade (no money). A paper win buys the SAME contract for real; a paper loss buys the OPPOSITE (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs). After each live trade it paper-tests again. While it is on, auto flip and contract switching are off.'
                         )}
                     </label>
+                    <div className='ai-agent-panel__hint'>
+                        <strong>{localize('Contracts the AI may trade')}</strong>
+                        {CONTRACT_FAMILIES.map(family => {
+                            const ticked = (config?.contract_families ?? ALL_FAMILY_KEYS).includes(family.key);
+                            return (
+                                <label key={family.key} style={{ display: 'block' }}>
+                                    <input
+                                        type='checkbox'
+                                        checked={ticked}
+                                        disabled={!config || status === 'connecting'}
+                                        onChange={e => {
+                                            if (!config) return;
+                                            const current = config.contract_families ?? ALL_FAMILY_KEYS;
+                                            const next = e.target.checked ? [...current, family.key] : current.filter(k => k !== family.key);
+                                            if (next.length === 0) return; // at least one contract must stay ticked
+                                            setConfig({ ...config, contract_families: Array.from(new Set(next)) });
+                                        }}
+                                    />{' '}
+                                    {localize(family.label)}
+                                </label>
+                            );
+                        })}
+                        <label style={{ display: 'block' }}>
+                            <input
+                                type='checkbox'
+                                checked={config?.rotate_contracts !== false}
+                                disabled={!config || status === 'connecting'}
+                                onChange={e => config && setConfig({ ...config, rotate_contracts: e.target.checked })}
+                            />{' '}
+                            {localize(
+                                'Rotate: after every live trade the next paper test is on the next ticked contract, so each one gets its turn. Off = the AI stays on the contract it just traded. Rise/Fall and Only Ups/Downs wait for a higher-high / lower-low on the 1-tick chart.'
+                            )}
+                        </label>
+                    </div>
                     <label className='ai-agent-panel__hint'>
                         <input
                             type='checkbox'

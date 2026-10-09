@@ -108,9 +108,9 @@ describe('contract specs', () => {
         expect(tickCandidates(SPECS.ONETOUCH, 1)).toEqual([5, 10]);
         expect(relativeBarrier(SPECS.NOTOUCH)).toBe('+0.5');
     });
-    it('Rise/Fall, Higher/Lower and Multipliers are trend contracts; the rest are not', () => {
+    it('Rise/Fall, Higher/Lower, Only Ups/Downs and Multipliers are trend contracts; the rest are not', () => {
         const trend = Object.values(SPECS).filter(s => s.trend).map(s => s.key).sort();
-        expect(trend).toEqual(['CALL', 'HIGHER', 'LOWER', 'MULTDOWN', 'MULTUP', 'PUT']);
+        expect(trend).toEqual(['CALL', 'HIGHER', 'LOWER', 'MULTDOWN', 'MULTUP', 'PUT', 'RUNHIGH', 'RUNLOW']);
     });
     it('picks the multiplier closest to 100x from contracts_for', () => {
         const reply = { contracts_for: { available: [{ contract_type: 'MULTUP', multiplier_range: [40, 200, 500] }] } };
@@ -244,5 +244,15 @@ describe('StrategyEngine', () => {
         await flush();
         engine.stop();
         expect(conn.sent.some(r => r.sell)).toBe(false);
+    });
+});
+
+describe('Only Ups / Only Downs on the Bulk Trader tab', () => {
+    it('are listed, run 2-5 ticks with no barrier, need a trend, and switch with each other', () => {
+        expect(SPECS.RUNHIGH).toMatchObject({ api_type: 'RUNHIGH', label: 'Only Ups', trend: 'bullish' });
+        expect(SPECS.RUNLOW).toMatchObject({ api_type: 'RUNLOW', label: 'Only Downs', trend: 'bearish' });
+        expect(tickCandidates(SPECS.RUNHIGH, 1)).toEqual([2, 3, 4, 5]);
+        expect(SWITCH_PARTNER.RUNHIGH).toBe('RUNLOW');
+        expect(nextAfterLoss('RUNHIGH', 'RUNHIGH')).toBe('RUNLOW');
     });
 });
