@@ -557,7 +557,7 @@ const AiAgentPanel = ({
                             onChange={e => config && setConfig({ ...config, virtual_hook: e.target.checked })}
                         />{' '}
                         {localize(
-                            'Virtual hook: before EVERY live trade the AI makes one paper trade (no money). A paper win buys the SAME contract for real; a paper loss buys the OPPOSITE (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs). After each live trade it paper-tests again. While it is on, auto flip and contract switching are off.'
+                            'Virtual hook: before EVERY live trade the AI makes one paper trade (no money). A paper win buys the SAME contract for real. Even/Odd follows the hook: after a paper loss nothing is bought, it keeps paper-testing until it wins. Other contracts buy the OPPOSITE after a paper loss (Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs). After each live trade it paper-tests again. While it is on, auto flip and contract switching are off.'
                         )}
                     </label>
                     <div className='ai-agent-panel__hint'>

@@ -1,3 +1,11 @@
+# Virtual hook: Even/Odd follows the hook (October 2026)
+
+- In the active hook mode, **Even/Odd now trades what the virtual hook shows**: a paper WIN on Even buys Even live (Odd buys Odd). A paper LOSS no longer buys the opposite: nothing is bought, and the same contract keeps paper-testing until it wins, then it goes live.
+- After 25 paper losses in a row the AI picks a fresh contract and paper-tests it (it never buys live unproven).
+- Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Downs still buy the OPPOSITE after a paper loss. `opposite` and `confirm` modes are unchanged.
+- Honest note: Even/Odd digits are independent tick to tick, so a paper result does not predict the next live result; this rule mainly reduces the number of live trades.
+- Dependencies: `package-lock.json` is out of sync with `package.json` (`npm ci` fails); use `npm install`.
+
 # Virtual hook: "opposite" mode (October 2026)
 
 - **Update:** the two-paper-wins rule is SUSPENDED. Opposite mode is the only active rule: no dropdown, no confirmations field, and the engine defaults to it. The old rule remains in code (`virtual_mode: 'confirm'`) and tests, not selectable in the UI.

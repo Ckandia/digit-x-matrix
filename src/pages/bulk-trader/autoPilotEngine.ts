@@ -69,6 +69,7 @@ export type TAutoPilotConfig = {
      * What the hook does with its paper results.
      * 'hook' (default, the active rule): the AI starts on paper and every real loss sends it back to paper.
      *   - a paper trade LOSES  -> the OPPOSITE contract is bought for real (Even<->Odd, Over 4<->Under 5, Rise<->Fall, Only Ups<->Only Downs, ...)
+     *   - EXCEPT Even/Odd, which follows the hook: a paper loss buys nothing live, the same contract stays on paper until it wins
      *   - a paper WIN -> the SAME contract is bought for real
      *   - ONE paper trade runs before EVERY live trade (after live wins and losses alike). No auto flip, no switching to other contracts.
      * 'opposite' (older rule): the contract is paper-traded; the moment a paper trade LOSES, the OPPOSITE contract (Even<->Odd,
@@ -102,6 +103,9 @@ export const DEFAULT_VIRTUAL_CONFIRMATIONS = 2;
 export const MAX_VIRTUAL_CONFIRMATIONS = 5;
 /** Opposite mode: if this many paper trades in a row win, stop waiting for a loss and pick a fresh contract. */
 export const MAX_OPPOSITE_PAPER_WINS = 25;
+/** Hook mode, Even/Odd: the live trade follows the paper result (paper win -> same contract live; paper loss -> keep paper trading). */
+const FOLLOW_HOOK_TYPES = new Set(['DIGITEVEN', 'DIGITODD']);
+const MAX_FOLLOW_PAPER_LOSSES = 25;
 
 /** Turns a risk preset + live balance into the absolute numbers shown/edited
  *  in the UI. Editing a field in the UI just overwrites one of these — the
@@ -842,7 +846,7 @@ export class AutoPilotEngine {
         this.hooks?.onLog?.(
             'info',
             hook_mode
-                ? `Virtual hook: ${first.label} on ${first.symbol} is paper-traded first. A paper win buys ${first.label} for real; a paper loss buys the opposite (stake ${resume_stake}).`
+                ? `Virtual hook: ${first.label} on ${first.symbol} is paper-traded first. A paper win buys ${first.label} for real; a paper loss buys the opposite (Even/Odd instead stays on paper until it wins) (stake ${resume_stake}).`
                 : opposite_mode
                 ? `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} is paper-traded; when a paper trade loses, the opposite contract is bought for real at stake ${resume_stake}.`
                 : `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} must win ${needed} paper trade${needed === 1 ? '' : 's'} in a row before it is traded for real again at stake ${resume_stake}.`
@@ -905,6 +909,17 @@ export class AutoPilotEngine {
                 result: result ? 'win' : 'loss',
             });
             if (hook_mode) {
+                if (!result && FOLLOW_HOOK_TYPES.has(candidate.contract_type)) {
+                    // Even/Odd follows the hook: a paper loss buys NOTHING live (and never the opposite). The same contract stays on paper
+                    // until it wins, then it is traded live. After too many paper losses in a row a fresh contract is picked and paper-tested.
+                    if (losses >= MAX_FOLLOW_PAPER_LOSSES) {
+                        this.hooks?.onLog?.('info', `Virtual hook: ${candidate.label} lost ${losses} paper trades in a row; picking a fresh contract to paper-test.`);
+                        this.hook_pending = true;
+                        break;
+                    }
+                    this.hooks?.onLog?.('info', `Virtual loss on ${candidate.label} (${candidate.symbol}): staying on paper until it wins, then trading it for real.`);
+                    continue;
+                }
                 if (!result) {
                     // Rule 1: the paper trade lost, so the opposite contract is bought for real on the same market.
                     confirmed = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);

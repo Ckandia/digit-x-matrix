@@ -277,13 +277,47 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
         h.engine.stop();
     });
 
-    it('rule 1: a paper loss buys the OPPOSITE contract live on the same market (Even lost -> Odd)', async () => {
+    it('rule 1: Even/Odd follows the hook: a paper loss buys NOTHING (no Odd), it stays on paper until Even wins, then Even is live', async () => {
         const h = hookMake({}, 'R_UH1');
         await startOnPaper(h);
         h.conn.paper(h.symbol, OVER_LOSS); // last digit 3: Even loses on paper
         await wait(60);
+        expect(h.conn.buys_()).toHaveLength(0);
+        expect(virtualEvents(h, 'paper').pop()).toMatchObject({ contract_type: 'DIGITEVEN' });
+        h.conn.paper(h.symbol, OVER_LOSS); // loses again: still nothing live
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.conn.paper(h.symbol, EVEN_WIN); // paper win -> the same contract live
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(1);
+        expect(lastBuy(h)).toMatchObject({ contract_type: 'DIGITEVEN', underlying_symbol: h.symbol });
+        h.engine.stop();
+    });
+
+    it('rule 1b: Odd follows the hook too (paper Odd wins on an odd digit -> live Odd; paper loss -> nothing live)', async () => {
+        const h = hookMake({}, 'R_UH1B', 'DIGITODD');
+        await startOnPaper(h);
+        expect(virtualEvents(h, 'start')[0]).toMatchObject({ contract_type: 'DIGITODD' });
+        h.conn.paper(h.symbol, EVEN_WIN); // digit 2: Odd loses on paper
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.conn.paper(h.symbol, OVER_LOSS); // digit 3: Odd wins on paper
+        await wait(60);
         expect(h.conn.buys_()).toHaveLength(1);
         expect(lastBuy(h)).toMatchObject({ contract_type: 'DIGITODD', underlying_symbol: h.symbol });
+        h.engine.stop();
+    });
+
+    it('Even/Odd cap: after 25 paper losses in a row it picks a fresh contract and paper-tests it, never buying live unproven', async () => {
+        const h = hookMake({}, 'R_UH1C');
+        await startOnPaper(h);
+        for (let i = 0; i < 25; i++) {
+            h.conn.paper(h.symbol, OVER_LOSS);
+            await wait(30);
+        }
+        await wait(100);
+        expect(h.conn.buys_()).toHaveLength(0);
+        expect(virtualEvents(h, 'start').length).toBeGreaterThanOrEqual(2); // a new paper test began
         h.engine.stop();
     });
 
@@ -301,13 +335,13 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
     it('rule 3: a live loss goes back to paper: nothing is bought, and there is NO flip or switch to another contract', async () => {
         const h = hookMake({ auto_flip: true }, 'R_UH4');
         await startOnPaper(h);
-        h.conn.paper(h.symbol, OVER_LOSS); // -> live Odd
+        h.conn.paper(h.symbol, EVEN_WIN); // -> live Even
         await wait(60);
-        h.conn.settle('c1', -1); // Odd loses live
+        h.conn.settle('c1', -1); // Even loses live
         await wait(60);
         expect(h.conn.buys_()).toHaveLength(1); // paused again, nothing new bought
         expect(virtualEvents(h, 'start')).toHaveLength(2);
-        expect(virtualEvents(h, 'start')[1]).toMatchObject({ contract_type: 'DIGITODD' }); // the market that just lost is the one tested
+        expect(virtualEvents(h, 'start')[1]).toMatchObject({ contract_type: 'DIGITEVEN' }); // the market that just lost is the one tested
         h.engine.stop();
     });
 
@@ -325,12 +359,15 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
         await wait(60);
         expect(h.conn.buys_()).toHaveLength(2);
         expect(lastBuy(h).contract_type).toBe('DIGITEVEN');
-        h.conn.settle('c2', -1); // live loss -> paper again; this time the paper trade loses -> opposite live
+        h.conn.settle('c2', -1); // live loss -> paper again; this time the paper trade loses -> Even/Odd buys nothing
         await wait(60);
         h.conn.paper(h.symbol, OVER_LOSS);
         await wait(60);
+        expect(h.conn.buys_()).toHaveLength(2);
+        h.conn.paper(h.symbol, EVEN_WIN); // paper win -> Even live again
+        await wait(60);
         expect(h.conn.buys_()).toHaveLength(3);
-        expect(lastBuy(h).contract_type).toBe('DIGITODD');
+        expect(lastBuy(h).contract_type).toBe('DIGITEVEN');
         h.engine.stop();
     });
 
