@@ -69,8 +69,8 @@ export type TAutoPilotConfig = {
      * What the hook does with its paper results.
      * 'hook' (default, the active rule): the AI starts on paper and every real loss sends it back to paper.
      *   - a paper trade LOSES  -> the OPPOSITE contract is bought for real (Even<->Odd, Over 4<->Under 5, Rise<->Fall, Only Ups<->Only Downs, ...)
-     *   - `virtual_confirmations` (2) paper wins in a row -> the SAME contract is bought for real
-     *   - while the live trades keep winning it keeps trading live; the first live loss goes back to paper. No auto flip, no switching to other contracts.
+     *   - a paper WIN -> the SAME contract is bought for real
+     *   - ONE paper trade runs before EVERY live trade (after live wins and losses alike). No auto flip, no switching to other contracts.
      * 'opposite' (older rule): the contract is paper-traded; the moment a paper trade LOSES, the OPPOSITE contract (Even<->Odd,
      * Over 4<->Under 5, Rise<->Fall, Touch<->No Touch) is bought for real on the same market. If that real trade loses, the
      * hook starts again, and so on. Paper wins just keep paper-trading.
@@ -671,14 +671,15 @@ export class AutoPilotEngine {
      */
     private async _virtualHook(first: TCandidate, resume_stake: number) {
         this.busy = true; // nothing else may place a real trade meanwhile
-        const needed = Math.min(MAX_VIRTUAL_CONFIRMATIONS, Math.max(1, Math.floor(this.config.virtual_confirmations ?? DEFAULT_VIRTUAL_CONFIRMATIONS)));
         const hook_mode = this._hookMode();
+        // Hook rules: ONE paper trade before every live trade (win -> same contract live, loss -> opposite live).
+        const needed = hook_mode ? 1 : Math.min(MAX_VIRTUAL_CONFIRMATIONS, Math.max(1, Math.floor(this.config.virtual_confirmations ?? DEFAULT_VIRTUAL_CONFIRMATIONS)));
         const opposite_mode = (this.config.virtual_mode ?? 'hook') === 'opposite';
         let via_opposite = false; // the live trade is the OPPOSITE of the paper contract (so a trend contract may wait for its trend)
         this.hooks?.onLog?.(
             'info',
             hook_mode
-                ? `Virtual hook: ${first.label} on ${first.symbol} is paper-traded. A paper loss buys the opposite for real; ${needed} paper win${needed === 1 ? '' : 's'} in a row buys ${first.label} for real (stake ${resume_stake}).`
+                ? `Virtual hook: ${first.label} on ${first.symbol} is paper-traded first. A paper win buys ${first.label} for real; a paper loss buys the opposite (stake ${resume_stake}).`
                 : opposite_mode
                 ? `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} is paper-traded; when a paper trade loses, the opposite contract is bought for real at stake ${resume_stake}.`
                 : `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} must win ${needed} paper trade${needed === 1 ? '' : 's'} in a row before it is traded for real again at stake ${resume_stake}.`
@@ -755,7 +756,6 @@ export class AutoPilotEngine {
                     this.hooks?.onLog?.('success', `Virtual hook: ${candidate.label} on ${candidate.symbol} won ${wins} paper trade${wins === 1 ? '' : 's'} in a row: trading it for real now.`);
                     break;
                 }
-                this.hooks?.onLog?.('info', `Virtual win ${wins}/${needed} on ${candidate.label} (${candidate.symbol}); one more paper win before it goes live (a paper loss buys the opposite instead).`);
                 continue;
             }
             if (opposite_mode) {
@@ -1019,9 +1019,9 @@ export class AutoPilotEngine {
             if (won) {
                 this.consecutive_losses = 0;
                 this.flip_origin = null; // a win ends any auto-flip sequence: next entry is a fresh pick
-                this.hook_pending = false;
                 const hook = this._hookMode();
-                // Hook rules: while the live trades keep winning, the same contract on the same market keeps trading.
+                this.hook_pending = hook; // hook rules: even after a live win, the next live trade is paper-tested first
+                // Hook rules: the same contract on the same market is tested on paper again, then bought live if the paper trade wins.
                 const next = (next_stake: number, tag?: TAutoPilotEvent['tag']) =>
                     hook ? this._enter(candidate, next_stake, tag) : this._findAndEnter(next_stake, tag);
                 if (mode !== 'reverse') {

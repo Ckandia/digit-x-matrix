@@ -92,7 +92,7 @@ const loseFirstTrade = async (h: ReturnType<typeof make>) => {
 const virtualEvents = (h: ReturnType<typeof make>, state: string) => h.events.filter(e => e.phase === 'virtual' && e.virtual_state === state);
 
 describe('virtual hook: paper wins in a row before going live', () => {
-    it('pauses real trading after a loss and asks for two paper wins by default', async () => {
+    it('pauses real trading after a loss and asks for two paper wins by default (older confirm mode)', async () => {
         const h = make();
         await loseFirstTrade(h);
         const start = virtualEvents(h, 'start')[0];
@@ -251,7 +251,7 @@ describe('virtual hook: opposite mode (a paper loss buys the opposite for real)'
 });
 
 
-describe('virtual hook: the unified rules (the default)', () => {
+describe('virtual hook: paper trade before EVERY live trade (the default)', () => {
     const lastBuy = (h: ReturnType<typeof make>) => h.conn.buys_()[h.conn.buys_().length - 1].parameters;
     const startOnPaper = async (h: ReturnType<typeof make>) => {
         h.engine.start();
@@ -265,7 +265,7 @@ describe('virtual hook: the unified rules (the default)', () => {
         await startOnPaper(h);
         expect(h.conn.buys_()).toHaveLength(0);
         expect(virtualEvents(h, 'start')).toHaveLength(1);
-        expect(virtualEvents(h, 'start')[0]).toMatchObject({ contract_type: 'DIGITEVEN', virtual_needed: 2 });
+        expect(virtualEvents(h, 'start')[0]).toMatchObject({ contract_type: 'DIGITEVEN', virtual_needed: 1 });
         h.engine.stop();
     });
 
@@ -279,28 +279,14 @@ describe('virtual hook: the unified rules (the default)', () => {
         h.engine.stop();
     });
 
-    it('rule 2: two paper wins in a row buy the SAME contract live, one is not enough', async () => {
+    it('rule 2: ONE paper win buys the SAME contract live', async () => {
         const h = hookMake({}, 'R_UH2');
         await startOnPaper(h);
-        h.conn.paper(h.symbol, EVEN_WIN);
-        await wait(60);
-        expect(h.conn.buys_()).toHaveLength(0); // 1 of 2: still paper
+        expect(h.conn.buys_()).toHaveLength(0);
         h.conn.paper(h.symbol, EVEN_WIN);
         await wait(60);
         expect(h.conn.buys_()).toHaveLength(1);
         expect(lastBuy(h)).toMatchObject({ contract_type: 'DIGITEVEN', underlying_symbol: h.symbol });
-        h.engine.stop();
-    });
-
-    it('a paper loss after one paper win still buys the opposite (the win count does not carry on)', async () => {
-        const h = hookMake({}, 'R_UH3');
-        await startOnPaper(h);
-        h.conn.paper(h.symbol, EVEN_WIN);
-        await wait(60);
-        h.conn.paper(h.symbol, OVER_LOSS);
-        await wait(60);
-        expect(h.conn.buys_()).toHaveLength(1);
-        expect(lastBuy(h).contract_type).toBe('DIGITODD');
         h.engine.stop();
     });
 
@@ -317,18 +303,26 @@ describe('virtual hook: the unified rules (the default)', () => {
         h.engine.stop();
     });
 
-    it('a live win keeps trading the same contract live (no new paper test)', async () => {
+    it('a live WIN also goes back to paper first: the next live trade is only bought after another paper result', async () => {
         const h = hookMake({}, 'R_UH5');
         await startOnPaper(h);
-        h.conn.paper(h.symbol, EVEN_WIN);
+        h.conn.paper(h.symbol, EVEN_WIN); // paper win -> live Even
         await wait(60);
-        h.conn.paper(h.symbol, EVEN_WIN); // -> live Even
+        h.conn.settle('c1', 1); // live win
         await wait(60);
-        h.conn.settle('c1', 1);
+        expect(h.conn.buys_()).toHaveLength(1); // nothing new live yet
+        expect(virtualEvents(h, 'start')).toHaveLength(2);
+        expect(virtualEvents(h, 'start')[1]).toMatchObject({ contract_type: 'DIGITEVEN' });
+        h.conn.paper(h.symbol, EVEN_WIN); // paper win again -> same contract live
         await wait(60);
         expect(h.conn.buys_()).toHaveLength(2);
         expect(lastBuy(h).contract_type).toBe('DIGITEVEN');
-        expect(virtualEvents(h, 'start')).toHaveLength(1);
+        h.conn.settle('c2', -1); // live loss -> paper again; this time the paper trade loses -> opposite live
+        await wait(60);
+        h.conn.paper(h.symbol, OVER_LOSS);
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(3);
+        expect(lastBuy(h).contract_type).toBe('DIGITODD');
         h.engine.stop();
     });
 
@@ -359,13 +353,13 @@ describe('virtual hook: the unified rules (the default)', () => {
         h.engine.stop();
     });
 
-    it('Only Ups: two paper wins (every tick rises) buy Only Ups live', async () => {
+    it('Only Ups: a paper win (every tick rises) buys Only Ups live', async () => {
         const h = hookMake({}, 'R_UH9', 'RUNHIGH');
         await startOnPaper(h);
-        h.conn.ticks(h.symbol, [100, 100, 101, 102]);
+        h.conn.ticks(h.symbol, [100, 100, 101]);
         await wait(60);
-        expect(h.conn.buys_()).toHaveLength(0);
-        h.conn.ticks(h.symbol, [100, 100, 101, 102]);
+        expect(h.conn.buys_()).toHaveLength(0); // 1 of 2 ticks: not settled yet
+        h.conn.ticks(h.symbol, [102]);
         await wait(60);
         expect(h.conn.buys_()).toHaveLength(1);
         expect(lastBuy(h)).toMatchObject({ contract_type: 'RUNHIGH', duration: 2 });
