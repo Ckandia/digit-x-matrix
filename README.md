@@ -1,3 +1,28 @@
+# Virtual hook v3: the unified rules (October 2026)
+
+The AI trader's logic is now built around the virtual hook (paper trades, no money). It is on by default.
+
+1. **The run starts on paper.** No real trade is placed until the hook decides.
+2. **A paper trade LOSES -> the OPPOSITE contract is bought live** on the same market, at the stake the AI would have used.
+3. **Two paper wins in a row -> the SAME contract is bought live.** (`virtual_confirmations`, default 2; a paper loss resets the count.)
+4. **Any live loss -> back to paper** to test the market again. The contract that just lost is the one paper-tested. There is no auto flip and no
+   "switch to Under 5 / Over 4" any more while the hook is on (the Auto flip checkbox is greyed out).
+5. **A live win keeps trading the same contract live** until the first live loss.
+6. **Opposites:** Even <-> Odd, Over 4 <-> Under 5, Rise <-> Fall, Touch <-> No Touch, **Only Ups <-> Only Downs**, plus Higher/Lower style pairs the engine already knew.
+   Rise/Fall (and their opposites) still wait for the higher-high / lower-low on the 1-tick chart before a live buy.
+
+- Only Ups / Only Downs: paper-settled (every tick must rise / fall) and bought live for 2 ticks (the shortest Deriv sells). The signal feed does not
+  currently start the AI on them (the 1-tick-first rule ranks them last), so today they appear as a pair only when a signal for one of them is offered.
+- Turn the hook off (checkbox) and the old behaviour (real first trade, auto flip / switching) is unchanged. The older `virtual_mode: 'opposite'` and
+  `'confirm'` rules are still in the code.
+- Files: `autoPilotEngine.ts` (`_hookMode`, `_virtualHook`, loss/win handling), `contractRules.ts` (Only Ups/Downs duration), `AiAgentPanel.tsx` (text),
+  `__tests__/virtual-hook.spec.ts` (+11 tests).
+- Verified: the 23 tests in `virtual-hook.spec.ts` and the 12 in `ai-trader-rules.spec.ts` pass in a stand-alone runner against a fake Deriv connection.
+  I could NOT run the full `tsc`, `npm run build` or the whole jest suite here (no node_modules / no network): run `npm install && npx tsc --noEmit && npx jest`
+  first. Not tested against live Deriv. Test on a demo account.
+- Honest note: a paper result does not predict the next tick, so "opposite of a paper loss" and "same after two paper wins" change when and what you trade,
+  not the odds of any single trade. Judge it on demo by the Transactions results, not by the paper results.
+
 # Deriv Trading Bot
 
 A self-hosted, visual trading-bot builder on the Deriv WebSocket API. Drag-and-drop

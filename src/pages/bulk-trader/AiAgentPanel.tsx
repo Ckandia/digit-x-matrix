@@ -555,18 +555,18 @@ const AiAgentPanel = ({
                             onChange={e => config && setConfig({ ...config, virtual_hook: e.target.checked })}
                         />{' '}
                         {localize(
-                            'Virtual hook: after a real loss the AI stops risking money and trades on paper. When a paper trade loses, the AI buys the OPPOSITE contract for real (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch). If that real trade loses, it goes back to paper, and so on.'
+                            'Virtual hook: the AI starts on paper (no money). A paper loss buys the OPPOSITE contract for real (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs). Two paper wins in a row buy the SAME contract for real. Any real loss sends it back to paper to test the market again. While it is on, auto flip and contract switching are off.'
                         )}
                     </label>
                     <label className='ai-agent-panel__hint'>
                         <input
                             type='checkbox'
-                            checked={!!config?.auto_flip}
-                            disabled={!config || status === 'connecting'}
+                            checked={!!config?.auto_flip && !config?.virtual_hook}
+                            disabled={!config || status === 'connecting' || !!config?.virtual_hook}
                             onChange={e => config && setConfig({ ...config, auto_flip: e.target.checked })}
                         />{' '}
                         {localize(
-                            'Auto flip: after a loss the AI switches to the partner contract, and after the next loss it switches back. Pairs: Even / Over 4, Odd / Under 5, Touch / Under 5, No Touch / Over 4, Rise / Under 5, Fall / Over 4.'
+                            'Auto flip (off while the virtual hook is on): after a loss the AI switches to the partner contract, and after the next loss it switches back. Pairs: Even / Over 4, Odd / Under 5, Touch / Under 5, No Touch / Over 4, Rise / Under 5, Fall / Over 4.'
                         )}
                     </label>
 
@@ -802,7 +802,7 @@ const AiAgentPanel = ({
                         <strong>{localize('Virtual hook (paper trades, no money)')}</strong>
                         <span className={virtual.active ? 'is-loss' : 'is-win'}>
                             {virtual.active
-                                ? localize('PAUSED: paper trading {{what}}, {{w}}/{{need}} wins in a row ({{n}} virtual losses so far)', {
+                                ? localize('PAPER TRADING {{what}}: {{w}}/{{need}} wins in a row ({{n}} virtual losses so far)', {
                                       what: virtual.current,
                                       w: virtual.wins,
                                       need: virtual.needed,

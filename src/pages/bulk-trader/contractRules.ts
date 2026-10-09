@@ -101,6 +101,9 @@ export const tradeTicks = (symbol: string, type: string): number | null => {
     const r = tickRange(symbol, type);
     if (!r || isRefused(symbol, type)) return null;
     if (isBarrierContract(type)) return r.min; // which contracts need a barrier comes from the owner's notes (tradingKnowledge.ts)
+    // Only Ups / Only Downs are the opposite pair of each other in the virtual hook. Deriv sells them from 2 ticks, so
+    // they run for the shortest duration offered (like the barrier contracts) instead of being left out.
+    if (type === 'RUNHIGH' || type === 'RUNLOW') return r.min;
     return r.min <= 1 && r.max >= 1 ? 1 : null;
 };
 
