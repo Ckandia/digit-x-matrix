@@ -66,6 +66,14 @@ export type TAutoPilotConfig = {
     /** Paper wins in a row a contract needs before it is traded for real again (1-5, default 2). */
     virtual_confirmations?: number;
     /**
+     * Follow the tick stream: a LIVE trade is only entered while the latest ticks already point the contract's way (the
+     * assumption being that they keep following one another): Even after even last digits, Odd after odd, Under 5 after
+     * digits 0-4, Over 4 after digits 5-9, Rise after rising ticks, Fall after falling ticks. Off when undefined/false.
+     */
+    follow_stream?: boolean;
+    /** How many ticks in a row must show it (1-5, default 2). */
+    follow_ticks?: number;
+    /**
      * What the hook does with its paper results.
      * 'hook' (default, the active rule): the AI starts on paper and every real loss sends it back to paper.
      *   - a paper trade LOSES  -> the OPPOSITE contract is bought for real (Even<->Odd, Over 4<->Under 5, Rise<->Fall, Only Ups<->Only Downs, ...)
@@ -137,6 +145,8 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         virtual_hook: true,
         virtual_confirmations: DEFAULT_VIRTUAL_CONFIRMATIONS,
         virtual_mode: 'hook',
+        follow_stream: true,
+        follow_ticks: DEFAULT_FOLLOW_TICKS,
         contract_families: ALL_FAMILY_KEYS,
         rotate_contracts: true,
         both_sides: true,
@@ -299,6 +309,38 @@ export const paperOutcome = (type: string, entry: number, after: number[], pip: 
 };
 
 /** Contracts that wait for a confirmed trend on the 1-tick chart: Rise needs a higher high, Fall a lower low. */
+export const DEFAULT_FOLLOW_TICKS = 2;
+export const MAX_FOLLOW_TICKS = 5;
+
+/**
+ * Do the latest `n` ticks already point this contract's way? null = this contract has no such rule.
+ * Digits come from the last `n` prices (rounded to the market's decimals); Rise/Fall need `n` moves in a row.
+ */
+export const followsStream = (type: string, prediction: number | undefined, prices: number[], pip: number, n: number): boolean | null => {
+    const digitOf = (price: number) => Number(price.toFixed(pip).slice(-1));
+    const tail = prices.slice(-n).map(digitOf);
+    const digitsOk = (test: (d: number) => boolean) => tail.length === n && tail.every(test);
+    switch (type) {
+        case 'DIGITEVEN':
+            return digitsOk(d => d % 2 === 0);
+        case 'DIGITODD':
+            return digitsOk(d => d % 2 === 1);
+        case 'DIGITOVER':
+            return digitsOk(d => d > (prediction ?? 4));
+        case 'DIGITUNDER':
+            return digitsOk(d => d < (prediction ?? 5));
+        case 'CALL':
+        case 'PUT': {
+            const last = prices.slice(-(n + 1));
+            if (last.length < n + 1) return false;
+            for (let i = 1; i < last.length; i++) if (type === 'CALL' ? !(last[i] > last[i - 1]) : !(last[i] < last[i - 1])) return false;
+            return true;
+        }
+        default:
+            return null;
+    }
+};
+
 const TREND_NEEDED: Record<string, 'bullish' | 'bearish'> = { CALL: 'bullish', PUT: 'bearish', RUNHIGH: 'bullish', RUNLOW: 'bearish' };
 
 /**
@@ -794,6 +836,21 @@ export class AutoPilotEngine {
         }
     }
 
+    /** Follow-the-stream rule: true when the latest ticks already point the contract's way (or no rule applies). */
+    private async _streamOk(candidate: TCandidate): Promise<boolean> {
+        if (this.config.follow_stream !== true) return true;
+        const n = Math.min(MAX_FOLLOW_TICKS, Math.max(1, Math.floor(this.config.follow_ticks ?? DEFAULT_FOLLOW_TICKS)));
+        try {
+            const res = await this.connection.send({ ticks_history: candidate.symbol, count: n + 1, end: 'latest', style: 'ticks' });
+            const prices: number[] = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            const pip = Number.isInteger(res?.pip_size) ? Number(res.pip_size) : 2;
+            const ok = followsStream(candidate.contract_type, candidate.prediction as number | undefined, prices, pip, n);
+            return ok === null ? true : ok;
+        } catch {
+            return false; // cannot see the stream, so no live entry
+        }
+    }
+
     /** One auto-flip step: the partner after a loss, the original after the next one. Null when flipping is off / blocked. */
     private _autoFlipTarget(candidate: TCandidate): TCandidate | null {
         if (!this.config.auto_flip) return null;
@@ -1010,21 +1067,32 @@ export class AutoPilotEngine {
             }
             this.hooks?.onLog?.('info', `Virtual hook skipped: ${candidate.label} cannot be paper-traded.`);
         }
-        if (!TREND_NEEDED[candidate.contract_type]) {
+        const stream_rule = this.config.follow_stream === true && followsStream(candidate.contract_type, candidate.prediction as number | undefined, [], 2, 1) !== null;
+        if (!TREND_NEEDED[candidate.contract_type] && !stream_rule) {
             this._enterNow(candidate, wanted_stake, tag);
             return;
         }
         this.busy = true;
-        void this._trendOk(candidate).then(ok => {
+        void Promise.all([this._trendOk(candidate), this._streamOk(candidate)]).then(([trend_ok, stream_ok]) => {
             this.busy = false;
             if (!this.running) return;
-            if (ok) {
+            if (trend_ok && stream_ok) {
                 this._enterNow(candidate, wanted_stake, tag);
                 return;
             }
-            if ((tag === 'flipped' || this._hookMode()) && waits < 20) {
-                if (waits === 0) this.hooks?.onLog?.('info', `Waiting for a ${TREND_NEEDED[candidate.contract_type] === 'bullish' ? 'higher-high' : 'lower-low'} trend on the 1-tick chart before ${candidate.label} on ${candidate.symbol}.`);
-                setTimeout(() => this._enter(candidate, wanted_stake, tag, waits + 1), 1500);
+            // Waiting for the stream to line up is the point of the rule, so it waits in every mode (up to ~45 ticks).
+            const wait_limit = !stream_ok ? 45 : 20;
+            if ((!stream_ok || tag === 'flipped' || this._hookMode()) && waits < wait_limit) {
+                if (waits === 0) {
+                    const n = Math.min(MAX_FOLLOW_TICKS, Math.max(1, Math.floor(this.config.follow_ticks ?? DEFAULT_FOLLOW_TICKS)));
+                    this.hooks?.onLog?.(
+                        'info',
+                        !stream_ok
+                            ? `Waiting for the last ${n} tick${n === 1 ? '' : 's'} on ${candidate.symbol} to follow the same way (${candidate.label}) before buying.`
+                            : `Waiting for a ${TREND_NEEDED[candidate.contract_type] === 'bullish' ? 'higher-high' : 'lower-low'} trend on the 1-tick chart before ${candidate.label} on ${candidate.symbol}.`
+                    );
+                }
+                setTimeout(() => this._enter(candidate, wanted_stake, tag, waits + 1), !stream_ok ? 1000 : 1500);
                 return;
             }
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 6000);

@@ -10,7 +10,9 @@ import {
     buildConfigFromPreset,
     ALL_FAMILY_KEYS,
     CONTRACT_FAMILIES,
+    DEFAULT_FOLLOW_TICKS,
     DEFAULT_VIRTUAL_CONFIRMATIONS,
+    MAX_FOLLOW_TICKS,
     MAX_VIRTUAL_CONFIRMATIONS,
     RISK_PRESETS,
     TAutoPilotConfig,
@@ -167,6 +169,31 @@ const AiAgentPanel = ({
     useEffect(() => {
         if (learnerRef.current) setLearnInfo(learnerRef.current.summary());
     }, [ladder, totalProfit]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // While the AI runs, re-read the real balance from Deriv every few seconds and right after each trade. The balance
+    // stream's callback can go quiet during a run (it is detached when this tab is left and re-attached on return,
+    // and a stream can stall), which left the number frozen until the run stopped. This does not depend on it.
+    useEffect(() => {
+        if (status !== 'running') return;
+        let alive = true;
+        const refresh = async () => {
+            const conn = connectionRef.current;
+            if (!conn?.isReady) return;
+            if (!conn.onBalance) bindBalance(conn); // re-attach if something detached it
+            const value = await conn.refreshBalance();
+            if (alive && value != null) {
+                setBalance(value);
+                setBalanceLive(true);
+            }
+        };
+        void refresh();
+        const timer = setInterval(() => void refresh(), 5000);
+        return () => {
+            alive = false;
+            clearInterval(timer);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [status, ladder.length]);
 
     // After a run ends, rebuild the risk preset from the account's balance as it is now.
     useEffect(() => {
@@ -548,6 +575,27 @@ const AiAgentPanel = ({
                                 onChange={v => updateField('protect_trades', Math.max(0, Math.floor(v)))}
                             />
                         </div>
+                    )}
+
+                    <label className='ai-agent-panel__hint'>
+                        <input
+                            type='checkbox'
+                            checked={!!config?.follow_stream}
+                            disabled={!config || status === 'connecting'}
+                            onChange={e => config && setConfig({ ...config, follow_stream: e.target.checked })}
+                        />{' '}
+                        {localize(
+                            'Follow the tick stream: only buy live while the latest ticks already point the contract’s way (Even after even digits, Odd after odd, Under 5 after digits 0-4, Over 4 after 5-9, Rise after rising ticks, Fall after falling ticks), assuming they keep following one another. The AI waits (up to about 45 ticks) for it.'
+                        )}
+                    </label>
+                    {config?.follow_stream && (
+                        <FieldBox
+                            label={localize('Ticks in a row that must agree (1-{{max}})', { max: MAX_FOLLOW_TICKS })}
+                            value={config.follow_ticks ?? DEFAULT_FOLLOW_TICKS}
+                            step={1}
+                            disabled={status === 'connecting'}
+                            onChange={v => updateField('follow_ticks', Math.min(MAX_FOLLOW_TICKS, Math.max(1, Math.floor(v))))}
+                        />
                     )}
 
                     <label className='ai-agent-panel__hint'>

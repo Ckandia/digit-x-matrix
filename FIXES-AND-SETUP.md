@@ -1,3 +1,15 @@
+# Follow the tick stream before a live entry (October 2026)
+
+- New checkbox on the AI Trader tab (on in the presets) "Follow the tick stream" plus "Ticks in a row that must agree" (1-5, default 2). A LIVE trade is only bought while the latest ticks already point the contract's way: Even after even last digits, Odd after odd, Under 5 after digits 0-4, Over 4 after digits 5-9, Rise after rising ticks, Fall after falling ticks. The AI waits up to about 45 ticks for it, then picks something else. Rise/Fall still also need the higher-high / lower-low trend.
+- Paper (virtual hook) trades are unchanged; only the live buy waits. A both-sides opposite leg is bought alongside the first leg without the check. Touch/No Touch, Only Ups/Downs and the rest have no stream rule.
+- Honest note: last digits of these indices are random and independent, so a streak of low digits does not make the next one more likely low. This rule changes WHEN you buy, not the odds: the contract still needs about 55% wins to break even.
+- Not run: `tsc`/`jest` (no `node_modules` here). New tests: `__tests__/follow-stream.spec.ts`.
+
+# AI Trader balance no longer freezes during a run (October 2026)
+
+- While the AI runs, the Running card re-reads the real balance from Deriv every 5 seconds and right after each trade, and re-attaches the live balance stream if it was detached. Before, the number depended on one stream callback that could go quiet mid-run, so it only caught up when the run stopped.
+- I could not reproduce the freeze here (no `node_modules`, so `tsc`/`jest` were not run); this makes the number independent of that callback.
+
 # AI Trader account safety (October 2026)
 
 - The Running card now says which account the AI is trading on (id and demo/real). If the header shows a different account, the card turns red and says so; the AI keeps going until you press Stop (it is never stopped just because you opened another tab).
