@@ -12,6 +12,7 @@
 // starting a run is what controls demo vs real, exactly like the main bot
 // engine.
 import { DerivWSAccountsService, DerivAccount } from '@/services/derivws-accounts.service';
+import { pushHeaderBalance } from './headerBalance';
 
 let req_id_counter = 1;
 const nextReqId = () => req_id_counter++;
@@ -134,6 +135,7 @@ export class DerivClientConnection {
                         if (this.accountInfo) this.accountInfo = { ...this.accountInfo, balance: Number(b.balance), currency };
                         this.balanceLive = true;
                         this.onBalance?.(Number(b.balance), currency, loginid);
+                        pushHeaderBalance(loginid || this.accountInfo?.loginid || '', Number(b.balance), currency);
                     }
                 }
                 finish();
@@ -149,6 +151,7 @@ export class DerivClientConnection {
             if (Number.isFinite(value) && this.accountInfo) {
                 this.accountInfo = { ...this.accountInfo, balance: value };
                 this.balanceLive = true;
+                pushHeaderBalance(this.accountInfo.loginid || '', value, this.accountInfo.currency || 'USD');
                 return value;
             }
         } catch {

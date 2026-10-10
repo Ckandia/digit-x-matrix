@@ -1,3 +1,9 @@
+# Header balance follows the AI, and the hook keeps its decision (October 2026)
+
+- **Header balance.** The AI/Bulk tabs trade over their own Deriv socket, but the header listens to the app's main socket, which did not always push the new balance, so the AI tab showed the real number and the header an old one. Every live balance the trading connection receives (balance stream and the 5-second refresh) is now also written to the header's client store (`headerBalance.ts` -> `CoreStoreProvider`). It only writes when the connection's account is the one the header is showing, so a demo balance never lands on a real account's header or the reverse.
+- **Under 5 on paper, Over 4 live.** By the hook rules (unchanged): a paper WIN buys the SAME contract live; a paper LOSS buys the OPPOSITE live (Under 5 lost -> Over 4), except Even/Odd, which stay on paper until they win. So Over 4 after a paper Under 5 is correct when the paper Under 5 lost; the Journal log says which ("Virtual loss on Under 5 ... buying the opposite, Over 4" or "Under 5 won ... trading it for real"). One real gap fixed: with the third-tick entry, if no run of ticks completed in about 90 ticks the AI used to drop the hook's decision and pick a different contract. Now, for a hook-released trade, it keeps waiting (up to 8 more rounds) for the SAME contract on the SAME market.
+- Tests: 2 new hook-mode tests (paper Under 5 win -> live Under 5; loss -> live Over 4) and `header-balance.spec.ts`. `tsc --noEmit` clean, `npx jest` 52 suites passing. Not run against live Deriv.
+
 # Two-tick entry: buy on the third tick, gate removed (October 2026)
 
 - **Gate removed from the defaults.** The learning mode is back to "Learn" (the hard "proven edge" gate only applies if you pick "Only trade a proven edge" yourself). "Both sides" stays off by default (it stakes twice for one outcome).

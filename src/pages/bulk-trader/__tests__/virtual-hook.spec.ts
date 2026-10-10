@@ -674,3 +674,31 @@ describe('two-tick pair signals (backend pair scan) go through the virtual hook'
         h.engine.stop();
     });
 });
+
+
+describe('virtual hook (hook mode): the live contract is exactly what the paper result decides', () => {
+    const UNDER_WIN = 100.03; // last digit 3: Under 5 wins
+    const UNDER_LOSS = 100.08; // last digit 8: Under 5 loses
+
+    it('paper Under 5 WINS -> Under 5 is bought live, on the same market', async () => {
+        const h = make({ virtual_mode: 'hook' }, undefined, 'R_UW', 'DIGITUNDER');
+        h.engine.start();
+        await wait();
+        h.conn.paper(h.symbol, UNDER_WIN);
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'DIGITUNDER', barrier: '5', underlying_symbol: h.symbol });
+        h.engine.stop();
+    });
+
+    it('paper Under 5 LOSES -> the opposite, Over 4, is bought live (the hook rule), same market', async () => {
+        const h = make({ virtual_mode: 'hook' }, undefined, 'R_UL', 'DIGITUNDER');
+        h.engine.start();
+        await wait();
+        h.conn.paper(h.symbol, UNDER_LOSS);
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'DIGITOVER', barrier: '4', underlying_symbol: h.symbol });
+        h.engine.stop();
+    });
+});

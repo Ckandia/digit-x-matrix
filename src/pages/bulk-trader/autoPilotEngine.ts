@@ -1176,7 +1176,7 @@ export class AutoPilotEngine {
             // Two-tick entry: wait on the live stream and buy the instant the matching run reaches its Nth tick (default: the third).
             const target = Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(this.config.entry_tick ?? DEFAULT_ENTRY_TICK)));
             if (waits === 0) {
-                this.hooks?.onLog?.('info', `Waiting on ${candidate.symbol} for ${target - 1} matching ticks in a row, then buying ${candidate.label} on tick ${target}.`);
+                this.hooks?.onLog?.('info', `Waiting on ${candidate.symbol} for ${target - 1} matching ticks in a row, then buying ${candidate.label} on tick ${target}${this.hook_release ? ' (the virtual hook\'s decision)' : ''}.`);
             }
             this.busy = true;
             void this._awaitEntryTick(candidate).then(async fired => {
@@ -1185,6 +1185,13 @@ export class AutoPilotEngine {
                 if (!this.running) return;
                 if (fired && trend_ok) {
                     this._enterNow(candidate, wanted_stake, tag);
+                    return;
+                }
+                if (!fired && this.hook_release && waits < 8) {
+                    // The hook has DECIDED what to buy (the paper winner, or the opposite of the paper loser). Do not drop that decision
+                    // for a different contract because the run was slow: keep waiting on the same contract and market.
+                    this.hooks?.onLog?.('info', `Still waiting for a run of ticks on ${candidate.symbol} to buy ${candidate.label}, as the virtual hook decided.`);
+                    this._enter(candidate, wanted_stake, tag, waits + 1);
                     return;
                 }
                 if (fired && waits < 20) {

@@ -8,6 +8,7 @@ import { api_base } from '@/external/bot-skeleton';
 import { useApiBase } from '@/hooks/useApiBase';
 import { useLogout } from '@/hooks/useLogout';
 import { useStore } from '@/hooks/useStore';
+import { setHeaderBalanceSink } from '@/pages/bulk-trader/headerBalance';
 import { TSocketResponseData } from '@/types/api-types';
 import { clearInvalidTokenParams } from '@/utils/url-utils';
 import { useTranslations } from '@deriv-com/translations';
@@ -31,6 +32,17 @@ const CoreStoreProvider: React.FC<{ children: React.ReactNode }> = observer(({ c
     const timeInterval = useRef<NodeJS.Timeout | null>(null);
     const msg_listener = useRef<{ unsubscribe: () => void } | null>(null);
     const { client, common } = useStore() ?? {};
+
+    // Balance pushed by the AI / Bulk trading connection (a separate socket): keep the header in step with it.
+    useEffect(() => {
+        if (!client) return;
+        setHeaderBalanceSink((loginid, balance, currency) => {
+            if (loginid !== client.loginid) return; // never show another account's balance in the header
+            client.setBalance(balance.toString());
+            if (currency) client.setCurrency(currency);
+        });
+        return () => setHeaderBalanceSink(null);
+    }, [client]);
 
     const { currentLang } = useTranslations();
 
