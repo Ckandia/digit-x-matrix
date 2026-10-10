@@ -1,3 +1,14 @@
+# Backend paper trader made useful (October 2026)
+
+- **Real payouts.** The backend now asks Deriv for a price (proposal, nothing bought, no token) for every contract on every 1-second market every 10 minutes, so each contract is judged against what it REALLY pays. Touch / No Touch no longer show "-": they get a payout, a break-even win rate and a verdict like the others.
+- **Honest verdicts** (new `contracts` list in `GET /api/paper/stats`): Edge proven (even the low end of the win rate beats the payout), Loses money (proven: even the high end does not), Not proven either way, Collecting. Each row shows expected result per 1.00 staked. With ~1M trades every contract is at ~50% against a ~55% break-even, so "No edge proven" was really "proven to lose about 8-10c per 1.00".
+- **Edge search.** Every market x contract x condition cell (signal strength, top-ranked, previous result, trend) is tested against its break-even with a multiple-comparison correction; anything that survives is listed as a pocket worth trading. Empty means nothing beats luck.
+- **Virtual-hook check fixed.** The old pooled "after loss 47.8% / after win 52.0%" mixed contracts with different base rates (Touch 47.8%, No Touch 52.2%), which fakes a link. It is now measured within each contract with a z-score.
+- The card ("Backend paper trader...") now shows on the AI Trader, **Journal** and **Bulk Trades** tabs. The AI's "Only trade a proven edge" mode can use the verdicts (`provenContracts` in `paperStats.ts`).
+- Redeploy the backend (Render) for payout polling and the new report. An older backend still works: the card falls back to the old table.
+- Honest note: nothing here creates an edge. It tells you, with real payouts, whether one exists.
+- Not run: no `node_modules` in this environment, so `tsc`/`jest` were not run. Backend report logic was smoke-tested with plain Node.
+
 # Both sides: Only Ups / Only Downs only (October 2026)
 
 - The buy-both-directions rule is removed for Even/Odd, Over 4/Under 5, Rise/Fall (and Touch/No Touch stay single). After the virtual hook clears an Only Ups or Only Downs trade, the AI still buys BOTH on the same market, same stake each, and the two legs settle as one trade. The "Both sides" checkbox (`both_sides: false`) still turns even that off.

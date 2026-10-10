@@ -1,3 +1,4 @@
+import { PaperLearningCard } from './PaperLearningCard';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { localize } from '@deriv-com/translations';
 import { useApiBase } from '@/hooks/useApiBase';
@@ -451,6 +452,8 @@ const BulkTrader = () => {
                     )}
                 </p>
             </div>
+
+            <PaperLearningCard />
 
             {!backend_configured && (
                 <div className='bulk-trader__notice bulk-trader__notice--warning'>

@@ -32,6 +32,21 @@ export const PAPER_CONTRACTS = [
     { type: 'NOTOUCH', ticks: 5 },
 ];
 
+/** What is asked of Deriv to learn each contract's real payout (a proposal costs nothing and buys nothing). */
+const PAYOUT_PROBE = {
+    DIGITEVEN: { duration: 1 },
+    DIGITODD: { duration: 1 },
+    DIGITOVER: { duration: 1, barrier: '4' },
+    DIGITUNDER: { duration: 1, barrier: '5' },
+    CALL: { duration: 1 },
+    PUT: { duration: 1 },
+    ONETOUCH: { duration: 5, barrier: '+0.5' },
+    NOTOUCH: { duration: 5, barrier: '+0.5' },
+};
+const PAYOUT_POLL_MS = 10 * 60_000;
+const PAYOUT_STALE_MS = 60 * 60_000;
+const MIN_TRADES_FOR_VERDICT = 300;
+
 const TOUCH_BARRIER = 0.5;
 const FLUSH_MS = 60_000;
 const HOURLY_KEEP_HOURS = 24 * 7;
@@ -102,6 +117,46 @@ export const wilsonLow = (n, wins) => {
     return Math.max(0, (centre - margin) / denom);
 };
 
+/** Upper end of the 95% Wilson interval for a win rate. */
+export const wilsonHigh = (n, wins) => (n ? 1 - wilsonLow(n, n - wins) : 1);
+
+/**
+ * One verdict per contract, from what it REALLY pays. `ratio` = net profit on a win per 1 staked (0.82 means a win returns
+ * stake + 0.82). Expected result per 1 staked = win_rate * (1 + ratio) - 1.
+ *   edge      even the pessimistic end of the win rate beats the payout
+ *   loses     even the optimistic end of the win rate does not: proven to lose money on average
+ *   no_edge   cannot tell yet
+ */
+export const verdictFor = (n, wins, ratio) => {
+    if (ratio === null || ratio === undefined) return { verdict: 'no_payout', breakeven: null, ev: null, ev_low: null, ev_high: null };
+    const rate = n ? wins / n : 0;
+    const ev = rate * (1 + ratio) - 1;
+    const ev_low = wilsonLow(n, wins) * (1 + ratio) - 1;
+    const ev_high = wilsonHigh(n, wins) * (1 + ratio) - 1;
+    let verdict = 'collecting';
+    if (n >= MIN_TRADES_FOR_VERDICT) verdict = ev_low > 0 ? 'edge' : ev_high < 0 ? 'loses' : 'no_edge';
+    return { verdict, breakeven: 1 / (1 + ratio), ev, ev_low, ev_high };
+};
+
+/** Is a win more likely after a win than after a loss, WITHIN each contract? Pooling contracts with different base rates fakes it. */
+export const hookWithin = per_contract => {
+    let sum_w = 0;
+    let sum_wd = 0;
+    for (const h of per_contract) {
+        const { after_win: a, after_loss: b } = h;
+        if (a.n < 30 || b.n < 30) continue;
+        const pa = a.wins / a.n;
+        const pb = b.wins / b.n;
+        const pool = (a.wins + b.wins) / (a.n + b.n);
+        const variance = pool * (1 - pool) * (1 / a.n + 1 / b.n);
+        if (!(variance > 0)) continue;
+        sum_w += 1 / variance;
+        sum_wd += (pa - pb) / variance;
+    }
+    if (!sum_w) return { diff: 0, z: 0 };
+    return { diff: sum_wd / sum_w, z: sum_wd / Math.sqrt(sum_w) };
+};
+
 const bucketOf = confidence => (confidence >= 60 ? 'strong' : confidence >= 30 ? 'mid' : 'weak');
 const hourKey = ms => new Date(Math.floor(ms / 3_600_000) * 3_600_000).toISOString();
 
@@ -114,6 +169,7 @@ export class PaperTrader {
         this.hourly_deltas = new Map();
         this.open = new Map(); // `${symbol}|${type}` -> open paper trade
         this.last = new Map(); // `${symbol}|${type}` -> 'win' | 'loss'
+        this.payouts = new Map(); // `${symbol}|${type}` -> { ratio, at }: the net profit per 1 staked Deriv really quotes
         this.started_at = new Date().toISOString();
         this.total = 0;
         this.timer = null;
@@ -125,7 +181,47 @@ export class PaperTrader {
         this.feed.onTick((symbol, tick, snapshot) => this._onTick(symbol, tick, snapshot));
         this.timer = setInterval(() => this._flush().catch(err => console.error('[paper] flush failed:', err.message)), FLUSH_MS);
         this.timer.unref?.();
+        setTimeout(() => this._pollPayouts().catch(() => {}), 15_000).unref?.();
+        const payout_timer = setInterval(() => this._pollPayouts().catch(() => {}), PAYOUT_POLL_MS);
+        payout_timer.unref?.();
         console.log('[paper] paper trader running: virtual trades on every market, 24/7, no token, no money.');
+    }
+
+    /** Asks Deriv what every contract pays on every market (one price request at a time, nothing is bought). */
+    async _pollPayouts() {
+        if (!this.feed.getProposal) return;
+        for (const symbol of this.feed.windows.keys()) {
+            for (const { type } of PAPER_CONTRACTS) {
+                const probe = PAYOUT_PROBE[type];
+                const quote = await this.feed.getProposal({
+                    amount: 10,
+                    basis: 'stake',
+                    contract_type: type,
+                    currency: 'USD',
+                    duration: probe.duration,
+                    duration_unit: 't',
+                    ...(probe.barrier ? { barrier: probe.barrier } : {}),
+                    symbol,
+                });
+                const ask = Number(quote?.ask_price);
+                const payout = Number(quote?.payout);
+                if (ask > 0 && payout > ask) this.payouts.set(`${symbol}|${type}`, { ratio: payout / ask - 1, at: Date.now() });
+                await new Promise(r => setTimeout(r, 400));
+            }
+        }
+    }
+
+    /** Average real payout ratio for a contract over the markets priced recently, or null if Deriv has not priced it yet. */
+    _payoutRatio(type, symbol) {
+        const fresh = Date.now() - PAYOUT_STALE_MS * 6;
+        const values = [];
+        for (const [key, v] of this.payouts) {
+            const [sym, t] = key.split('|');
+            if (t !== type || v.at < fresh) continue;
+            if (symbol && sym !== symbol) continue;
+            values.push(v.ratio);
+        }
+        return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
     }
 
     async _ensureTables(pool) {
@@ -307,7 +403,61 @@ export class PaperTrader {
             };
         });
         const rate = h => (h.n ? h.wins / h.n : 0);
+
+        // One row per contract, every market pooled, judged against what Deriv REALLY pays (Touch / No Touch included).
+        const per_contract_hook = [];
+        const contracts = PAPER_CONTRACTS.map(({ type, ticks }) => {
+            let n = 0;
+            let wins = 0;
+            const after_win = { n: 0, wins: 0 };
+            const after_loss = { n: 0, wins: 0 };
+            for (const cell of cells) {
+                if (cell.contract_type !== type) continue;
+                n += cell.n;
+                wins += cell.wins;
+                after_win.n += cell.ctx['prev:win']?.n ?? 0;
+                after_win.wins += cell.ctx['prev:win']?.wins ?? 0;
+                after_loss.n += cell.ctx['prev:loss']?.n ?? 0;
+                after_loss.wins += cell.ctx['prev:loss']?.wins ?? 0;
+            }
+            per_contract_hook.push({ after_win, after_loss });
+            const ratio = this._payoutRatio(type);
+            return {
+                contract_type: type,
+                ticks,
+                n,
+                wins,
+                win_rate: n ? wins / n : 0,
+                low: wilsonLow(n, wins),
+                high: wilsonHigh(n, wins),
+                payout_ratio: ratio,
+                ...verdictFor(n, wins, ratio),
+                hook: { after_win: { ...after_win, win_rate: rate(after_win) }, after_loss: { ...after_loss, win_rate: rate(after_loss) } },
+            };
+        });
+
+        // Any market x contract x condition that beats its payout by more than luck explains (Bonferroni: many cells are tested).
+        const testable = [];
+        for (const cell of cells) {
+            const ratio = this._payoutRatio(cell.contract_type, cell.symbol);
+            if (ratio === null) continue;
+            const be = 1 / (1 + ratio);
+            for (const [ctx, c] of Object.entries({ all: { n: cell.n, wins: cell.wins }, ...cell.ctx })) {
+                if (c.n < 500) continue;
+                const z = (c.wins / c.n - be) / Math.sqrt((be * (1 - be)) / c.n);
+                testable.push({ symbol: cell.symbol, contract_type: cell.contract_type, ctx, n: c.n, win_rate: c.wins / c.n, breakeven: be, z, ev: (c.wins / c.n) * (1 + ratio) - 1 });
+            }
+        }
+        const z_needed = testable.length ? Math.sqrt(2 * Math.log(testable.length / 0.05)) : Infinity;
+        const edges = testable.filter(t => t.z >= z_needed).sort((a, b) => b.ev - a.ev).slice(0, 10);
+        const best = [...testable].sort((a, b) => b.ev - a.ev).slice(0, 5);
+
         return {
+            generated_at: new Date().toISOString(),
+            contracts,
+            edges,
+            edge_search: { tested: testable.length, z_needed: Number.isFinite(z_needed) ? Number(z_needed.toFixed(2)) : null, best },
+            hook_within: hookWithin(per_contract_hook),
             started_at: this.started_at,
             total_paper_trades: this.total,
             breakeven_win_rate: Number((1 / (1 + DEFAULT_PAYOUT_RATIO)).toFixed(4)),

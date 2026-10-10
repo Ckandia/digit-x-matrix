@@ -241,6 +241,38 @@ export class MarketFeed {
         for (const resolve of waiters) resolve(rules);
     }
 
+    /**
+     * Asks Deriv for a price (proposal) so the paper trader knows what each contract REALLY pays, including Touch / No Touch
+     * (whose payout depends on the barrier). Public data, no token. Resolves with the proposal or null.
+     */
+    async getProposal(request) {
+        if (!this.ws || this.ws.readyState !== 1) return null;
+        const ask = fields =>
+            new Promise(resolve => {
+                this.proposal_waiters ||= new Map();
+                const req_id = this._send({ proposal: 1, ...fields });
+                const timer = setTimeout(() => {
+                    this.proposal_waiters.delete(req_id);
+                    resolve(null);
+                }, 6000);
+                this.proposal_waiters.set(req_id, value => {
+                    clearTimeout(timer);
+                    resolve(value);
+                });
+            });
+        const { symbol, ...rest } = request;
+        // The New API names the market underlying_symbol, the legacy one symbol: remember which one answers.
+        const order = this.proposal_uses_symbol ? ['symbol', 'underlying_symbol'] : ['underlying_symbol', 'symbol'];
+        for (const key of order) {
+            const result = await ask({ ...rest, [key]: symbol });
+            if (result) {
+                this.proposal_uses_symbol = key === 'symbol';
+                return result;
+            }
+        }
+        return null;
+    }
+
     _send(request) {
         const req_id = this._nextReqId();
         this.ws.send(JSON.stringify({ ...request, req_id }));
@@ -268,6 +300,12 @@ export class MarketFeed {
             return;
         }
         if (data.error) {
+            const waiter = this.proposal_waiters?.get(data.echo_req?.req_id);
+            if (waiter) {
+                this.proposal_waiters.delete(data.echo_req.req_id);
+                waiter(null); // a contract Deriv will not price right now: the paper trader just keeps its last known payout
+                return;
+            }
             // eslint-disable-next-line no-console
             console.error('[marketFeed] Deriv error:', data.error.message);
             if (data.echo_req?.contracts_for) this._resolveRules(data.echo_req.contracts_for, null);
@@ -275,6 +313,16 @@ export class MarketFeed {
         }
 
         this._got_valid_data = true;
+
+        if (data.msg_type === 'proposal') {
+            const id = data.echo_req?.req_id ?? data.req_id;
+            const waiter = this.proposal_waiters?.get(id);
+            if (waiter) {
+                this.proposal_waiters.delete(id);
+                waiter(data.proposal ?? null);
+            }
+            return;
+        }
 
         if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
             for (const entry of data.active_symbols) {

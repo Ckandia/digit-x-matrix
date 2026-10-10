@@ -7,6 +7,7 @@ import { buildAnalytics, DEFAULT_FILTERS, filterTrades, localTimeZone, monthOf, 
 import { syncFromDeriv } from './backfill';
 import { activeAccount } from './derivMapping';
 import { journalStore } from './journalStore';
+import { PaperLearningCard } from '../bulk-trader/PaperLearningCard';
 import { TCellReview, TVerdict } from './selfReview';
 import './journal.scss';
 
@@ -276,6 +277,11 @@ const Journal = observer(() => {
                     <section className='jrnl__card'>
                         <h4>{localize('Equity curve')}</h4>
                         <EquityChart points={a.equity} />
+                    </section>
+
+                    <section className='jrnl__card'>
+                        <h4>{localize('What the backend paper trader says about your contracts')}</h4>
+                        <PaperLearningCard />
                     </section>
 
                     <section className='jrnl__card jrnl__review'>

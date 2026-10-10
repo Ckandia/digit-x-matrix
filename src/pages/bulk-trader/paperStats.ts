@@ -13,7 +13,31 @@ export type TPaperCell = {
     recent_win_rate: number;
     ctx: Record<string, TPaperCtx>;
 };
+export type TPaperVerdict = 'collecting' | 'edge' | 'loses' | 'no_edge' | 'no_payout';
+export type TPaperContract = {
+    contract_type: string;
+    n: number;
+    wins: number;
+    win_rate: number;
+    low: number;
+    high: number;
+    /** Net profit per 1 staked on a win, as really quoted by Deriv (null until the backend has a quote). */
+    payout_ratio: number | null;
+    breakeven: number | null;
+    /** Expected result per 1 staked, with its 95% range. */
+    ev: number | null;
+    ev_low: number | null;
+    ev_high: number | null;
+    verdict: TPaperVerdict;
+    hook: { after_win: { n: number; wins: number; win_rate: number }; after_loss: { n: number; wins: number; win_rate: number } };
+};
+export type TPaperEdge = { symbol: string; contract_type: string; ctx: string; n: number; win_rate: number; breakeven: number; z: number; ev: number };
 export type TPaperReport = {
+    /** Added by the newer backend: real payouts, per-contract verdicts, the edge search. Absent on an older backend. */
+    contracts?: TPaperContract[];
+    edges?: TPaperEdge[];
+    edge_search?: { tested: number; z_needed: number | null; best: TPaperEdge[] };
+    hook_within?: { diff: number; z: number };
     started_at: string;
     total_paper_trades: number;
     breakeven_win_rate: number;
@@ -72,3 +96,7 @@ export const poolByContract = (report: TPaperReport): TPooledContract[] => {
         })
         .sort((a, b) => b.win_rate - a.win_rate);
 };
+
+/** Contracts the backend has PROVEN to beat their real payout (95% confidence). Empty = none, which is what a fair-odds game gives. */
+export const provenContracts = (report: TPaperReport | null | undefined): string[] =>
+    (report?.contracts ?? []).filter(c => c.verdict === 'edge').map(c => c.contract_type);
