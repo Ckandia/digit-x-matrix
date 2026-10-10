@@ -179,9 +179,11 @@ export class DerivWSAccountsService {
      * @param accountId Account ID to get OTP for
      * @returns Promise with WebSocket URL
      */
-    static async fetchOTPWebSocketURL(accessToken: string, accountId: string): Promise<string> {
-        // Create a unique key for this account's OTP request
-        const cacheKey = `${accountId}`;
+    static async fetchOTPWebSocketURL(accessToken: string, accountId: string, options: { fresh?: boolean } = {}): Promise<string> {
+        // Create a unique key for this account's OTP request. A login URL is single-use, so a caller that opens its OWN
+        // socket (the AI trader) asks for a fresh one: sharing the main app's in-flight URL would put two sockets on one
+        // single-use URL and knock the main app's connection off the account.
+        const cacheKey = options.fresh ? `${accountId}#${Date.now()}#${Math.random()}` : `${accountId}`;
 
         // If there's already a fetch in progress for this account, return that promise
         if (this.otpFetchPromises.has(cacheKey)) {

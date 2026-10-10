@@ -55,6 +55,20 @@
         color: #e8eaed;
     }
 
+    &__account {
+        margin: 6px 0;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        opacity: 0.85;
+
+        &.is-warning {
+            opacity: 1;
+            color: #ff6b5e;
+            border: 1px solid #ff6b5e;
+        }
+    }
+
     &__scanning {
         font-size: 11px;
         color: #5dcaa5;

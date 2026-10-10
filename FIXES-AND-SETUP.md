@@ -1,3 +1,10 @@
+# AI Trader account safety (October 2026)
+
+- The Running card now says which account the AI is trading on (id and demo/real). If the header shows a different account, the card turns red and says so; the AI keeps going until you press Stop (it is never stopped just because you opened another tab).
+- The AI no longer quietly falls back to the FIRST account in the list (usually the demo) when the header's account is not found in the stored list: it re-reads the list once, and if the account is still missing it refuses to connect with a clear message.
+- The AI's own login URL is now always a fresh one. Before, it could share the main app's in-flight single-use URL for the same account (both sockets on one URL), which can knock the main app's connection off the account. Applies to the first connect and to reconnects.
+- Not run: no `node_modules` here, so `tsc`/`jest` were not run. I could not reproduce the disconnect from the screenshot alone.
+
 # Backend paper trader made useful (October 2026)
 
 - **Real payouts.** The backend now asks Deriv for a price (proposal, nothing bought, no token) for every contract on every 1-second market every 10 minutes, so each contract is judged against what it REALLY pays. Touch / No Touch no longer show "-": they get a payout, a break-even win rate and a verdict like the others.

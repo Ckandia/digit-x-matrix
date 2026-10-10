@@ -31,12 +31,21 @@ const resolveActiveAccount = async (token: string): Promise<DerivAccount> => {
     // An empty stored list counts as "nothing stored" — fall through to a
     // fresh fetch instead of failing on it.
     const stored = DerivWSAccountsService.getStoredAccounts();
-    const accounts = stored && stored.length > 0 ? stored : await DerivWSAccountsService.fetchAccountsList(token);
+    let accounts = stored && stored.length > 0 ? stored : await DerivWSAccountsService.fetchAccountsList(token);
     if (!accounts || accounts.length === 0) {
         throw new Error('No Deriv accounts found for this session. Try logging in again.');
     }
     const active_loginid = localStorage.getItem('active_loginid');
-    return accounts.find(a => a.account_id === active_loginid) ?? accounts[0];
+    if (!active_loginid) return accounts[0];
+    let match = accounts.find(a => a.account_id === active_loginid);
+    if (!match && stored && stored.length > 0) {
+        // The stored list can be stale (an account added or switched since login): ask Deriv once before giving up.
+        accounts = (await DerivWSAccountsService.fetchAccountsList(token)) ?? accounts;
+        match = accounts.find(a => a.account_id === active_loginid);
+    }
+    // Never quietly use a different account (usually the first one, a demo) than the one the header shows.
+    if (!match) throw new Error(`The account shown in the header (${active_loginid}) was not found for this login. Not connecting, so the AI cannot trade on another account.`);
+    return match;
 };
 
 /**
@@ -81,7 +90,7 @@ export class DerivClientConnection {
             type: account.account_type,
         };
 
-        const wsUrl = await DerivWSAccountsService.fetchOTPWebSocketURL(this.token, account.account_id);
+        const wsUrl = await DerivWSAccountsService.fetchOTPWebSocketURL(this.token, account.account_id, { fresh: true });
         await this._open(wsUrl, true);
         // The balance in the stored accounts list is a snapshot from login time. Replace it with the
         // real one from Deriv and keep it updating, so the AI sees what the account really holds.
@@ -218,7 +227,7 @@ export class DerivClientConnection {
             if (this.closed_on_purpose) return;
             await new Promise(r => setTimeout(r, Math.min(1000 * 2 ** attempt, 8000)));
             try {
-                const wsUrl = await DerivWSAccountsService.fetchOTPWebSocketURL(this.token, this.accountInfo?.account_id ?? '');
+                const wsUrl = await DerivWSAccountsService.fetchOTPWebSocketURL(this.token, this.accountInfo?.account_id ?? '', { fresh: true });
                 await this._open(wsUrl, false);
                 // Re-open every live subscription (ticks, open contracts) under the same req_ids.
                 // An open contract that settled while we were away is reported again as sold.

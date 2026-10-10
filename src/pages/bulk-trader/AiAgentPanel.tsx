@@ -740,6 +740,16 @@ const AiAgentPanel = ({
                         <span className='ai-agent-panel__card-title'>{localize('Running')}</span>
                         <span className='ai-agent-panel__scanning'>{localize('scanning')}</span>
                     </div>
+                    <div className={`ai-agent-panel__account${connectedLoginid && activeLoginid && connectedLoginid !== activeLoginid ? ' is-warning' : ''}`}>
+                        {localize('Trading on account')} <strong>{connectedLoginid || '—'}</strong>
+                        {connectedType ? ` (${connectedType})` : ''}
+                        {connectedLoginid && activeLoginid && connectedLoginid !== activeLoginid && (
+                            <>
+                                {' '}
+                                — {localize('the header now shows {{shown}}. The AI keeps trading on {{ai}} until you press Stop.', { shown: activeLoginid, ai: connectedLoginid })}
+                            </>
+                        )}
+                    </div>
 
                     <div className='ai-agent-panel__stats-grid'>
                         <dl className='ai-agent-panel__stat-box'>
