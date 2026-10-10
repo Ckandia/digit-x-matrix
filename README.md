@@ -1,0 +1,196 @@
+# Fix: "This contract offers no return" (October 2026)
+
+- Cause: Deriv prices a Touch / No Touch with a 0.5 barrier at almost no profit when the barrier is far (No Touch) or very near (Touch) for a quiet market
+  like R_50 over 5 ticks. The AI treated that reply as a fatal error and STOPPED the run ("trade placement failed").
+- Now: "no return" is handled like a refused duration. 5 ticks fails -> the same 0.5 barrier is tried at 10 ticks; if that fails too, that market/contract is
+  skipped for 6 hours and the AI carries on with another contract. Bulk Trades does the same 5 -> 10 retry.
+- Virtual hook: before any paper or live Touch / No Touch the AI asks Deriv for a price (5, then 10 ticks), and only paper-tests it if it is priced.
+- Tests: 3 new in `virtual-hook.spec.ts` (30 + 24 + 12 + 2 pass in the stand-alone runner). The Bulk Trades retry change is untested. Full tsc / build / jest not run here: run them first.
+
+# Contract picker, rotation and Only Ups/Downs (October 2026)
+
+- **AI Trader tab, new "Contracts the AI may trade" list** (all ticked by default): Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs.
+  At least one must stay ticked. Before this, the AI only started on whatever had the strongest signal, which was almost always a digit contract
+  (the 1-tick-first rule left Touch/No Touch out, and Only Ups/Downs had no signal at all).
+- **Rotate** checkbox (default on): after every live trade the next paper test is on the next ticked contract. Rise/Fall and Only Ups/Downs take the side
+  the 1-tick chart confirms (higher-high -> Rise / Only Ups, lower-low -> Fall / Only Downs); with no trend that contract is skipped for that round.
+  Off = the AI stays on the contract it just traded. A ticked contract with no live signal can still be paper-tested.
+- Ticking Touch/No Touch or Only Ups/Downs lifts the 1-tick-first rule, so they can be chosen on purpose.
+- Only Ups / Only Downs are now trend contracts like Rise/Fall (they wait for the higher-high / lower-low).
+- **Bulk Trades tab:** Only Ups and Only Downs added to the contract list (2 ticks, tries up to 5 if Deriv refuses; trend-gated; they switch with each other).
+- The virtual-hook rules from v4 are unchanged (paper trade before every live trade: win -> same, loss -> opposite).
+- Verified: 27 tests in `virtual-hook.spec.ts`, 24 in `bulk-contracts.spec.ts`, 12 in `ai-trader-rules.spec.ts`, 2 in `paper-stats.spec.ts` pass in a stand-alone
+  runner. The full `tsc`, `npm run build` and the whole jest suite were NOT run here: run `npm install && npx tsc --noEmit && npx jest`. Not tested on live Deriv.
+
+# Virtual hook v4: one paper trade before EVERY live trade (October 2026)
+
+On by default (AI Trader tab, "Virtual hook" checkbox).
+
+1. **Every live trade is preceded by one paper trade** (no money): at the start, after a live win and after a live loss.
+2. **Paper WIN -> the SAME contract is bought live** (same market, the stake the AI would have used).
+3. **Paper LOSS -> the OPPOSITE contract is bought live**: Even <-> Odd, Over 4 <-> Under 5, Rise <-> Fall, Touch <-> No Touch, Only Ups <-> Only Downs.
+   Example: paper Even loses -> live Odd.
+4. After the live trade settles (win or loss) the contract that was just traded is paper-tested again. No auto flip and no contract switching while the hook is on.
+5. Rise/Fall (and their opposites) still wait for the higher-high / lower-low trend on the 1-tick chart before a live buy.
+6. Only Ups / Only Downs: paper-settled (every tick must rise / fall) and bought live for 2 ticks. The signal feed does not start the AI on them today (1-tick-first rule).
+
+- Hook off = the old behaviour (real first trade, auto flip). The older `'opposite'` / `'confirm'` modes remain in the code.
+- Files: `autoPilotEngine.ts`, `contractRules.ts`, `AiAgentPanel.tsx`, `__tests__/virtual-hook.spec.ts`.
+- Verified: 22 tests in `virtual-hook.spec.ts` and 12 in `ai-trader-rules.spec.ts` pass in a stand-alone runner against a fake Deriv connection. The full
+  `tsc`, `npm run build` and the whole jest suite were NOT run (no node_modules here): run `npm install && npx tsc --noEmit && npx jest`. Not tested on live Deriv.
+- Honest note: a paper result does not predict the next tick, so this changes what and when you trade, not the odds of a single trade. Judge it on demo by Transactions.
+
+# Deriv Trading Bot
+
+A self-hosted, visual trading-bot builder on the Deriv WebSocket API. Drag-and-drop
+strategy building with Blockly, an interactive SmartCharts chart, automated strategy
+execution, and dashboard/tutorials.
+
+> **Note:** Unlike the other templates in this repo (Rise/Fall, Accumulators, Digits)
+> which are **Next.js** apps, the bot is a **[Rsbuild](https://rsbuild.dev) + React
+> Router** single-page app. The commands, build output, and environment variables
+> below differ accordingly.
+
+## Prerequisites
+
+- Node.js 18.18 or later
+
+## Step 1: Register Your App ID
+
+1. Log in to your Deriv account and go to the [API Token page](https://app.deriv.com/account/api-token) to create a token with the required scopes.
+2. Navigate to [App Registration](https://developers.deriv.com/dashboard/) and register a new application.
+3. Set the **Redirect URI** to the URL where you will host this app (e.g. `http://localhost:4003` for local development).
+4. Copy the **App ID** shown after registration — you will need it in the next step.
+
+## Step 2: Configure `.env`
+
+Copy `.env.example` to `.env` and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+```env
+# Required: Deriv app id — drives OAuth login/sign-up and WebSocket connections.
+NEXT_PUBLIC_DERIV_APP_ID=your_app_id_here
+
+# Optional: environment + affiliate attribution.
+NEXT_PUBLIC_DERIV_ENV=production
+NEXT_PUBLIC_DERIV_REFERRAL_LINK=your_referral_link_here
+
+# Optional: Google Drive integration (leave blank to disable).
+GD_CLIENT_ID=
+GD_APP_ID=
+GD_API_KEY=
+```
+
+| Variable | Description |
+|---|---|
+| `NEXT_PUBLIC_DERIV_APP_ID` | Deriv app id issued for your registered app. Drives OAuth login/sign-up and WebSocket connections. Without it, Log in / Sign up stay disabled. |
+| `NEXT_PUBLIC_DERIV_ENV` | `production` for live Deriv endpoints; `preview` (or `staging`) for staging. Read by both the bot's URL resolver and `@deriv/core` for OAuth. |
+| `NEXT_PUBLIC_DERIV_REFERRAL_LINK` | Affiliate referral link — appended as `affiliate_token` / `utm_campaign` on OAuth (optional). |
+| `GD_CLIENT_ID` / `GD_APP_ID` / `GD_API_KEY` | Google Drive integration credentials for saving/loading strategies (optional). |
+
+> These variables are injected at **build time** via Rsbuild's `source.define`
+> (see `rsbuild.config.ts`), so re-build after changing them.
+
+## Branding (`brand.config.json`)
+
+The App Builder also writes branding into `brand.config.json`. Relevant `platform` keys:
+
+| Key | Description |
+|---|---|
+| `platform.name` | In-app display name (header, tab title, favicon). Set in App Builder Customise. Overridden by `NEXT_PUBLIC_DERIV_APP_NAME` when that env var is set. |
+| `platform.show_name` | `true` (default) shows the name next to the logo on desktop; `false` hides it |
+
+Tab title and favicon use `NEXT_PUBLIC_DERIV_APP_NAME` when set, otherwise `platform.name` (with a generic fallback), and are not blanked when `show_name` is false. OAuth/consent registration name is separate and is not written into these fields by App Builder.
+
+## Step 3: Local Development
+
+```bash
+npm install
+npm run dev
+```
+
+The app is available at `http://localhost:4003`. (`npm install` and `npm run dev`
+also regenerate brand CSS — see Branding below.)
+
+## Step 4: Build for Production
+
+```bash
+npm run build
+```
+
+This produces a static build in the `dist/` directory (Rsbuild output — there is no
+`.next`/`out`). Serve the contents of `dist/` from any web server or static host.
+SmartCharts engine assets are copied into `dist/js/smartcharts/` during the build.
+
+## Google Drive integration (optional)
+
+Saving/loading strategies to Google Drive stays disabled unless `GD_CLIENT_ID`,
+`GD_APP_ID`, and `GD_API_KEY` are all set. **If it's not set up in your host
+environment yet:**
+
+1. **Get the credentials** — follow Google's [Picker set-up guide](https://developers.google.com/workspace/drive/picker/guides/web-picker#set-up-environment):
+   enable the **Google Picker API** + **Drive API**, then create an **OAuth 2.0
+   Client ID** (Web application) and an **API key**. Use the project number as `GD_APP_ID`.
+2. **Authorize your domain** — add your deployed URL (e.g. `https://your-app.vercel.app`)
+   to the OAuth client's **Authorized JavaScript origins** (exact origin; no wildcards).
+3. **Set them in your host env — not in source** — add the three vars to your host
+   (Vercel → Settings → Environment Variables; Heroku → Settings → Config Vars).
+   Don't commit them to the repo.
+4. **Rebuild** — they're baked in at build time (`source.define`), so trigger a new build/deploy.
+
+> Deploying via Deriv App Builder? Open your app in **Edit** mode and enter these
+> three values — App Builder injects them into your host environment for you
+> (never into the app source).
+
+## Branding & White-labeling
+
+Branding (logo, primary color, fonts, app name) is driven by **`brand.config.json`**,
+not Next.js config:
+
+- **Colors / fonts / app name** — edit `brand.config.json`, then run
+  `npm run generate:brand-css` to bake the values into the theme CSS variables. This
+  runs automatically on `npm install`, `npm run dev`, and `npm run build`.
+- **Logo** — drop a `public/logo.<png|jpg|jpeg|webp>` to set the header logo; it is also
+  used as the favicon. Without it, a letter badge (the app name's first letter) is shown.
+- **Theme** — a light/dark toggle lives in the header; the chart re-themes with it.
+
+When assembled by the App Builder, these are configured for you (logo upload, color,
+font, and app name are injected at deploy time).
+
+## Bulk Trader
+
+The **Bulk Trader** tab lets you run several digit-contract strategies
+(Differs/Matches/Over/Under/Even/Odd) at the same time on one account, each
+with its own stake, money management, and stop conditions. Because the
+bot-builder engine only runs one strategy at a time in the browser, Bulk
+Trader's execution happens on a small backend service instead — see
+[`backend/README.md`](./backend/README.md) for what it does and how to deploy
+it to Render.
+
+To connect the two once the backend is deployed, set this on the frontend
+(Vercel → Settings → Environment Variables), then rebuild:
+
+```env
+NEXT_PUBLIC_BULK_TRADER_API_URL=https://your-backend.onrender.com
+```
+
+## Deploying to Vercel
+
+This repo includes a `vercel.json` that builds the Rsbuild static site to
+`dist/` and rewrites all routes to `index.html` so client-side routing works.
+In Vercel: **New Project → Import this repo**, and set the same environment
+variables listed in Step 2 above (plus `NEXT_PUBLIC_BULK_TRADER_API_URL` if
+you're using Bulk Trader) under Settings → Environment Variables. No other
+configuration is required — Vercel will pick up `vercel.json` automatically.
+
+## Compliance note
+
+A risk-disclosure banner (see `src/components/layout/risk-banner`) is shown
+across the app, identifying it as an independent third-party application
+built on the Deriv API and carrying Deriv's standard risk warning, per
+[Deriv's guidelines for apps built on its API](https://deriv.com/terms-and-conditions/important-guidelines).
+If you rebrand this app, update `app_name` via `brand.config.json` — the
+banner picks it up automatically — and keep the risk wording intact.
