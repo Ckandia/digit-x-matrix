@@ -66,7 +66,7 @@ let state: TAiState = {
     virtual: { active: false, current: '', losses: 0, wins: 0, needed: 2, rows: [] },
     config: null,
     riskLevel: 'moderate',
-    learnMode: 'edge_gate',
+    learnMode: 'learn',
 };
 
 const listeners = new Set<() => void>();

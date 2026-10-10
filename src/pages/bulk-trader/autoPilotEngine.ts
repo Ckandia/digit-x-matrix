@@ -71,8 +71,14 @@ export type TAutoPilotConfig = {
      * digits 0-4, Over 4 after digits 5-9, Rise after rising ticks, Fall after falling ticks. Off when undefined/false.
      */
     follow_stream?: boolean;
-    /** How many ticks in a row must show it (1-5, default 2). */
+    /** How many ticks in a row must show it (1-5, default 2). Older polling rule, kept for saved configs; entries now use `entry_tick`. */
     follow_ticks?: number;
+    /**
+     * Two-tick entry: the live buy fires on the Nth tick of a run of matching ticks (2-5, default 3). With 3, two ticks must
+     * already agree and the buy goes out the moment the THIRD matching tick prints, never on the 4th or 5th of the same run.
+     * 5,7,8 -> Over 4 on the 8. 2,4,6 -> Even on the 6. A longer run is stale and waits for a fresh one. Needs `follow_stream`.
+     */
+    entry_tick?: number;
     /**
      * What the hook does with its paper results.
      * 'hook' (default, the active rule): the AI starts on paper and every real loss sends it back to paper.
@@ -147,6 +153,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         virtual_mode: 'hook',
         follow_stream: true,
         follow_ticks: DEFAULT_FOLLOW_TICKS,
+        entry_tick: DEFAULT_ENTRY_TICK,
         contract_families: ALL_FAMILY_KEYS,
         rotate_contracts: true,
         both_sides: false, // two stakes for one outcome: it cannot beat a single contract's expected result
@@ -311,6 +318,45 @@ export const paperOutcome = (type: string, entry: number, after: number[], pip: 
 /** Contracts that wait for a confirmed trend on the 1-tick chart: Rise needs a higher high, Fall a lower low. */
 export const DEFAULT_FOLLOW_TICKS = 2;
 export const MAX_FOLLOW_TICKS = 5;
+export const DEFAULT_ENTRY_TICK = 3;
+export const MIN_ENTRY_TICK = 2;
+export const MAX_ENTRY_TICK = 5;
+
+/**
+ * Does this ONE tick agree with the contract? Digits test the tick's last digit; Rise/Fall test the move from the previous tick.
+ * null = the contract has no stream rule.
+ */
+export const tickAgrees = (type: string, prediction: number | undefined, price: number, prev: number | undefined, pip: number): boolean | null => {
+    const d = Number(price.toFixed(pip).slice(-1));
+    switch (type) {
+        case 'DIGITEVEN':
+            return d % 2 === 0;
+        case 'DIGITODD':
+            return d % 2 === 1;
+        case 'DIGITOVER':
+            return d > (prediction ?? 4);
+        case 'DIGITUNDER':
+            return d < (prediction ?? 5);
+        case 'CALL':
+            return prev !== undefined && price > prev;
+        case 'PUT':
+            return prev !== undefined && price < prev;
+        default:
+            return null;
+    }
+};
+
+/** Length of the matching run at the end of `prices` (digits: matching last digits; Rise/Fall: moves in the contract's direction). */
+export const trailingRun = (type: string, prediction: number | undefined, prices: number[], pip: number): number => {
+    let run = 0;
+    let prev: number | undefined;
+    for (const q of prices) {
+        const a = tickAgrees(type, prediction, q, prev, pip);
+        run = a ? run + 1 : 0;
+        prev = q;
+    }
+    return run;
+};
 
 /**
  * Do the latest `n` ticks already point this contract's way? null = this contract has no such rule.
@@ -836,6 +882,64 @@ export class AutoPilotEngine {
         }
     }
 
+    /**
+     * Two-tick entry. Resolves true at the exact moment the matching run reaches `entry_tick` ticks (default 3: two agreeing ticks
+     * and the buy on the third), straight from the live tick stream. A run that is already past that length does not count, so the
+     * AI never buys on the 4th or 5th tick of the same run; it waits for the run to break and a new one to build. Resolves false
+     * after about 90 ticks (the caller then picks something else).
+     */
+    private async _awaitEntryTick(candidate: TCandidate): Promise<boolean> {
+        const target = Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(this.config.entry_tick ?? DEFAULT_ENTRY_TICK)));
+        const type = candidate.contract_type;
+        const prediction = candidate.prediction as number | undefined;
+        let pip = 2;
+        let run = 0;
+        let prev: number | undefined;
+        let last_epoch: number | undefined;
+        try {
+            const res = await this.connection.send({ ticks_history: candidate.symbol, count: target + 2, end: 'latest', style: 'ticks' });
+            const prices: number[] = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            const times: number[] = ((res?.history?.times ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            if (Number.isInteger(res?.pip_size)) pip = Number(res.pip_size);
+            if (tickAgrees(type, prediction, prices[prices.length - 1] ?? 0, undefined, pip) === null) return true; // no stream rule
+            run = trailingRun(type, prediction, prices, pip); // the run already under way, so the setup ticks are not missed
+            prev = prices[prices.length - 1];
+            last_epoch = times[times.length - 1];
+        } catch {
+            return false; // cannot see the stream, so no live entry
+        }
+        return new Promise<boolean>(resolve => {
+            let done = false;
+            let sub: number | null = null;
+            const finish = (ok: boolean) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                if (sub !== null) void this.connection.unsubscribe(sub);
+                resolve(ok);
+            };
+            const timer = setTimeout(() => finish(false), 90_000);
+            sub = this.connection.subscribe({ ticks: candidate.symbol }, (data, err) => {
+                if (done) return;
+                if (err || !this.running) return finish(false);
+                const tick = data?.tick;
+                if (!tick) return;
+                const epoch = Number(tick.epoch);
+                if (Number.isFinite(epoch)) {
+                    if (last_epoch !== undefined && epoch <= last_epoch) return; // a tick already counted from the history
+                    last_epoch = epoch;
+                }
+                const q = Number(tick.quote);
+                if (!Number.isFinite(q)) return;
+                if (Number.isInteger(Number(tick.pip_size))) pip = Number(tick.pip_size);
+                const a = tickAgrees(type, prediction, q, prev, pip);
+                prev = q;
+                run = a ? run + 1 : 0;
+                if (run === target) finish(true); // exactly the Nth matching tick: buy now, not on the 4th or 5th
+            });
+        });
+    }
+
     /** Follow-the-stream rule: true when the latest ticks already point the contract's way (or no rule applies). */
     private async _streamOk(candidate: TCandidate): Promise<boolean> {
         if (this.config.follow_stream !== true) return true;
@@ -1068,6 +1172,33 @@ export class AutoPilotEngine {
             this.hooks?.onLog?.('info', `Virtual hook skipped: ${candidate.label} cannot be paper-traded.`);
         }
         const stream_rule = this.config.follow_stream === true && followsStream(candidate.contract_type, candidate.prediction as number | undefined, [], 2, 1) !== null;
+        if (stream_rule) {
+            // Two-tick entry: wait on the live stream and buy the instant the matching run reaches its Nth tick (default: the third).
+            const target = Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(this.config.entry_tick ?? DEFAULT_ENTRY_TICK)));
+            if (waits === 0) {
+                this.hooks?.onLog?.('info', `Waiting on ${candidate.symbol} for ${target - 1} matching ticks in a row, then buying ${candidate.label} on tick ${target}.`);
+            }
+            this.busy = true;
+            void this._awaitEntryTick(candidate).then(async fired => {
+                const trend_ok = fired ? await this._trendOk(candidate) : false; // Rise/Fall also need the 1-tick chart's trend
+                this.busy = false;
+                if (!this.running) return;
+                if (fired && trend_ok) {
+                    this._enterNow(candidate, wanted_stake, tag);
+                    return;
+                }
+                if (fired && waits < 20) {
+                    this.hooks?.onLog?.('info', `The run completed but ${candidate.label} on ${candidate.symbol} has no confirmed trend; waiting for the next run.`);
+                    this._enter(candidate, wanted_stake, tag, waits + 1);
+                    return;
+                }
+                this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 6000);
+                this.hook_release = false;
+                if (this._hookMode()) this.hook_pending = true; // a fresh contract is paper-tested before any real money
+                this._findAndEnter(wanted_stake, tag);
+            });
+            return;
+        }
         if (!TREND_NEEDED[candidate.contract_type] && !stream_rule) {
             this._enterNow(candidate, wanted_stake, tag);
             return;

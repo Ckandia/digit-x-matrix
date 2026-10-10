@@ -1,3 +1,15 @@
+# Two-tick entry: buy on the third tick, gate removed (October 2026)
+
+- **Gate removed from the defaults.** The learning mode is back to "Learn" (the hard "proven edge" gate only applies if you pick "Only trade a proven edge" yourself). "Both sides" stays off by default (it stakes twice for one outcome).
+- **Entry is now tick-driven, not polled.** Before, the AI checked "do the last N ticks agree" about once a second, so a buy could land on the 4th or 5th tick of a run. Now it watches the live tick stream and fires the instant the matching run reaches its Nth tick (setting "Buy on the Nth matching tick", default 3, range 2-5):
+  - Even: 5,7,8,9,2,4,6 -> buys Even on the 6 (2,4 agree, 6 is the third).
+  - Over 4: 5,7,8 -> buys Over 4 on the 8. Under 5, Odd likewise; Rise/Fall use rising/falling ticks.
+  - A run already past the third (4th, 5th tick...) never triggers a buy; the AI waits for it to break and a fresh run to build. Setup ticks that printed before the wait began count (the run is seeded from the last ticks).
+  - Rise/Fall still also need the 1-tick chart's trend; if the run completes without it, it waits for the next run. If no run completes in about 90 ticks, it picks another contract.
+  - Applies to every live buy (first trade, hook release, opposite trade, recovery step). Paper trades are unchanged.
+- **Honest limits.** The buy is sent the moment the third tick prints; the contract's entry price is the next tick Deriv quotes (a few hundred ms later), as with any live buy. And last digits on these indices are independent, so this changes WHEN you buy, not the odds: each contract still needs about 55% wins to break even.
+- Tests: new `__tests__/third-tick-entry.spec.ts` (the 5,7,8 and 2,4,6 examples, never 4th/5th, history seeding). `tsc --noEmit` clean, `npx jest` 51/51 suites, 522 passed. Not run against live Deriv.
+
 # Quality gate: stop spending on unproven trades (October 2026)
 
 - **Why the balance fell.** The AI defaulted to "Learn" mode, which deliberately tries unproven contracts (Thompson sampling), and the virtual-hook route (paper win -> live buy) never asked the learner whether the contract had an edge, so even "Only trade a proven edge" could still lose money live. Your own backend report (about 1M paper trades) shows every contract near 50% wins against a break-even of about 55%: roughly -8 to -10c per 1.00 staked. Martingale and stake size change how fast that shows up, not its sign.

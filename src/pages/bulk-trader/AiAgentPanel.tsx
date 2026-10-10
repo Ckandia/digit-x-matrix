@@ -10,9 +10,10 @@ import {
     buildConfigFromPreset,
     ALL_FAMILY_KEYS,
     CONTRACT_FAMILIES,
-    DEFAULT_FOLLOW_TICKS,
+    DEFAULT_ENTRY_TICK,
+    MAX_ENTRY_TICK,
+    MIN_ENTRY_TICK,
     DEFAULT_VIRTUAL_CONFIRMATIONS,
-    MAX_FOLLOW_TICKS,
     MAX_VIRTUAL_CONFIRMATIONS,
     RISK_PRESETS,
     TAutoPilotConfig,
@@ -585,16 +586,16 @@ const AiAgentPanel = ({
                             onChange={e => config && setConfig({ ...config, follow_stream: e.target.checked })}
                         />{' '}
                         {localize(
-                            'Follow the tick stream: only buy live while the latest ticks already point the contract’s way (Even after even digits, Odd after odd, Under 5 after digits 0-4, Over 4 after 5-9, Rise after rising ticks, Fall after falling ticks), assuming they keep following one another. The AI waits (up to about 45 ticks) for it.'
+                            'Two-tick entry: a live trade is bought on the third matching tick, never the 4th or 5th (5,7,8 buys Over 4 on the 8; 2,4,6 buys Even on the 6; Rise/Fall use rising/falling ticks). The AI watches the live stream and waits (up to about 90 ticks) for a fresh run.'
                         )}
                     </label>
                     {config?.follow_stream && (
                         <FieldBox
-                            label={localize('Ticks in a row that must agree (1-{{max}})', { max: MAX_FOLLOW_TICKS })}
-                            value={config.follow_ticks ?? DEFAULT_FOLLOW_TICKS}
+                            label={localize('Buy on the Nth matching tick (3 = two ticks agree, buy on the third) ({{min}}-{{max}})', { min: MIN_ENTRY_TICK, max: MAX_ENTRY_TICK })}
+                            value={config.entry_tick ?? DEFAULT_ENTRY_TICK}
                             step={1}
                             disabled={status === 'connecting'}
-                            onChange={v => updateField('follow_ticks', Math.min(MAX_FOLLOW_TICKS, Math.max(1, Math.floor(v))))}
+                            onChange={v => updateField('entry_tick', Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(v))))}
                         />
                     )}
 
@@ -721,8 +722,8 @@ const AiAgentPanel = ({
                     <label className='ai-agent-panel__hint'>
                         {localize('Learning')}{' '}
                         <select value={learnMode} onChange={e => setLearnMode(e.target.value as TLearningMode)}>
-                            <option value='learn'>{localize('Learn (explores unproven contracts: expect losses)')}</option>
-                            <option value='edge_gate'>{localize('Only trade a proven edge (recommended)')}</option>
+                            <option value='learn'>{localize('Learn')}</option>
+                            <option value='edge_gate'>{localize('Only trade a proven edge (blocks live trades until proven)')}</option>
                             <option value='off'>{localize('Off (signals only)')}</option>
                         </select>
                     </label>
