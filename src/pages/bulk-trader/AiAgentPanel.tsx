@@ -645,7 +645,7 @@ const AiAgentPanel = ({
                         <label style={{ display: 'block' }}>
                             <input
                                 type='checkbox'
-                                checked={config?.both_sides !== false}
+                                checked={config?.both_sides === true}
                                 disabled={!config || status === 'connecting'}
                                 onChange={e => config && setConfig({ ...config, both_sides: e.target.checked })}
                             />{' '}
@@ -721,8 +721,8 @@ const AiAgentPanel = ({
                     <label className='ai-agent-panel__hint'>
                         {localize('Learning')}{' '}
                         <select value={learnMode} onChange={e => setLearnMode(e.target.value as TLearningMode)}>
-                            <option value='learn'>{localize('Learn (explore with small stakes)')}</option>
-                            <option value='edge_gate'>{localize('Only trade a proven edge')}</option>
+                            <option value='learn'>{localize('Learn (explores unproven contracts: expect losses)')}</option>
+                            <option value='edge_gate'>{localize('Only trade a proven edge (recommended)')}</option>
                             <option value='off'>{localize('Off (signals only)')}</option>
                         </select>
                     </label>

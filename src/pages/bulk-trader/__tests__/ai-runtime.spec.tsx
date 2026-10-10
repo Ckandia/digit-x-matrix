@@ -43,6 +43,7 @@ const fakeConnection = (loginid = 'VRTC1') =>
         isReady: true,
         close: jest.fn(),
         onBalance: null,
+        refreshBalance: jest.fn().mockResolvedValue(1000),
     }) as never;
 
 const fakeEngine = (running = true) => ({ isRunning: running, stop: jest.fn() }) as never;

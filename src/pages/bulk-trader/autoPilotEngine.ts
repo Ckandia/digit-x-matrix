@@ -149,7 +149,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         follow_ticks: DEFAULT_FOLLOW_TICKS,
         contract_families: ALL_FAMILY_KEYS,
         rotate_contracts: true,
-        both_sides: true,
+        both_sides: false, // two stakes for one outcome: it cannot beat a single contract's expected result
     };
 };
 
@@ -1104,6 +1104,19 @@ export class AutoPilotEngine {
 
     private _enterNow(candidate_in: TCandidate, wanted_stake_in: number, tag?: TAutoPilotEvent['tag']) {
         const candidate: TCandidate = candidate_in;
+        // Quality gate: in 'Only trade a proven edge' mode NO live buy happens for a contract without a proven edge, however it was
+        // picked (signal, virtual hook, opposite, recovery). Paper trading carries on at no cost and keeps adding evidence.
+        if (this.learner?.mode === 'edge_gate' && !this.learner.isTradable(candidate.symbol, candidate.contract_type, (candidate as { bucket?: string }).bucket, candidate.duration_ticks)) {
+            this.hook_release = false;
+            if (Date.now() - this.last_wait_emit > 30_000) {
+                this.last_wait_emit = Date.now();
+                this.hooks?.onLog?.('info', `Standing aside: ${candidate.label} has no proven edge over its payout, so no real money is staked. Paper trading continues.`);
+                this._emit({ phase: 'waiting', reason: 'no contract has a proven edge yet: standing aside (paper trading only)' });
+            }
+            if (this._hookMode()) this.hook_pending = true;
+            setTimeout(() => this._findAndEnter(wanted_stake_in, tag), 4000);
+            return;
+        }
         const from_hook = this.hook_release;
         this.hook_release = false;
         // Capital protection: the first trades of a run never use more than the base stake.
@@ -1158,7 +1171,7 @@ export class AutoPilotEngine {
         // Both sides: the opposite contract is bought too, on the same market, same stake and same duration.
         let partner: TCandidate | null = null;
         let partner_parameters: Record<string, unknown> | null = null;
-        if (from_hook && this.config.both_sides !== false && bothSidesType(candidate.contract_type)) {
+        if (from_hook && this.config.both_sides === true && bothSidesType(candidate.contract_type)) {
             const opposite_type = FLIP_PARTNER[candidate.contract_type];
             const live = this.connection.accountInfo?.balance;
             if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {

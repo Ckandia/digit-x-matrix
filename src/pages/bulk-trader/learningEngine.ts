@@ -253,6 +253,19 @@ export class LearningEngine {
         return tradeTicks(symbol, type) ?? -1;
     }
 
+    /**
+     * True when this contract has a PROVEN edge (enough trades and the pessimistic end of its win rate beats the payout's
+     * break-even), or when the learner is not in 'edge_gate' mode. The engine asks this right before every LIVE buy, whatever
+     * path picked the contract (signal, virtual hook, opposite, recovery), so no route can spend real money on an unproven one.
+     */
+    isTradable(symbol: string, type: string, bucket?: string, duration_ticks?: number): boolean {
+        if (this.mode !== 'edge_gate') return true;
+        const duration = duration_ticks ?? this.chooseDuration(symbol, type);
+        if (duration < 0) return false;
+        const c = this.merged(cellKey(symbol, statType(type, bucket), duration), type);
+        return n_of(c) >= MIN_PROVEN && this.lowerBound(c) > this.breakeven(c);
+    }
+
     /** Chooses the next trade from the live candidates, or null if nothing qualifies right now. */
     pickBest<T extends TCandidateLike>(candidates: T[]): T | null {
         let best: T | null = null;

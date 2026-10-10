@@ -1,3 +1,11 @@
+# Quality gate: stop spending on unproven trades (October 2026)
+
+- **Why the balance fell.** The AI defaulted to "Learn" mode, which deliberately tries unproven contracts (Thompson sampling), and the virtual-hook route (paper win -> live buy) never asked the learner whether the contract had an edge, so even "Only trade a proven edge" could still lose money live. Your own backend report (about 1M paper trades) shows every contract near 50% wins against a break-even of about 55%: roughly -8 to -10c per 1.00 staked. Martingale and stake size change how fast that shows up, not its sign.
+- **Hard gate before every live buy** (`_enterNow`): in "Only trade a proven edge" mode a contract is bought for real only if `LearningEngine.isTradable()` says it has at least 30 trades and the pessimistic end (95%) of its win rate beats the payout's break-even. This covers every route: signal pick, virtual hook, opposite, recovery step. If nothing is proven the AI "stands aside": paper trading continues (free, adds evidence), no real stake is placed, and the log says so.
+- **Defaults changed:** learning mode is now "Only trade a proven edge (recommended)" and "Both sides" is off by default (it stakes twice for one outcome). "Learn" is still selectable and is labelled as exploring unproven contracts.
+- **Expect:** with today's evidence the AI will place no live trades. That is the correct answer to "quality trades only": none currently qualify. It starts trading live only if the paper evidence ever proves an edge. Nothing here creates an edge.
+- Tests: new `__tests__/edge-gate.spec.ts`; fixed a v16 test mock (`refreshBalance`). `tsc --noEmit` clean, `npx jest`: 50/50 suites, 515 passed.
+
 # Follow the tick stream before a live entry (October 2026)
 
 - New checkbox on the AI Trader tab (on in the presets) "Follow the tick stream" plus "Ticks in a row that must agree" (1-5, default 2). A LIVE trade is only bought while the latest ticks already point the contract's way: Even after even last digits, Odd after odd, Under 5 after digits 0-4, Over 4 after digits 5-9, Rise after rising ticks, Fall after falling ticks. The AI waits up to about 45 ticks for it, then picks something else. Rise/Fall still also need the higher-high / lower-low trend.
