@@ -602,7 +602,7 @@ const AiAgentPanel = ({
                                 onChange={e => config && setConfig({ ...config, both_sides: e.target.checked })}
                             />{' '}
                             {localize(
-                                'Both sides: once the virtual hook clears a trade, the AI buys BOTH sides on the live account (Even + Odd, Over 4 + Under 5, Rise + Fall, Only Ups + Only Downs; same market, same stake each). Touch / No Touch are never both-sided. The two results count as one trade.'
+                                'Both sides: once the virtual hook clears an Only Ups or Only Downs trade, the AI buys BOTH on the live account (same market, same stake each). Every other contract is bought as a single trade. The two results count as one trade.'
                             )}
                         </label>
                     </div>

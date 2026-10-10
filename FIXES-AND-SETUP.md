@@ -1,3 +1,7 @@
+# Both sides: Only Ups / Only Downs only (October 2026)
+
+- The buy-both-directions rule is removed for Even/Odd, Over 4/Under 5, Rise/Fall (and Touch/No Touch stay single). After the virtual hook clears an Only Ups or Only Downs trade, the AI still buys BOTH on the same market, same stake each, and the two legs settle as one trade. The "Both sides" checkbox (`both_sides: false`) still turns even that off.
+
 # Two-tick pair scanner, and the AI trades it through the virtual hook (October 2026)
 
 - New backend module `backend/src/pairScan.js`. For every 1-second market it scans the last 500 ticks as overlapping windows of an entry tick plus two consecutive ticks, and reports for each contract the % of windows showing its pattern:

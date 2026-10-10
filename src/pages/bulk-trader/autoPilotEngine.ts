@@ -107,10 +107,10 @@ export const MAX_VIRTUAL_CONFIRMATIONS = 5;
 export const MAX_OPPOSITE_PAPER_WINS = 25;
 /** Hook mode, Even/Odd: the live trade follows the paper result (paper win -> same contract live; paper loss -> keep paper trading). */
 /**
- * Both sides: a live trade released by the virtual hook fires the contract AND its opposite at once (Even + Odd, Over 4 + Under 5,
- * Rise + Fall, Only Ups + Only Downs). Touch / No Touch are the exception: they are always bought on one side only.
+ * Both sides: a live trade released by the virtual hook fires the contract AND its opposite at once, but ONLY for Only Ups / Only Downs.
+ * Every other contract (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch) is bought on one side only.
  */
-const bothSidesType = (type: string): boolean => PAPER_SUPPORTED.has(type) && !!FLIP_PARTNER[type] && type !== 'ONETOUCH' && type !== 'NOTOUCH';
+const bothSidesType = (type: string): boolean => type === 'RUNHIGH' || type === 'RUNLOW'; // ONLY Only Ups / Only Downs fire both sides
 /** Two live legs that settle together as ONE trade (the stake ladder, stop loss and hook see the combined result). */
 type TPair = { pending: number; profit: number; stake: number };
 const FOLLOW_HOOK_TYPES = new Set(['DIGITEVEN', 'DIGITODD']);

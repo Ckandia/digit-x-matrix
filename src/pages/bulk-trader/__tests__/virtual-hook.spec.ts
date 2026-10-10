@@ -445,17 +445,25 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
         h.engine.stop();
     });
 
-    it('both sides now applies to Even/Odd after the hook: Even + Odd are bought together', async () => {
+    it('both sides is ONLY for Only Ups / Only Downs: Even, Over 4 and Rise are single trades even with both_sides on', async () => {
         const h = hookMake({ both_sides: true }, 'R_UH13');
         await startOnPaper(h);
         h.conn.paper(h.symbol, EVEN_WIN);
         await wait(60);
-        expect(h.conn.buys_()).toHaveLength(2);
-        expect(h.conn.buys_().map(b => b.parameters.contract_type).sort()).toEqual(['DIGITEVEN', 'DIGITODD']);
+        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()[0].parameters.contract_type).toBe('DIGITEVEN');
         h.engine.stop();
+
+        const o = hookMake({ both_sides: true }, 'R_UH13B', 'DIGITOVER');
+        await startOnPaper(o);
+        o.conn.paper(o.symbol, OVER_WIN);
+        await wait(60);
+        expect(o.conn.buys_()).toHaveLength(1);
+        expect(o.conn.buys_()[0].parameters.contract_type).toBe('DIGITOVER');
+        o.engine.stop();
     });
 
-    it('Touch / No Touch are the exception: one side only, never both', async () => {
+    it('Touch / No Touch: one side only, never both', async () => {
         const h = hookMake({ contract_families: ['touch'], rotate_contracts: true }, 'R_UH14', 'DIGITEVEN');
         await startOnPaper(h);
         await wait(150);
