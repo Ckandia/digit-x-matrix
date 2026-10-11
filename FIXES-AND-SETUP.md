@@ -1,3 +1,10 @@
+# Claude connector (October 2026)
+
+- New: a read-only MCP server on the backend (`/mcp/<MCP_SECRET>`) so Claude can read your trades, plus the app-side sync (Journal tab > Claude connector). Full setup and security notes: **CLAUDE-CONNECTOR.md**.
+- Backend: `tradeStore.js`, `tradeAnalysis.js`, `mcpServer.js`, `journalIngest.js`; `render.yaml` now generates `MCP_SECRET` and `JOURNAL_SYNC_KEY`. Trades are kept 24h max (same Deriv API-terms rule as `signal_history`).
+- App: `journal/journalSync.ts` (off until you switch it on; sends results only, last 24h, never a token).
+- Verified: `npm run check:mcp` (real MCP client against the server, 5 tools, auth, de-duplication), `tsc --noEmit` clean, jest suites passing. Not yet deployed to Render or added in Claude from here.
+
 # Header balance follows the AI, and the hook keeps its decision (October 2026)
 
 - **Header balance.** The AI/Bulk tabs trade over their own Deriv socket, but the header listens to the app's main socket, which did not always push the new balance, so the AI tab showed the real number and the header an old one. Every live balance the trading connection receives (balance stream and the 5-second refresh) is now also written to the header's client store (`headerBalance.ts` -> `CoreStoreProvider`). It only writes when the connection's account is the one the header is showing, so a demo balance never lands on a real account's header or the reverse.

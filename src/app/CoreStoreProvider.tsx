@@ -8,6 +8,7 @@ import { api_base } from '@/external/bot-skeleton';
 import { useApiBase } from '@/hooks/useApiBase';
 import { useLogout } from '@/hooks/useLogout';
 import { useStore } from '@/hooks/useStore';
+import { startJournalSync } from '@/pages/journal/journalSync';
 import { setHeaderBalanceSink } from '@/pages/bulk-trader/headerBalance';
 import { TSocketResponseData } from '@/types/api-types';
 import { clearInvalidTokenParams } from '@/utils/url-utils';
@@ -32,6 +33,11 @@ const CoreStoreProvider: React.FC<{ children: React.ReactNode }> = observer(({ c
     const timeInterval = useRef<NodeJS.Timeout | null>(null);
     const msg_listener = useRef<{ unsubscribe: () => void } | null>(null);
     const { client, common } = useStore() ?? {};
+
+    // Optional: push settled trades to the backend for the Claude connector (does nothing until switched on in the Journal tab).
+    useEffect(() => {
+        startJournalSync();
+    }, []);
 
     // Balance pushed by the AI / Bulk trading connection (a separate socket): keep the header in step with it.
     useEffect(() => {
