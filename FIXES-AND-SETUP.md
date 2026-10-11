@@ -482,3 +482,18 @@ carried on with frozen signals.
 
 Note: the run lives in the browser tab. Closing or refreshing the whole page still ends it, and on a phone the
 browser may pause a background tab (the screen-awake lock is kept while a run is active).
+
+## Recovery stake + entry reader (24-hour run)
+
+- **Martingale is back as the default.** `buildConfigFromPreset` now sets `recovery_mode: 'martingale'`, `recover_losses: true`. The base stake is no longer a tiny flat stake: `planMartingale(stop_loss, max_steps)` sizes it so a FULL failed ladder (every step lost) costs at most 60% of the stop loss.
+- **Recovery stake** (`recoveryStake`): after a loss the next stake wins back everything lost in the ladder plus one base stake, at the payout the last contract actually showed (0.83 assumed when unknown). Example at 0.83: 1.00 -> 2.41 -> 5.32 -> ...
+- **Ladder out of steps or budget:** with `recover_losses` the loss is accepted, the stake goes back to the base stake and trading continues. Only the overall stop loss (and take profit) ends the run. Turn `recover_losses` off for the old behaviour (stop when the ladder is exhausted).
+- **Capital protection is off by default** (`protect_trades: 0`): it capped the first 10 stakes at the base stake, which switched recovery off.
+- **All contract families are ticked by default** (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Downs).
+- **Entry reader** (`read_entries`, on by default): the contract AND market are chosen from the latest ticks, not from signal confidence (`entryScore`).
+  - Digits, Rise/Fall, Only Ups/Downs: a run of matching ticks one short of the entry tick scores 1 (the next matching tick is the entry); a run that is already too long is stale (0).
+  - Touch: scores by how fast the market moves compared with the 0.5 barrier over 5 ticks (needs an up tick); No Touch: by how calm it is.
+  - Rise/Fall and Only Ups/Downs still need their higher-high / lower-low trend; Touch/No Touch still need Deriv to price them.
+  - The timing of the buy itself is unchanged for digits/Rise/Fall (buy on the Nth matching tick) and is now also tick-read for Only Ups/Downs and Touch/No Touch.
+- Tests: `__tests__/recovery-and-reading.spec.ts` (new), `safe-plan.spec.ts` and `follow-stream.spec.ts` (updated).
+- Unchanged: the virtual hook, both-sides (Only Ups/Downs only, off by default), the trade cap (now 60 live trades per hour).

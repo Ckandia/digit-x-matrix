@@ -636,6 +636,29 @@ const AiAgentPanel = ({
                     <label className='ai-agent-panel__hint'>
                         <input
                             type='checkbox'
+                            checked={!!config?.read_entries}
+                            disabled={!config || status === 'connecting'}
+                            onChange={e => config && setConfig({ ...config, read_entries: e.target.checked })}
+                        />{' '}
+                        {localize(
+                            'Entry reader: the AI reads the latest ticks of every market for every ticked contract and takes the contract whose entry is closest to firing (a run one tick short of the entry tick; a fast market for Touch, a calm one for No Touch). Signal confidence is not used.'
+                        )}
+                    </label>
+                    <label className='ai-agent-panel__hint'>
+                        <input
+                            type='checkbox'
+                            checked={!!config?.recover_losses}
+                            disabled={!config || status === 'connecting'}
+                            onChange={e => config && setConfig({ ...config, recover_losses: e.target.checked })}
+                        />{' '}
+                        {localize(
+                            'Recovery stake (needs the martingale stake method): after a loss the next stake wins back everything lost in the ladder plus one base stake. When the ladder runs out of steps or budget the loss is accepted, the stake goes back to the base stake and trading goes on; only the stop loss ends the run.'
+                        )}
+                    </label>
+
+                    <label className='ai-agent-panel__hint'>
+                        <input
+                            type='checkbox'
                             checked={!!config?.virtual_hook}
                             disabled={!config || status === 'connecting'}
                             onChange={e => config && setConfig({ ...config, virtual_hook: e.target.checked })}
@@ -709,7 +732,7 @@ const AiAgentPanel = ({
                             onChange={e => config && setConfig({ ...config, recovery_mode: e.target.value as TRecoveryMode })}
                         >
                             <option value='reverse'>{localize('Reverse martingale: bigger stake after wins, base stake after a loss')}</option>
-                            <option value='martingale'>{localize('Classic martingale: same side, bigger stake after a loss')}</option>
+                            <option value='martingale'>{localize('Martingale / recovery: bigger stake after a loss to win the losses back')}</option>
                             <option value='flip'>{localize('Auto-flip: opposite side, bigger stake')}</option>
                             <option value='flat'>{localize('Flat: same stake, no recovery')}</option>
                         </select>

@@ -20,6 +20,12 @@ describe('followsStream (enter only while the latest ticks point the contract\'s
         expect(followsStream('PUT', undefined, [3, 3, 1], 2, 2)).toBe(false);
     });
     it('contracts without a rule return null', () => {
-        expect(followsStream('ONETOUCH', undefined, [1, 2, 3], 2, 2)).toBeNull();
+        expect(followsStream('ASIANU', undefined, [1, 2, 3], 2, 2)).toBeNull();
+    });
+
+    it('Only Ups / Only Downs follow the stream like Rise / Fall', () => {
+        expect(followsStream('RUNHIGH', undefined, [1, 2, 3], 2, 2)).toBe(true);
+        expect(followsStream('RUNHIGH', undefined, [3, 2, 1], 2, 2)).toBe(false);
+        expect(followsStream('RUNLOW', undefined, [3, 2, 1], 2, 2)).toBe(true);
     });
 });

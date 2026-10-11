@@ -4,6 +4,9 @@ import {
     EXPECTED_LOSS_PER_STAKE,
     MIN_STAKE,
     planRun,
+    planMartingale,
+    ALL_FAMILY_KEYS,
+    MARTINGALE_STOP_LOSS_SHARE,
     PLAN_STOP_LOSS_SHARE,
     SAFE_FAMILY_KEYS,
     SPREAD_PER_STAKE,
@@ -68,19 +71,23 @@ describe('24-hour run plan', () => {
     });
 });
 
-describe('safe defaults', () => {
-    it('presets use a flat stake, the plan stake, a trade cap and only the digit contracts', () => {
+describe('24-hour defaults (recovery)', () => {
+    it('presets use the recovery martingale, a ladder-sized base stake, every contract and the entry reader', () => {
         const c = buildConfigFromPreset('moderate', 10000);
-        expect(c.recovery_mode).toBe('flat');
-        expect(c.stake).toBe(planRun(c.stop_loss).stake);
-        expect(c.max_trades_per_hour).toBe(15);
-        expect(c.contract_families).toEqual(SAFE_FAMILY_KEYS);
-        expect(SAFE_FAMILY_KEYS).toEqual(['even_odd', 'over_under']);
+        expect(c.recovery_mode).toBe('martingale');
+        expect(c.recover_losses).toBe(true);
+        expect(c.stake).toBe(planMartingale(c.stop_loss, c.max_steps).stake);
+        expect(c.contract_families).toEqual(ALL_FAMILY_KEYS);
+        expect(c.read_entries).toBe(true);
+        expect(c.protect_trades).toBe(0);
         expect(c.both_sides).toBe(false);
+        expect(SAFE_FAMILY_KEYS).toEqual(['even_odd', 'over_under']);
     });
 
-    it('the default stake is far below the old 2%-of-balance stake', () => {
-        expect(buildConfigFromPreset('moderate', 10000).stake).toBeLessThan(20);
+    it('a full failed ladder fits inside the stop-loss share, so one bad run cannot reach the stop loss alone', () => {
+        const c = buildConfigFromPreset('moderate', 10000);
+        const plan = planMartingale(c.stop_loss, c.max_steps);
+        expect(plan.worst_ladder).toBeLessThanOrEqual(c.stop_loss * MARTINGALE_STOP_LOSS_SHARE + 1);
     });
 });
 

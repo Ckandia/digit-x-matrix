@@ -104,6 +104,18 @@ export type TAutoPilotConfig = {
      * every contract here pays under 2x, so each trade loses a little on average and the loss grows with the NUMBER of trades.
      */
     max_trades_per_hour?: number;
+    /**
+     * Recovery stake (martingale mode). After a loss the next stake is sized to win back EVERYTHING the current ladder has lost
+     * plus one base stake, at the payout the last contract showed. When the ladder runs out of steps or of budget it is dropped
+     * (the loss is accepted), the stake goes back to the base stake and the run carries on; only the overall stop loss ends it.
+     */
+    recover_losses?: boolean;
+    /**
+     * Entry reader: the contract AND the market are chosen from the latest ticks, not from signal confidence. Every ticked
+     * contract on every market is read; the one whose entry is closest to firing (a run of ticks one short of `entry_tick`,
+     * a fast market for Touch, a calm one for No Touch) is taken next. Needs `follow_stream` for the entry timing itself.
+     */
+    read_entries?: boolean;
 };
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
@@ -172,6 +184,51 @@ export const planRun = (stop_loss: number, hours = 24, trades_per_hour = DEFAULT
         trimmed,
     };
 };
+
+/** The share of the stop loss a full failed recovery ladder may use, so the stop loss stays a net and not the plan. */
+export const MARTINGALE_STOP_LOSS_SHARE = 0.6;
+
+/**
+ * The recovery stake: wins back everything lost so far in the ladder plus one base stake, at the payout the contract pays
+ * (profit per unit stake). Example at 0.83: after a 1.00 loss the next stake is (1 + 1) / 0.83 = 2.41.
+ */
+export const recoveryStake = (ladder_spent: number, base: number, payout_ratio = ASSUMED_PAYOUT_RATIO): number => {
+    const ratio = payout_ratio > 0.2 && payout_ratio < 2 ? payout_ratio : ASSUMED_PAYOUT_RATIO;
+    return Math.max(MIN_STAKE, Math.ceil(((ladder_spent + base) / ratio) * 100) / 100);
+};
+
+/** The stakes of a whole recovery ladder (every step lost): base, then each recovery stake. */
+export const recoveryLadder = (base: number, steps: number, payout_ratio = ASSUMED_PAYOUT_RATIO): number[] => {
+    const out: number[] = [];
+    let spent = 0;
+    let stake = base;
+    for (let i = 0; i < Math.max(1, steps); i++) {
+        out.push(Number(stake.toFixed(2)));
+        spent += stake;
+        stake = recoveryStake(spent, base, payout_ratio);
+    }
+    return out;
+};
+
+export type TMartingalePlan = { stake: number; ladder: number[]; worst_ladder: number; trimmed: boolean };
+
+/**
+ * Sizes the BASE stake so that a full failed ladder (`steps` losses in a row) costs at most MARTINGALE_STOP_LOSS_SHARE of the
+ * stop loss. A bigger stop loss gives a bigger base stake; a small account is held to the minimum stake (trimmed = true).
+ * A recovery ladder wins back its losses when ANY step wins; it does not change the odds of a single trade.
+ */
+export const planMartingale = (stop_loss: number, steps: number, share = MARTINGALE_STOP_LOSS_SHARE): TMartingalePlan => {
+    const budget = Math.max(0, Math.abs(stop_loss)) * share;
+    const unit = recoveryLadder(1, steps).reduce((a, b) => a + b, 0);
+    let stake = Math.floor((budget / unit) * 100) / 100;
+    let trimmed = false;
+    if (stake < MIN_STAKE) {
+        stake = MIN_STAKE;
+        trimmed = true;
+    }
+    const ladder = recoveryLadder(stake, steps);
+    return { stake, ladder, worst_ladder: Number(ladder.reduce((a, b) => a + b, 0).toFixed(2)), trimmed };
+};
 /** The virtual hook asks for two paper wins in a row, not one: one paper win is a coin flip's worth of evidence. */
 export const DEFAULT_VIRTUAL_CONFIRMATIONS = 2;
 export const MAX_VIRTUAL_CONFIRMATIONS = 5;
@@ -194,29 +251,31 @@ const MAX_FOLLOW_PAPER_LOSSES = 25;
 export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
     const preset = RISK_PRESETS[level];
     const stop_loss = Number(((balance * preset.stop_loss_pct) / 100).toFixed(2));
-    // 24-hour plan: a flat stake sized so the expected cost of the payout plus a bad run stays inside part of the stop loss,
-    // and a cap on live trades per hour. The connector data showed the loss came from big (martingale) stakes and many trades.
-    const plan = planRun(stop_loss);
+    // 24-hour plan with RECOVERY: the base stake is sized so a full failed ladder fits inside part of the stop loss, a loss is
+    // followed by a recovery stake that wins the ladder back, and every ticked contract is read from the latest ticks.
+    const plan = planMartingale(stop_loss, preset.max_steps);
     return {
-        recovery_mode: 'flat',
+        recovery_mode: 'martingale',
+        recover_losses: true,
         stake: plan.stake,
-        max_trades_per_hour: plan.trades_per_hour,
+        max_trades_per_hour: 60,
         streak_multiplier: preset.streak_multiplier,
         max_streak: preset.max_streak,
-        martingale_multiplier: DEFAULT_MARTINGALE_MULTIPLIER,
+        martingale_multiplier: preset.martingale_multiplier,
         max_steps: preset.max_steps,
         stop_loss,
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
         auto_flip: true,
-        protect_trades: DEFAULT_PROTECT_TRADES,
+        protect_trades: 0, // protection capped the first 10 stakes at the base stake, which switched recovery off
         virtual_hook: true,
         virtual_confirmations: DEFAULT_VIRTUAL_CONFIRMATIONS,
         virtual_mode: 'hook',
         follow_stream: true,
         follow_ticks: DEFAULT_FOLLOW_TICKS,
         entry_tick: DEFAULT_ENTRY_TICK,
-        contract_families: SAFE_FAMILY_KEYS,
+        contract_families: ALL_FAMILY_KEYS,
         rotate_contracts: true,
+        read_entries: true,
         both_sides: false, // two stakes for one outcome: it cannot beat a single contract's expected result
     };
 };
@@ -399,8 +458,10 @@ export const tickAgrees = (type: string, prediction: number | undefined, price: 
         case 'DIGITUNDER':
             return d < (prediction ?? 5);
         case 'CALL':
+        case 'RUNHIGH':
             return prev !== undefined && price > prev;
         case 'PUT':
+        case 'RUNLOW':
             return prev !== undefined && price < prev;
         default:
             return null;
@@ -417,6 +478,46 @@ export const trailingRun = (type: string, prediction: number | undefined, prices
         prev = q;
     }
     return run;
+};
+
+/** Touch / No Touch read the market's speed: how far it usually travels in 5 ticks compared with the 0.5 barrier. */
+export const TOUCH_BARRIER_ABS = 0.5;
+export const TOUCH_READ_TICKS = 5;
+/** Touch is entered when the market usually travels at least this multiple of the barrier in 5 ticks (and the last tick was up). */
+export const TOUCH_READ_MIN = 1;
+/** No Touch is entered when the market usually travels at most this multiple of the barrier in 5 ticks (a calm market). */
+export const NOTOUCH_READ_MAX = 0.5;
+
+/** Average tick-to-tick move over the last 20 ticks, scaled to `ticks` ticks, as a multiple of the barrier. null = too few ticks. */
+export const reachRatio = (prices: number[], ticks = TOUCH_READ_TICKS, barrier = TOUCH_BARRIER_ABS): number | null => {
+    const tail = prices.slice(-21);
+    if (tail.length < 11) return null;
+    let sum = 0;
+    for (let i = 1; i < tail.length; i++) sum += Math.abs(tail[i] - tail[i - 1]);
+    return ((sum / (tail.length - 1)) * Math.sqrt(ticks)) / barrier;
+};
+
+export const touchReading = (type: string, prices: number[]): boolean => {
+    const r = reachRatio(prices);
+    if (r === null) return false;
+    if (type === 'ONETOUCH') return r >= TOUCH_READ_MIN && prices[prices.length - 1] > prices[prices.length - 2];
+    return r <= NOTOUCH_READ_MAX;
+};
+
+/**
+ * How close this contract's entry is to firing, 0..1, from the latest ticks only (no signal confidence). Stream contracts:
+ * a run one tick short of `target` is 1 (the next matching tick is the entry); a run that is already `target` long or longer is
+ * stale (0: it waits for a fresh run). Touch / No Touch: how well the market's speed fits the contract.
+ */
+export const entryScore = (type: string, prediction: number | undefined, prices: number[], pip: number, target = DEFAULT_ENTRY_TICK): number => {
+    if (type === 'ONETOUCH' || type === 'NOTOUCH') {
+        const r = reachRatio(prices);
+        if (r === null) return 0;
+        return type === 'ONETOUCH' ? Math.min(1, r / TOUCH_READ_MIN) : Math.min(1, NOTOUCH_READ_MAX / Math.max(r, 1e-6));
+    }
+    const run = trailingRun(type, prediction, prices, pip);
+    if (run >= target) return 0;
+    return run === target - 1 ? 1 : (run / Math.max(1, target - 1)) * 0.9;
 };
 
 /**
@@ -437,12 +538,18 @@ export const followsStream = (type: string, prediction: number | undefined, pric
         case 'DIGITUNDER':
             return digitsOk(d => d < (prediction ?? 5));
         case 'CALL':
-        case 'PUT': {
+        case 'PUT':
+        case 'RUNHIGH':
+        case 'RUNLOW': {
+            const up = type === 'CALL' || type === 'RUNHIGH';
             const last = prices.slice(-(n + 1));
             if (last.length < n + 1) return false;
-            for (let i = 1; i < last.length; i++) if (type === 'CALL' ? !(last[i] > last[i - 1]) : !(last[i] < last[i - 1])) return false;
+            for (let i = 1; i < last.length; i++) if (up ? !(last[i] > last[i - 1]) : !(last[i] < last[i - 1])) return false;
             return true;
         }
+        case 'ONETOUCH':
+        case 'NOTOUCH':
+            return touchReading(type, prices);
         default:
             return null;
     }
@@ -770,7 +877,26 @@ export class AutoPilotEngine {
         return this._pick(others);
     }
 
+    /** Entry reader on: the contract and the market come from the latest ticks. Nothing readable -> the classic pick below. */
     private _findAndEnter(stake: number, tag?: TAutoPilotEvent['tag']) {
+        if (!this.running || this.busy) return;
+        if (this.config.read_entries === true) {
+            this.busy = true;
+            void this._bestByReading(null).then(best => {
+                this.busy = false;
+                if (!this.running) return;
+                if (best) {
+                    this._enter(best, stake, tag);
+                    return;
+                }
+                this._findAndEnterClassic(stake, tag);
+            });
+            return;
+        }
+        this._findAndEnterClassic(stake, tag);
+    }
+
+    private _findAndEnterClassic(stake: number, tag?: TAutoPilotEvent['tag']) {
         if (!this.running || this.busy) return;
 
         const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
@@ -823,6 +949,11 @@ export class AutoPilotEngine {
         const families = CONTRACT_FAMILIES.filter(f => !keys || keys.includes(f.key));
         if (!families.length) return null;
         if (prev && (!keys || this.config.rotate_contracts === false || families.length < 2)) return null;
+        if (this.config.read_entries === true) {
+            const best = await this._bestByReading(prev);
+            if (!this.running) return null;
+            if (best) return best;
+        }
         const start = prev ? families.findIndex(f => f.types.includes(prev.contract_type)) : -1;
         for (let i = 1; i <= families.length; i++) {
             const family = families[(start + i + families.length) % families.length];
@@ -831,6 +962,119 @@ export class AutoPilotEngine {
             if (candidate) return candidate;
         }
         return null;
+    }
+
+    /**
+     * Entry reader. Reads the latest ticks of every market for every ticked contract and returns the contract whose entry is
+     * closest to firing (see entryScore). Signal confidence is not used. Rise/Fall and Only Ups/Downs need their trend first;
+     * Touch / No Touch need Deriv to price them. Ties go to the family after the one just traded, so every contract gets turns.
+     */
+    private async _bestByReading(prev: TCandidate | null): Promise<TCandidate | null> {
+        const keys = this.config.contract_families;
+        let families = CONTRACT_FAMILIES.filter(f => !keys || keys.includes(f.key));
+        if (!families.length) return null;
+        if (prev) {
+            const at = families.findIndex(f => f.types.includes(prev.contract_type));
+            if (at >= 0) families = [...families.slice(at + 1), ...families.slice(0, at + 1)];
+        }
+        const symbols = Object.keys(this.getSnapshots());
+        if (!symbols.length) return null;
+        const target = Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(this.config.entry_tick ?? DEFAULT_ENTRY_TICK)));
+        const history = new Map<string, { prices: number[]; pip: number }>();
+        await Promise.all(
+            symbols.map(async symbol => {
+                try {
+                    const res = await this.connection.send({ ticks_history: symbol, count: Math.max(30, TREND_WINDOW), end: 'latest', style: 'ticks' });
+                    const prices: number[] = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+                    history.set(symbol, { prices, pip: Number.isInteger(res?.pip_size) ? Number(res.pip_size) : 2 });
+                } catch {
+                    /* a market whose ticks cannot be read is simply not read */
+                }
+            })
+        );
+        if (!this.running) return null;
+        const now = Date.now();
+        const scored: { score: number; symbol: string; type: string; order: number }[] = [];
+        let order = 0;
+        for (const family of families) {
+            for (const symbol of symbols) {
+                const h = history.get(symbol);
+                if (!h || h.prices.length < 11) continue;
+                for (const type of family.types) {
+                    if (tradeTicks(symbol, type) === null) continue;
+                    if ((this.blocked.get(`${symbol}|${type}`) ?? 0) > now) continue;
+                    const need = TREND_NEEDED[type];
+                    if (need && detectTrend(h.prices.slice(-TREND_WINDOW)) !== need) continue;
+                    const prediction = type === 'DIGITOVER' ? 4 : type === 'DIGITUNDER' ? 5 : undefined;
+                    scored.push({ score: entryScore(type, prediction, h.prices, h.pip, target), symbol, type, order: order++ });
+                }
+            }
+        }
+        scored.sort((a, b) => b.score - a.score || a.order - b.order);
+        for (const pick of scored.slice(0, 8)) {
+            if (isTouch(pick.type) && !(await this._probeTouch(pick.symbol, pick.type))) {
+                if (!this.running) return null;
+                continue;
+            }
+            const ticks = tradeTicks(pick.symbol, pick.type);
+            if (ticks === null) continue;
+            const kind = pick.type.startsWith('DIGIT') ? 'digits' : isTouch(pick.type) ? 'touch' : pick.type.startsWith('RUN') ? 'only_up_down' : 'rise_fall';
+            this.hooks?.onLog?.('info', `Entry reader: ${OPPOSITE_LABEL[pick.type] ?? pick.type} on ${pick.symbol} reads best from the latest ticks (score ${pick.score.toFixed(2)}).`);
+            return {
+                symbol: pick.symbol,
+                family: kind,
+                contract_type: pick.type,
+                duration_ticks: ticks,
+                prediction: pick.type === 'DIGITOVER' ? 4 : pick.type === 'DIGITUNDER' ? 5 : isTouch(pick.type) ? TOUCH_BARRIER : undefined,
+                label: OPPOSITE_LABEL[pick.type] ?? pick.type,
+                confidence: 1,
+                basis: 'Entry reader: chosen from the latest ticks.',
+            } as TCandidate;
+        }
+        return null;
+    }
+
+    /** Touch / No Touch entry: resolves true the moment the latest ticks fit the contract (a fast market for Touch, a calm one for No Touch). */
+    private async _awaitReading(candidate: TCandidate): Promise<boolean> {
+        const type = candidate.contract_type;
+        let buffer: number[] = [];
+        let last_epoch: number | undefined;
+        try {
+            const res = await this.connection.send({ ticks_history: candidate.symbol, count: 30, end: 'latest', style: 'ticks' });
+            buffer = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            const times: number[] = ((res?.history?.times ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            last_epoch = times[times.length - 1];
+        } catch {
+            return false; // cannot see the stream, so no live entry
+        }
+        if (touchReading(type, buffer)) return true;
+        return new Promise<boolean>(resolve => {
+            let done = false;
+            let sub: number | null = null;
+            const finish = (ok: boolean) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                if (sub !== null) void this.connection.unsubscribe(sub);
+                resolve(ok);
+            };
+            const timer = setTimeout(() => finish(false), 90_000);
+            sub = this.connection.subscribe({ ticks: candidate.symbol }, (data, err) => {
+                if (done) return;
+                if (err || !this.running) return finish(false);
+                const tick = data?.tick;
+                if (!tick) return;
+                const epoch = Number(tick.epoch);
+                if (Number.isFinite(epoch)) {
+                    if (last_epoch !== undefined && epoch <= last_epoch) return;
+                    last_epoch = epoch;
+                }
+                const q = Number(tick.quote);
+                if (!Number.isFinite(q)) return;
+                buffer = [...buffer, q].slice(-30);
+                if (touchReading(type, buffer)) finish(true);
+            });
+        });
     }
 
     private async _candidateForFamily(family: (typeof CONTRACT_FAMILIES)[number], prefer_symbol?: string): Promise<TCandidate | null> {
@@ -954,6 +1198,7 @@ export class AutoPilotEngine {
     private async _awaitEntryTick(candidate: TCandidate): Promise<boolean> {
         const target = Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(this.config.entry_tick ?? DEFAULT_ENTRY_TICK)));
         const type = candidate.contract_type;
+        if (isTouch(type)) return this._awaitReading(candidate);
         const prediction = candidate.prediction as number | undefined;
         let pip = 2;
         let run = 0;
@@ -1651,17 +1896,39 @@ export class AutoPilotEngine {
                 return;
             }
 
+            // Recovery stake: win back the whole ladder plus one base stake, at the payout this contract showed.
+            const recover = this.config.recover_losses === true && mode === 'martingale';
+            const shown_ratio = Number(contract.payout) / Number(contract.buy_price) - 1;
+            const dropLadder = (why: string) => {
+                // The ladder is out of steps or budget: accept the loss, back to the base stake, keep trading (the stop loss still ends the run).
+                this.hooks?.onLog?.('info', `Recovery ladder dropped (${why}): ${this.ladder_spent.toFixed(2)} ${this.currency} accepted as a loss, stake back to ${base_stake}.`);
+                this.step = 1;
+                this.ladder_spent = 0;
+                if (hook_rules) this._hookNext(candidate, base_stake);
+                else this._findAndEnter(base_stake);
+            };
             if (this.step >= this.config.max_steps) {
+                if (recover) {
+                    dropLadder(`${this.config.max_steps} steps lost`);
+                    return;
+                }
                 this.stop('max recovery steps reached');
                 return;
             }
 
-            const next_stake = Number((net_stake / (pair ? 2 : 1) * this.config.martingale_multiplier).toFixed(2));
+            const next_stake = recover
+                ? recoveryStake(this.ladder_spent, base_stake, shown_ratio)
+                : Number((net_stake / (pair ? 2 : 1) * this.config.martingale_multiplier).toFixed(2));
             // Ladder budget: the whole recovery run may risk at most stop_loss in total.
             if (this.ladder_spent + next_stake > Math.abs(this.config.stop_loss)) {
+                if (recover) {
+                    dropLadder('the next stake would pass the stop-loss budget');
+                    return;
+                }
                 this.stop('recovery ladder would exceed the stop-loss budget');
                 return;
             }
+            if (recover) this.hooks?.onLog?.('info', `Recovery stake ${next_stake} ${this.currency}: wins back ${this.ladder_spent.toFixed(2)} lost plus one base stake.`);
             this.step += 1;
             if (switchTo(next_stake)) return;
             if (hook_rules) {
