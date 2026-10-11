@@ -98,6 +98,12 @@ export type TAutoPilotConfig = {
     rotate_contracts?: boolean;
     /** Only Ups/Only Downs and Touch/No Touch: once the virtual hook clears the trade, BOTH sides are bought live (same market, same stake each). Default on. */
     both_sides?: boolean;
+    /**
+     * Pacing: at most this many LIVE trades per hour (0 / undefined = no limit). A live buy that would come sooner than
+     * 3600/N seconds after the previous one waits. Together with a small flat stake this is what bounds a 24-hour run's cost:
+     * every contract here pays under 2x, so each trade loses a little on average and the loss grows with the NUMBER of trades.
+     */
+    max_trades_per_hour?: number;
 };
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
@@ -114,6 +120,58 @@ export const ALL_FAMILY_KEYS = CONTRACT_FAMILIES.map(f => f.key);
 export const PROTECT_LOSS_STAKES = 3;
 export const DEFAULT_PROTECT_TRADES = 10;
 export const DEFAULT_MARTINGALE_MULTIPLIER = 1.2;
+
+/** What a win paid in the owner's connector data (break-even win rates of 54.5-54.7% on the digit contracts => 1 / (1 + 0.83)). */
+export const ASSUMED_PAYOUT_RATIO = 0.83;
+/** Average LOSS of a fair 50/50 trade per unit of stake at that payout: 0.5 * 1 - 0.5 * 0.83 = 0.085 (it loses a little on average, every trade). */
+export const EXPECTED_LOSS_PER_STAKE = 0.5 - 0.5 * ASSUMED_PAYOUT_RATIO;
+/** Spread of one 50/50 trade per unit of stake: sqrt(0.5 * 0.5) * (1 + 0.83). */
+export const SPREAD_PER_STAKE = 0.5 * (1 + ASSUMED_PAYOUT_RATIO);
+export const MIN_STAKE = 0.35;
+export const DEFAULT_TRADES_PER_HOUR = 15;
+/** The share of the stop loss the plan lets itself use (expected cost + a 3-sigma bad run), so the stop loss is a net, not the plan. */
+export const PLAN_STOP_LOSS_SHARE = 0.7;
+/** Contracts ticked by default: the 1-tick digit contracts. Touch / No Touch and Only Ups / Downs lost the most per stake in the owner's data. */
+export const SAFE_FAMILY_KEYS = ['even_odd', 'over_under'];
+
+export type TDayPlan = {
+    stake: number;
+    trades_per_hour: number;
+    trades: number;
+    /** What the plan expects to lose to the payout over the whole run (a cost, not a risk). */
+    expected_cost: number;
+    /** Expected cost plus a 3-sigma bad run: the plan is built so this stays inside PLAN_STOP_LOSS_SHARE of the stop loss. */
+    bad_run_loss: number;
+    /** True when the minimum stake forced fewer trades than asked for. */
+    trimmed: boolean;
+};
+
+/**
+ * Sizes a run so its expected cost plus a 3-sigma bad run fits inside part of the stop loss. Every contract pays under 2x,
+ * so a trade loses a little on average (about 8.5% of the stake at 0.83 payout) and the cost grows with stake x trades. This
+ * does NOT make a run profitable and cannot guarantee the stop loss never triggers; it makes triggering very unlikely.
+ */
+export const planRun = (stop_loss: number, hours = 24, trades_per_hour = DEFAULT_TRADES_PER_HOUR): TDayPlan => {
+    const budget = Math.max(0, Math.abs(stop_loss)) * PLAN_STOP_LOSS_SHARE;
+    const bad = (stake: number, n: number) => stake * (n * EXPECTED_LOSS_PER_STAKE + 3 * SPREAD_PER_STAKE * Math.sqrt(n));
+    let n = Math.max(1, Math.floor(hours * trades_per_hour));
+    let stake = budget / (n * EXPECTED_LOSS_PER_STAKE + 3 * SPREAD_PER_STAKE * Math.sqrt(n));
+    let trimmed = false;
+    stake = Math.floor(stake * 100) / 100;
+    if (stake < MIN_STAKE) {
+        stake = MIN_STAKE;
+        trimmed = true;
+        while (n > 1 && bad(stake, n) > budget) n -= 1;
+    }
+    return {
+        stake,
+        trades: n,
+        trades_per_hour: Math.max(1, Math.floor(n / hours)),
+        expected_cost: Number((stake * n * EXPECTED_LOSS_PER_STAKE).toFixed(2)),
+        bad_run_loss: Number(bad(stake, n).toFixed(2)),
+        trimmed,
+    };
+};
 /** The virtual hook asks for two paper wins in a row, not one: one paper win is a coin flip's worth of evidence. */
 export const DEFAULT_VIRTUAL_CONFIRMATIONS = 2;
 export const MAX_VIRTUAL_CONFIRMATIONS = 5;
@@ -135,16 +193,19 @@ const MAX_FOLLOW_PAPER_LOSSES = 25;
  *  preset is only ever a starting point, never enforced afterward. */
 export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
     const preset = RISK_PRESETS[level];
+    const stop_loss = Number(((balance * preset.stop_loss_pct) / 100).toFixed(2));
+    // 24-hour plan: a flat stake sized so the expected cost of the payout plus a bad run stays inside part of the stop loss,
+    // and a cap on live trades per hour. The connector data showed the loss came from big (martingale) stakes and many trades.
+    const plan = planRun(stop_loss);
     return {
-        // The owner's choice: a small martingale (stake x1.2 after a loss, back to the base stake after a win), capped by
-        // max_steps and the stop-loss budget. It changes how much each trade is worth, never the win rate.
-        recovery_mode: 'martingale',
-        stake: Number(((balance * preset.stake_pct) / 100).toFixed(2)),
+        recovery_mode: 'flat',
+        stake: plan.stake,
+        max_trades_per_hour: plan.trades_per_hour,
         streak_multiplier: preset.streak_multiplier,
         max_streak: preset.max_streak,
         martingale_multiplier: DEFAULT_MARTINGALE_MULTIPLIER,
         max_steps: preset.max_steps,
-        stop_loss: Number(((balance * preset.stop_loss_pct) / 100).toFixed(2)),
+        stop_loss,
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
         auto_flip: true,
         protect_trades: DEFAULT_PROTECT_TRADES,
@@ -154,7 +215,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         follow_stream: true,
         follow_ticks: DEFAULT_FOLLOW_TICKS,
         entry_tick: DEFAULT_ENTRY_TICK,
-        contract_families: ALL_FAMILY_KEYS,
+        contract_families: SAFE_FAMILY_KEYS,
         rotate_contracts: true,
         both_sides: false, // two stakes for one outcome: it cannot beat a single contract's expected result
     };
@@ -599,6 +660,7 @@ export class AutoPilotEngine {
     private streak_profit = 0; // reverse martingale: what the current win streak has made
     private entry_tag: TAutoPilotEvent['tag']; // why the trade being placed is not a plain fresh pick
     private hook_release = false; // the next live entry was just released by the virtual hook (only those fire both sides)
+    private last_live_at = 0; // when the last live buy went out (pacing)
     private hook_pending = false; // a real loss just happened: the next entry is paper-traded first (virtual hook)
     private trade_count = 0; // settled trades in this run (capital protection counts these)
     private flip_origin: TCandidate | null = null; // auto flip: the contract we flipped away from
@@ -640,6 +702,7 @@ export class AutoPilotEngine {
         this.streak_profit = 0;
         this.busy = false;
         this.trade_count = 0;
+        this.last_live_at = 0;
         this.hook_pending = this._hookMode(); // hook rules: the run starts on paper, not with a real trade
         this.flip_origin = null;
         this.blocked.clear();
@@ -1242,6 +1305,20 @@ export class AutoPilotEngine {
 
     private _enterNow(candidate_in: TCandidate, wanted_stake_in: number, tag?: TAutoPilotEvent['tag']) {
         const candidate: TCandidate = candidate_in;
+        // Pacing: never more than `max_trades_per_hour` live trades. A buy that would come too soon waits its turn.
+        const per_hour = Math.floor(this.config.max_trades_per_hour ?? 0);
+        if (per_hour > 0 && this.last_live_at > 0) {
+            const wait_ms = this.last_live_at + 3_600_000 / per_hour - Date.now();
+            if (wait_ms > 0) {
+                this.busy = true; // nothing else may start a trade meanwhile
+                setTimeout(() => {
+                    this.busy = false; // _enterNow decides again (and sets it when it really buys)
+                    if (!this.running) return;
+                    this._enterNow(candidate, wanted_stake_in, tag);
+                }, Math.min(wait_ms, 60_000) + 5);
+                return;
+            }
+        }
         // Quality gate: in 'Only trade a proven edge' mode NO live buy happens for a contract without a proven edge, however it was
         // picked (signal, virtual hook, opposite, recovery). Paper trading carries on at no cost and keeps adding evidence.
         if (this.learner?.mode === 'edge_gate' && !this.learner.isTradable(candidate.symbol, candidate.contract_type, (candidate as { bucket?: string }).bucket, candidate.duration_ticks)) {
@@ -1280,6 +1357,7 @@ export class AutoPilotEngine {
         this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
         this.busy = true;
         this.lastCandidate = candidate;
+        this.last_live_at = Date.now();
         this.entry_tag = tag;
         this._emit({
             phase: 'entering',

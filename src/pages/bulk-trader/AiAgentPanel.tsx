@@ -19,6 +19,8 @@ import {
     TAutoPilotConfig,
     TAutoPilotEvent,
     TRiskLevel,
+    EXPECTED_LOSS_PER_STAKE,
+    SPREAD_PER_STAKE,
 } from './autoPilotEngine';
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
@@ -575,6 +577,38 @@ const AiAgentPanel = ({
                                 disabled={status === 'connecting'}
                                 onChange={v => updateField('protect_trades', Math.max(0, Math.floor(v)))}
                             />
+                            <FieldBox
+                                label={localize('Max live trades per hour (0 = no limit)')}
+                                value={config.max_trades_per_hour ?? 0}
+                                step={1}
+                                disabled={status === 'connecting'}
+                                onChange={v => updateField('max_trades_per_hour', Math.max(0, Math.floor(v)))}
+                            />
+                        </div>
+                    )}
+                    {config && (
+                        <div className='ai-agent-panel__hint'>
+                            {(() => {
+                                const per_hour = Math.floor(config.max_trades_per_hour ?? 0);
+                                if (!(per_hour > 0) || config.stake <= 0) {
+                                    return localize('24-hour check: no trade cap is set, so the cost of a run is not bounded. Set Max live trades per hour.');
+                                }
+                                const n = per_hour * 24;
+                                const cost = config.stake * n * EXPECTED_LOSS_PER_STAKE;
+                                const bad = config.stake * (n * EXPECTED_LOSS_PER_STAKE + 3 * SPREAD_PER_STAKE * Math.sqrt(n));
+                                const growth = config.recovery_mode === 'martingale' || config.recovery_mode === 'reverse';
+                                return localize(
+                                    '24-hour check at {{n}} trades of {{stake}}: the payout alone is expected to cost about {{cost}}, a bad run about {{bad}}, against a stop loss of {{sl}}.{{growth}} This is a cost estimate at 0.83 payout and 50/50 trades, not a promise: a run is not expected to profit.',
+                                    {
+                                        n,
+                                        stake: config.stake,
+                                        cost: cost.toFixed(2),
+                                        bad: bad.toFixed(2),
+                                        sl: config.stop_loss,
+                                        growth: growth ? ' The stake method grows stakes, which these numbers do not cover: use Flat for a bounded run.' : '',
+                                    }
+                                );
+                            })()}
                         </div>
                     )}
 

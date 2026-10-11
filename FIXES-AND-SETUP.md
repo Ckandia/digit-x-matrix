@@ -1,3 +1,12 @@
+# Safe 24-hour run (October 2026)
+
+- **Honest limit:** this is not, and cannot be made, a profit machine. Last digits and ticks on these indices are fair-random and the payout (~0.83x) means a trade needs ~54.6% wins to break even; every contract sits near 50%. Expected cost is about 8.5c per 1.00 staked. What changed is that the 24h cost is now bounded and sized from your stop loss, so depletion and a stop-loss hit are very unlikely, not impossible.
+- **`planRun`** (autoPilotEngine.ts): picks a flat stake so that expected cost + a 3-sigma bad run over 24h stays within 70% of the stop loss. Stop loss is NOT widened.
+- **New defaults:** flat stake (no martingale/reverse), max 15 live trades per hour (new field "Max live trades per hour", 0 = no limit), default families Even/Odd and Over/Under only (no Touch, Only Up/Down, multipliers). Both sides off.
+- **Panel:** a "24-hour check" line shows trades, expected cost and a bad-run cost against your stop loss; it warns if you pick martingale/reverse.
+- **Runs in the browser tab:** keep the tab open and the computer awake for 24h. The edge gate "standing aside" is protective; leave it on.
+- Tests: `safe-plan.spec.ts` (9, incl. Monte Carlo <=0.5% stop-loss hits). Engine specs pass under a jest shim; full `npm install`/build not possible here (registry unreachable), so run `npm install && npx jest && npm run build` once.
+
 # Claude connector (October 2026)
 
 - New: a read-only MCP server on the backend (`/mcp/<MCP_SECRET>`) so Claude can read your trades, plus the app-side sync (Journal tab > Claude connector). Full setup and security notes: **CLAUDE-CONNECTOR.md**.
