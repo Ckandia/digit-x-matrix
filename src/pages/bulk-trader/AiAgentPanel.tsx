@@ -22,6 +22,7 @@ import {
     EXPECTED_LOSS_PER_STAKE,
     SPREAD_PER_STAKE,
 } from './autoPilotEngine';
+import InfoNote from './InfoNote';
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow } from './tradeHistory';
@@ -454,9 +455,7 @@ const AiAgentPanel = ({
             <header className='ai-agent-panel__header'>
                 <h3>{localize('AI auto-trader')}</h3>
                 <p>
-                    {localize(
-                        'Reads your balance, sets the stake from a risk level, and scans every market for Even/Odd (including your streak-reversal rule) and Rise/Fall on the next tick, plus the barrier contracts (Touch/No Touch, Stays Between/Goes Outside) when the market state suits them, and picks the market and contract with the strongest signal, all on 1 tick (barrier contracts use the shortest duration Deriv offers). Every trade is priced with Deriv first, so a contract Deriv would reject is skipped before any money is spent. The stake grows only on a winning streak (reverse martingale) and returns to the base stake after a loss; after 2 losses in a row it switches to a different contract. The signal is a statistical deviation score, not a win-probability estimate.'
-                    )}
+                    <InfoNote text={localize('Reads your balance, sets the stake from a risk level, and scans every market for Even/Odd (including your streak-reversal rule) and Rise/Fall on the next tick, plus the barrier contracts (Touch/No Touch, Stays Between/Goes Outside) when the market state suits them, and picks the market and contract with the strongest signal, all on 1 tick (barrier contracts use the shortest duration Deriv offers). Every trade is priced with Deriv first, so a contract Deriv would reject is skipped before any money is spent. The stake grows only on a winning streak (reverse martingale) and returns to the base stake after a loss; after 2 losses in a row it switches to a different contract. The signal is a statistical deviation score, not a win-probability estimate.')} />
                 </p>
             </header>
 
@@ -588,7 +587,7 @@ const AiAgentPanel = ({
                     )}
                     {config && (
                         <div className='ai-agent-panel__hint'>
-                            {(() => {
+                            <InfoNote text={(() => {
                                 const per_hour = Math.floor(config.max_trades_per_hour ?? 0);
                                 if (!(per_hour > 0) || config.stake <= 0) {
                                     return localize('24-hour check: no trade cap is set, so the cost of a run is not bounded. Set Max live trades per hour.');
@@ -608,7 +607,7 @@ const AiAgentPanel = ({
                                         growth: growth ? ' The stake method grows stakes, which these numbers do not cover: use Flat for a bounded run.' : '',
                                     }
                                 );
-                            })()}
+                            })()} />
                         </div>
                     )}
 
@@ -619,9 +618,7 @@ const AiAgentPanel = ({
                             disabled={!config || status === 'connecting'}
                             onChange={e => config && setConfig({ ...config, follow_stream: e.target.checked })}
                         />{' '}
-                        {localize(
-                            'Two-tick entry: a live trade is bought on the third matching tick, never the 4th or 5th (5,7,8 buys Over 4 on the 8; 2,4,6 buys Even on the 6; Rise/Fall use rising/falling ticks). The AI watches the live stream and waits (up to about 90 ticks) for a fresh run.'
-                        )}
+                        <InfoNote text={localize('Two-tick entry: a live trade is bought on the third matching tick, never the 4th or 5th (5,7,8 buys Over 4 on the 8; 2,4,6 buys Even on the 6; Rise/Fall use rising/falling ticks). The AI watches the live stream and waits (up to about 90 ticks) for a fresh run.')} />
                     </label>
                     {config?.follow_stream && (
                         <FieldBox
@@ -640,9 +637,7 @@ const AiAgentPanel = ({
                             disabled={!config || status === 'connecting'}
                             onChange={e => config && setConfig({ ...config, read_entries: e.target.checked })}
                         />{' '}
-                        {localize(
-                            'Entry reader: the AI reads the latest ticks of every market for every ticked contract and takes the contract whose entry is closest to firing (a run one tick short of the entry tick; a fast market for Touch, a calm one for No Touch). Signal confidence is not used.'
-                        )}
+                        <InfoNote text={localize('Entry reader: the AI reads the latest ticks of every market for every ticked contract and takes the contract whose entry is closest to firing (a run one tick short of the entry tick; a fast market for Touch, a calm one for No Touch). Signal confidence is not used.')} />
                     </label>
                     <label className='ai-agent-panel__hint'>
                         <input
@@ -651,9 +646,7 @@ const AiAgentPanel = ({
                             disabled={!config || status === 'connecting'}
                             onChange={e => config && setConfig({ ...config, recover_losses: e.target.checked })}
                         />{' '}
-                        {localize(
-                            'Recovery stake (needs the martingale stake method): after a loss the next stake wins back everything lost in the ladder plus one base stake. When the ladder runs out of steps or budget the loss is accepted, the stake goes back to the base stake and trading goes on; only the stop loss ends the run.'
-                        )}
+                        <InfoNote text={localize('Recovery stake (needs the martingale stake method): after a loss the next stake wins back everything lost in the ladder plus one base stake. When the ladder runs out of steps or budget the loss is accepted, the stake goes back to the base stake and trading goes on; only the stop loss ends the run.')} />
                     </label>
 
                     <label className='ai-agent-panel__hint'>
@@ -663,9 +656,7 @@ const AiAgentPanel = ({
                             disabled={!config || status === 'connecting'}
                             onChange={e => config && setConfig({ ...config, virtual_hook: e.target.checked })}
                         />{' '}
-                        {localize(
-                            'Virtual hook: before EVERY live trade the AI makes one paper trade (no money). A paper win buys the SAME contract for real. Even/Odd follows the hook: after a paper loss nothing is bought, it keeps paper-testing until it wins. Other contracts buy the OPPOSITE after a paper loss (Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs). After each live trade it paper-tests again. While it is on, auto flip and contract switching are off.'
-                        )}
+                        <InfoNote text={localize('Virtual hook: before EVERY live trade the AI makes one paper trade (no money). A paper win buys the SAME contract for real. Even/Odd follows the hook: after a paper loss nothing is bought, it keeps paper-testing until it wins. Other contracts buy the OPPOSITE after a paper loss (Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs). After each live trade it paper-tests again. While it is on, auto flip and contract switching are off.')} />
                     </label>
                     <div className='ai-agent-panel__hint'>
                         <strong>{localize('Contracts the AI may trade')}</strong>
@@ -696,20 +687,16 @@ const AiAgentPanel = ({
                                 disabled={!config || status === 'connecting'}
                                 onChange={e => config && setConfig({ ...config, rotate_contracts: e.target.checked })}
                             />{' '}
-                            {localize(
-                                'Rotate: after every live trade the next paper test is on the next ticked contract, so each one gets its turn. Off = the AI stays on the contract it just traded. Rise/Fall and Only Ups/Downs wait for a higher-high / lower-low on the 1-tick chart.'
-                            )}
+                            <InfoNote text={localize('Rotate: after every live trade the next paper test is on the next ticked contract, so each one gets its turn. Off = the AI stays on the contract it just traded. Rise/Fall and Only Ups/Downs wait for a higher-high / lower-low on the 1-tick chart.')} />
                         </label>
                         <label style={{ display: 'block' }}>
                             <input
                                 type='checkbox'
-                                checked={config?.both_sides === true}
+                                checked={config?.both_sides !== false}
                                 disabled={!config || status === 'connecting'}
                                 onChange={e => config && setConfig({ ...config, both_sides: e.target.checked })}
                             />{' '}
-                            {localize(
-                                'Both sides: once the virtual hook clears an Only Ups or Only Downs trade, the AI buys BOTH on the live account (same market, same stake each). Every other contract is bought as a single trade. The two results count as one trade.'
-                            )}
+                            <InfoNote text={localize('Both sides: the AI buys Only Ups AND Only Downs together on the same market (same stake each). Every other contract is a single trade. The two results count as one trade. Careful: both can lose when the ticks neither only rise nor only fall, which is the usual case, so the doubled payout of the one that wins does not reliably cover the other.')} />
                         </label>
                     </div>
                     <label className='ai-agent-panel__hint'>
@@ -719,9 +706,7 @@ const AiAgentPanel = ({
                             disabled={!config || status === 'connecting' || !!config?.virtual_hook}
                             onChange={e => config && setConfig({ ...config, auto_flip: e.target.checked })}
                         />{' '}
-                        {localize(
-                            'Auto flip (off while the virtual hook is on): after a loss the AI switches to the partner contract, and after the next loss it switches back. Pairs: Even / Over 4, Odd / Under 5, Touch / Under 5, No Touch / Over 4, Rise / Under 5, Fall / Over 4.'
-                        )}
+                        <InfoNote text={localize('Auto flip (off while the virtual hook is on): after a loss the AI switches to the partner contract, and after the next loss it switches back. Pairs: Even / Over 4, Odd / Under 5, Touch / Under 5, No Touch / Over 4, Rise / Under 5, Fall / Over 4.')} />
                     </label>
 
                     <label className='ai-agent-panel__hint'>
@@ -738,14 +723,10 @@ const AiAgentPanel = ({
                         </select>
                     </label>
                     <p className='ai-agent-panel__hint'>
-                        {localize(
-                            'Conservative / Moderate / Aggressive change the stake sizes only (stake, stake growth, stop loss, take profit). They never change which contracts the AI trades. After 2 losses in a row the AI switches to a different contract.'
-                        )}
+                        <InfoNote text={localize('Conservative / Moderate / Aggressive change the stake sizes only (stake, stake growth, stop loss, take profit). They never change which contracts the AI trades. After 2 losses in a row the AI switches to a different contract.')} />
                     </p>
                     <p className='ai-agent-panel__hint'>
-                        {localize(
-                            'Quick contracts first: 1-tick contracts (Even/Odd, Over 4/Under 5, Rise/Fall) are always preferred; Touch/No Touch (5 ticks, barrier 0.5, or 10 ticks if Deriv refuses 5) is used only when no 1-tick contract is available. Rise needs a higher-high and Fall a lower-low on the 1-tick chart first. Capital protection: for the first N trades the stake stays at the base stake and the run stops if it loses 3 base stakes. It reduces risk; it cannot guarantee profit.'
-                        )}
+                        <InfoNote text={localize('Quick contracts first: 1-tick contracts (Even/Odd, Over 4/Under 5, Rise/Fall) are always preferred; Touch/No Touch (5 ticks, barrier 0.5, or 10 ticks if Deriv refuses 5) is used only when no 1-tick contract is available. Rise needs a higher-high and Fall a lower-low on the 1-tick chart first. Capital protection: for the first N trades the stake stays at the base stake and the run stops if it loses 3 base stakes. It reduces risk; it cannot guarantee profit.')} />
                     </p>
                     <details className='ai-agent-panel__hint'>
                         <summary>{localize('AI playbook (your notes)')}</summary>
@@ -772,9 +753,7 @@ const AiAgentPanel = ({
                                 journalStore.setSelfReviewEnabled(e.target.checked);
                             }}
                         />{' '}
-                        {localize(
-                            'Let the AI use its self-review: it skips market and contract combinations its own past trades show are clearly losing, and ranks lagging ones lower. The full review is in the Journal tab.'
-                        )}
+                        <InfoNote text={localize('Let the AI use its self-review: it skips market and contract combinations its own past trades show are clearly losing, and ranks lagging ones lower. The full review is in the Journal tab.')} />
                     </label>
                     <label className='ai-agent-panel__hint'>
                         {localize('Learning')}{' '}

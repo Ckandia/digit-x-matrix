@@ -29,6 +29,7 @@ const DERIV_WS_ENDPOINTS = (
 ).filter(Boolean);
 const HISTORY_COUNT = 500; // ticks_history backfill so the window isn't empty on boot
 const RECONNECT_DELAY_MS = 3000;
+const KEEP_ALIVE_MS = 25_000; // see _startKeepAlive
 
 export const DIGIT_SYMBOLS = [
     { symbol: '1HZ10V', display_name: 'Volatility 10 (1s) Index' },
@@ -163,6 +164,28 @@ export class MarketFeed {
         return { stats, signals, pairs: cached.pairs };
     }
 
+    /**
+     * Deriv closes a connection that has sent it nothing for about 2 minutes, even while ticks keep arriving: the render logs
+     * showed this feed dropping and re-dialling every ~2:00. A small {ping:1} every 25s counts as client activity. The reply
+     * (or an "unrecognised request" error on a gateway without ping) is ignored in _handleMessage.
+     */
+    _startKeepAlive() {
+        this._stopKeepAlive();
+        this._keepAliveTimer = setInterval(() => {
+            try {
+                if (this.ws && this.ws.readyState === 1) this._send({ ping: 1 });
+            } catch {
+                /* the close handler will reconnect */
+            }
+        }, KEEP_ALIVE_MS);
+        this._keepAliveTimer.unref?.();
+    }
+
+    _stopKeepAlive() {
+        if (this._keepAliveTimer) clearInterval(this._keepAliveTimer);
+        this._keepAliveTimer = null;
+    }
+
     _nextReqId() {
         return this.req_id_counter++;
     }
@@ -188,6 +211,7 @@ export class MarketFeed {
             for (const { symbol } of DIGIT_SYMBOLS) {
                 this._backfillAndSubscribe(symbol);
             }
+            this._startKeepAlive();
         });
 
         this.ws.on('message', raw => this._handleMessage(raw));
@@ -198,6 +222,7 @@ export class MarketFeed {
         });
 
         this.ws.on('close', () => {
+            this._stopKeepAlive();
             // If this endpoint never produced usable data, rotate to the next
             // candidate rather than retrying a URL that clearly doesn't work.
             if (!this._got_valid_data && DERIV_WS_ENDPOINTS.length > 1) {
@@ -299,6 +324,7 @@ export class MarketFeed {
         } catch {
             return;
         }
+        if (data.msg_type === 'ping' || data.echo_req?.ping) return; // keep-alive reply, or a gateway that does not know ping
         if (data.error) {
             const waiter = this.proposal_waiters?.get(data.echo_req?.req_id);
             if (waiter) {

@@ -78,7 +78,7 @@ describe('quality gate: only trade a proven edge', () => {
 });
 
 describe('safer presets', () => {
-    it('both-sides buying is off by default', () => {
-        expect(buildConfigFromPreset('moderate', 100).both_sides).toBe(false);
+    it('both-sides buying is on by default (it only ever applies to Only Ups / Only Downs)', () => {
+        expect(buildConfigFromPreset('moderate', 100).both_sides).toBe(true);
     });
 });

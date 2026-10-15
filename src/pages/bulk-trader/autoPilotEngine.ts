@@ -80,6 +80,11 @@ export type TAutoPilotConfig = {
      */
     entry_tick?: number;
     /**
+     * How many ticks the AI waits on one contract for its entry (the run of matching ticks). If none appears in that many
+     * ticks the contract is SKIPPED (nothing is bought) and the AI moves on to another one. 10-90, default 30.
+     */
+    entry_wait_ticks?: number;
+    /**
      * What the hook does with its paper results.
      * 'hook' (default, the active rule): the AI starts on paper and every real loss sends it back to paper.
      *   - a paper trade LOSES  -> the OPPOSITE contract is bought for real (Even<->Odd, Over 4<->Under 5, Rise<->Fall, Only Ups<->Only Downs, ...)
@@ -273,10 +278,11 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         follow_stream: true,
         follow_ticks: DEFAULT_FOLLOW_TICKS,
         entry_tick: DEFAULT_ENTRY_TICK,
+        entry_wait_ticks: DEFAULT_ENTRY_WAIT_TICKS,
         contract_families: ALL_FAMILY_KEYS,
         rotate_contracts: true,
         read_entries: true,
-        both_sides: false, // two stakes for one outcome: it cannot beat a single contract's expected result
+        both_sides: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
     };
 };
 
@@ -441,6 +447,11 @@ export const MAX_FOLLOW_TICKS = 5;
 export const DEFAULT_ENTRY_TICK = 3;
 export const MIN_ENTRY_TICK = 2;
 export const MAX_ENTRY_TICK = 5;
+export const DEFAULT_ENTRY_WAIT_TICKS = 30;
+export const MIN_ENTRY_WAIT_TICKS = 10;
+export const MAX_ENTRY_WAIT_TICKS = 90;
+/** How long a contract with no entry stays skipped before the AI will consider it again. */
+const NO_ENTRY_SKIP_MS = 120_000;
 
 /**
  * Does this ONE tick agree with the contract? Digits test the tick's last digit; Rise/Fall test the move from the previous tick.
@@ -1226,7 +1237,9 @@ export class AutoPilotEngine {
                 if (sub !== null) void this.connection.unsubscribe(sub);
                 resolve(ok);
             };
-            const timer = setTimeout(() => finish(false), 90_000);
+            const timer = setTimeout(() => finish(false), 180_000); // safety net if the stream goes quiet
+            const wait_ticks = Math.min(MAX_ENTRY_WAIT_TICKS, Math.max(MIN_ENTRY_WAIT_TICKS, Math.floor(this.config.entry_wait_ticks ?? DEFAULT_ENTRY_WAIT_TICKS)));
+            let seen = 0;
             sub = this.connection.subscribe({ ticks: candidate.symbol }, (data, err) => {
                 if (done) return;
                 if (err || !this.running) return finish(false);
@@ -1243,7 +1256,9 @@ export class AutoPilotEngine {
                 const a = tickAgrees(type, prediction, q, prev, pip);
                 prev = q;
                 run = a ? run + 1 : 0;
-                if (run === target) finish(true); // exactly the Nth matching tick: buy now, not on the 4th or 5th
+                seen += 1;
+                if (run === target) return finish(true); // exactly the Nth matching tick: buy now, not on the 4th or 5th
+                if (seen >= wait_ticks) finish(false); // no entry in time: the caller skips this contract
             });
         });
     }
@@ -1495,19 +1510,13 @@ export class AutoPilotEngine {
                     this._enterNow(candidate, wanted_stake, tag);
                     return;
                 }
-                if (!fired && this.hook_release && waits < 8) {
-                    // The hook has DECIDED what to buy (the paper winner, or the opposite of the paper loser). Do not drop that decision
-                    // for a different contract because the run was slow: keep waiting on the same contract and market.
-                    this.hooks?.onLog?.('info', `Still waiting for a run of ticks on ${candidate.symbol} to buy ${candidate.label}, as the virtual hook decided.`);
-                    this._enter(candidate, wanted_stake, tag, waits + 1);
-                    return;
-                }
-                if (fired && waits < 20) {
-                    this.hooks?.onLog?.('info', `The run completed but ${candidate.label} on ${candidate.symbol} has no confirmed trend; waiting for the next run.`);
-                    this._enter(candidate, wanted_stake, tag, waits + 1);
-                    return;
-                }
-                this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 6000);
+                // No entry found: either no matching run formed within the wait, or the run completed but Rise/Fall / Only Ups/Downs
+                // had no confirmed trend. SKIP this contract (nothing bought), set it aside, and look at the next one.
+                this.hooks?.onLog?.(
+                    'info',
+                    `No entry for ${candidate.label} on ${candidate.symbol} (${fired ? 'the run completed without a confirmed trend' : `no matching run in ${Math.min(MAX_ENTRY_WAIT_TICKS, Math.max(MIN_ENTRY_WAIT_TICKS, Math.floor(this.config.entry_wait_ticks ?? DEFAULT_ENTRY_WAIT_TICKS)))} ticks`}): skipping it for ${NO_ENTRY_SKIP_MS / 1000}s and picking another contract.`
+                );
+                this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + NO_ENTRY_SKIP_MS);
                 this.hook_release = false;
                 if (this._hookMode()) this.hook_pending = true; // a fresh contract is paper-tested before any real money
                 this._findAndEnter(wanted_stake, tag);
@@ -1632,7 +1641,7 @@ export class AutoPilotEngine {
         // Both sides: the opposite contract is bought too, on the same market, same stake and same duration.
         let partner: TCandidate | null = null;
         let partner_parameters: Record<string, unknown> | null = null;
-        if (from_hook && this.config.both_sides === true && bothSidesType(candidate.contract_type)) {
+        if (this.config.both_sides !== false && bothSidesType(candidate.contract_type)) {
             const opposite_type = FLIP_PARTNER[candidate.contract_type];
             const live = this.connection.accountInfo?.balance;
             if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {

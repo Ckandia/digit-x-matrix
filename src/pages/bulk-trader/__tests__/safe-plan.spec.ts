@@ -80,7 +80,7 @@ describe('24-hour defaults (recovery)', () => {
         expect(c.contract_families).toEqual(ALL_FAMILY_KEYS);
         expect(c.read_entries).toBe(true);
         expect(c.protect_trades).toBe(0);
-        expect(c.both_sides).toBe(false);
+        expect(c.both_sides).toBe(true); // applies only to Only Ups / Only Downs, which the default families exclude
         expect(SAFE_FAMILY_KEYS).toEqual(['even_odd', 'over_under']);
     });
 

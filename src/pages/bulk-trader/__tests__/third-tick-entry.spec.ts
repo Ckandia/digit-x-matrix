@@ -137,3 +137,34 @@ describe('two-tick entry: buy on the third matching tick', () => {
         h.engine.stop();
     });
 });
+
+
+describe('no entry found: skip the contract', () => {
+    it('gives up on a contract with no matching run after entry_wait_ticks and buys nothing', async () => {
+        const h = make('DIGITEVEN', { entry_wait_ticks: 10 });
+        h.engine.start();
+        await wait();
+        // 12 ticks that never make three evens in a row
+        for (const d of [2, 4, 7, 2, 4, 7, 2, 4, 7, 2, 4, 7]) {
+            h.conn.tick('R_T3', d);
+            await wait(3);
+        }
+        await wait(40);
+        expect(h.conn.buys_()).toHaveLength(0);
+        expect(h.conn.sent.some(r => r.ticks_history)).toBe(true);
+        h.engine.stop();
+    });
+
+    it('a Rise run that completes without a confirmed trend is skipped too: nothing bought', async () => {
+        const h = make('CALL'); // no ticks_history, so no higher-highs trend can be confirmed
+        h.engine.start();
+        await wait();
+        for (const d of [1, 2, 3, 4]) {
+            h.conn.tick('R_T3', d); // four rising ticks: a run of three rising moves
+            await wait(5);
+        }
+        await wait(60);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
+    });
+});

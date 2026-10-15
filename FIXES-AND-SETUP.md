@@ -1,3 +1,34 @@
+# Merged build: keepalive + mobile-v17 (October 2026)
+
+The two zips shared 1468 of 1484 files; they were built in parallel from the same base. Merged, taking the better side of each difference:
+- **Base: keepalive.** Kept: feed keep-alive ping, Journal clear with a range (24h / 7 days / everything) that stays cleared after Sync from Deriv, tick-counted entry wait (`entry_wait_ticks`, default 30), journal-clear tests, skip test.
+- **From mobile-v17:** `InfoNote` (shows the short title next to each setting and hides the explanation behind an "i"; also covers the 24-hour estimate text, which my icon version missed), its updated both-sides wording, "a run with no confirmed trend is skipped too" (instead of re-waiting up to 20 runs), immediate save when clearing the Journal, the self-review warning in the Clear confirm, and the PROJECT-MEMORY.md file.
+- **Skipped contracts rest 120 s** (v17's value) instead of 60 s.
+- **Not taken from v17: `mobile-fit.scss`.** It forced narrower grids at every screen width (`--cols` defaulting to 2 outside any media query), which would have turned the desktop Journal calendar (7 columns), the history matrix (10 columns) and the KPI row (4 columns) into 2 columns. The phone rules in `app.scss` only change layout on small screens. A few of its safe rules were copied over (text-size-adjust, media max-width, `.app-root` in dvh).
+- **Fixed from v17:** its `edge-gate.spec.ts` still said both-sides is off by default (it would have failed); v17 had not been run (`tsc`/`jest`).
+- Both sides: kept `!== false` (on unless switched off, including for older saved settings) rather than v17's `=== true`.
+
+# Market feed keep-alive (October 2026)
+
+- Found in the Render logs: `[marketFeed] connection closed, reconnecting` about every 2 minutes (sometimes 3.5), each time followed by a fresh dial. That matches Deriv closing a connection the client has sent nothing on for ~2 minutes, even while ticks stream in, and `marketFeed.js` sent no keep-alive. Each drop meant a few seconds without ticks for signals and the 24/7 paper trader, then a full history re-backfill.
+- Fix: `marketFeed.js` now sends `{ ping: 1 }` every 25 seconds while connected; the reply (or an "unrecognised request" error on a gateway without ping) is ignored. Check: `cd backend && npm run check:keepalive` (local WebSocket stand-in for Deriv).
+- This is a likely fix, not a proven one: the sandbox cannot reach Deriv. After the next deploy, the "connection closed, reconnecting" lines in the Render logs should stop appearing every 2 minutes. If they continue, send me a log excerpt.
+- Render state when checked: service live on commit "melon ai", Postgres connected, paper trader running (834 stat cells restored), Claude connector enabled.
+
+# PROGRESS / where we are (updated October 2026)
+
+Done and tested (`tsc --noEmit` clean, `npx jest` 56 suites / 555 tests):
+- Skip when no entry: a contract whose entry run does not appear within `entry_wait_ticks` (default 30, 10-90) ticks is SKIPPED (nothing bought) and blocked for 60s; the AI moves to the next contract. This replaces the earlier "keep waiting 8 rounds" for hook-released trades.
+- Journal tab: **Clear transactions** (older than 24h / older than 7 days / everything for this account), with a confirm. A cutoff is remembered, so Sync from Deriv does not re-import what you cleared. Your Deriv account history itself is untouched.
+- Only Ups / Only Downs buy BOTH sides (same market, same stake each) by default; the checkbox in the AI tab turns it off. It only applies to those two contracts. Note: at most one side can win, and the payout is priced so that, on average, two stakes still return less than two stakes; both sides lose together whenever the market neither runs only up nor only down.
+- AI tab: the long explanations now sit behind a small "i" icon (header, two-tick entry, entry reader, recovery stake, virtual hook, rotate, both sides, auto flip, self-review, risk levels, contract order). Tap the icon to read, tap again to hide.
+- Phone / tablet fit: `100dvh` instead of `100vh` (iOS/Android toolbars no longer cut the page), 16px inputs (no iOS zoom), 40px touch targets, forms stack to one column, tables scroll inside their own box, safe-area padding, landscape phones scroll the page. Written from the existing layout and compiled; NOT checked on a real phone or in a browser from here, so check Journal / AI Trader / Bulk Trades on your phone and tell me what still looks off.
+
+NOT done yet: trades that keep running after you close the laptop/phone.
+- Why: the AI engine runs inside the browser tab, so closing it stops it. Continuing needs the engine on the Render server.
+- The blocker is the login: the app's Deriv OAuth token expires and refreshes by rotating the refresh token, so giving it to a server could log you out of the site, and I cannot test Deriv's login from here. The plan is a separate Deriv API token you create yourself (Read + Trade scopes only, no Payments/Admin), held only in the server's memory (never saved), with a stop loss required, a 24h cap, a Stop button, and the run resumable on screen by a run key. It needs an always-on Render plan (free tier sleeps) and cannot be proven against live Deriv from here, so it must be tried on a DEMO account first.
+- Next step: build it (engine bundled for Node, a Node Deriv connection, /api/ai start|status|stop, a "Run in the cloud" switch in the AI tab).
+
 # Safe 24-hour run (October 2026)
 
 - **Honest limit:** this is not, and cannot be made, a profit machine. Last digits and ticks on these indices are fair-random and the payout (~0.83x) means a trade needs ~54.6% wins to break even; every contract sits near 50%. Expected cost is about 8.5c per 1.00 staked. What changed is that the 24h cost is now bounded and sized from your stop loss, so depletion and a stop-loss hit are very unlikely, not impossible.

@@ -43,3 +43,185 @@
 strong {
     font-weight: bold;
 }
+
+/* ==========================================================================
+   Phone and tablet fit (iOS Safari / Android Chrome)
+   - 100vh on phones includes the area behind the browser toolbars, which cuts
+     the bottom of the page off; dvh is the visible height. Browsers without
+     dvh keep the vh values above.
+   - Inputs under 16px make iOS zoom the whole page on focus.
+   - Wide tables scroll inside their own box instead of widening the page.
+   ========================================================================== */
+html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
+img,
+svg,
+canvas,
+video {
+    max-width: 100%;
+}
+
+@supports (height: 100dvh) {
+    .app-root {
+        height: 100dvh;
+    }
+
+    .bot {
+        --tab-content-height: calc(100dvh - 16.6rem);
+        --tab-content-height-mobile: calc(100dvh - 12.6rem);
+    }
+
+    @media (max-width: 1024px) {
+        .ai-trader,
+        .bulk-trader,
+        .jrnl {
+            max-height: calc(100dvh - 13rem);
+        }
+    }
+}
+
+@media (max-width: 1024px) {
+    .ai-trader,
+    .bulk-trader,
+    .jrnl {
+        max-width: 100%;
+        box-sizing: border-box;
+        overflow-x: hidden;
+        padding-left: max(10px, env(safe-area-inset-left));
+        padding-right: max(10px, env(safe-area-inset-right));
+        padding-bottom: max(16px, env(safe-area-inset-bottom));
+        overflow-wrap: anywhere;
+    }
+
+    .ai-trader *,
+    .bulk-trader *,
+    .jrnl * {
+        min-width: 0; // let flex/grid children shrink instead of pushing the page wider
+    }
+
+    .jrnl table,
+    .bulk-trader table,
+    .ai-agent-panel table {
+        display: block;
+        max-width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+}
+
+@media (max-width: 640px) {
+    .ai-trader,
+    .bulk-trader,
+    .jrnl {
+        padding-top: 10px;
+        border-radius: 0;
+    }
+
+    /* 16px stops iOS zooming into a field on focus */
+    .ai-trader input:not([type='checkbox']):not([type='radio']),
+    .ai-trader select,
+    .ai-trader textarea,
+    .bulk-trader input:not([type='checkbox']):not([type='radio']),
+    .bulk-trader select,
+    .bulk-trader textarea,
+    .jrnl input:not([type='checkbox']):not([type='radio']),
+    .jrnl select,
+    .jrnl textarea {
+        font-size: 16px;
+    }
+
+    /* finger-sized targets */
+    .ai-trader button,
+    .bulk-trader button,
+    .jrnl button,
+    .ai-trader select,
+    .jrnl select {
+        min-height: 44px; // Apple's minimum comfortable touch target
+    }
+
+    .ai-trader input[type='checkbox'],
+    .ai-trader input[type='radio'],
+    .jrnl input[type='checkbox'] {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 auto;
+    }
+
+    /* two-column forms and stat grids stack on a phone */
+    .ai-agent-panel__fields,
+    .ai-agent-panel__stats-grid,
+    .bulk-trader__advanced {
+        grid-template-columns: 1fr;
+    }
+
+    .bulk-trader__action-row {
+        grid-template-columns: 1fr;
+    }
+
+    .bulk-trader__digit-grid {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 4px;
+    }
+
+    .bulk-trader__history-matrix {
+        grid-template-columns: repeat(10, minmax(0, 1fr));
+    }
+
+    .jrnl__head,
+    .jrnl__actions {
+        flex-wrap: wrap;
+    }
+
+    .jrnl__actions button {
+        flex: 1 1 auto;
+    }
+
+    .jrnl__cal {
+        gap: 2px;
+    }
+}
+
+/* Very small phones (iPhone SE, small Androids) */
+@media (max-width: 380px) {
+    .ai-trader,
+    .bulk-trader,
+    .jrnl {
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .jrnl__filters {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Landscape phones are short: let the page itself scroll rather than a tiny inner box */
+@media (max-height: 480px) and (orientation: landscape) {
+    .ai-trader,
+    .bulk-trader,
+    .jrnl {
+        max-height: none;
+    }
+}
+
+/* Journal: Clear transactions */
+.jrnl__clear {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    padding: 8px 10px;
+    margin-top: 8px;
+    border: 1px solid #5b2a2a;
+    border-radius: 8px;
+    background: #1a1010;
+}
+
+.jrnl .jrnl__danger {
+    background: #7a2a2a;
+    color: #fff;
+}

@@ -210,6 +210,17 @@ const Journal = observer(() => {
         }
     };
 
+    const [clearOpen, setClearOpen] = useState(false);
+    const [clearRange, setClearRange] = useState('24h');
+    const doClear = () => {
+        const ms = clearRange === '24h' ? 24 * 3600_000 : clearRange === '7d' ? 7 * 24 * 3600_000 : undefined;
+        const what = clearRange === 'all' ? 'ALL transactions for this account' : `transactions older than ${clearRange === '24h' ? '24 hours' : '7 days'}`;
+        if (!window.confirm(`Delete ${what} from this Journal? This cannot be undone, and Sync from Deriv will not bring them back. Your Deriv account history itself is not affected. The AI\u2019s self-review learns from these trades, so it forgets what it learned from the cleared ones.`)) return;
+        const removed = journalStore.clear(undefined, ms);
+        setClearOpen(false);
+        setSyncNote(`${removed} transaction${removed === 1 ? '' : 's'} cleared.`);
+    };
+
     const exportCsv = () => {
         const blob = new Blob([toCsv(filtered)], { type: 'text/csv' });
         const url = URL.createObjectURL(blob);
@@ -260,7 +271,25 @@ const Journal = observer(() => {
                     <button type='button' onClick={exportCsv} disabled={filtered.length === 0}>
                         {localize('Export CSV')}
                     </button>
+                    <button type='button' className='jrnl__danger' onClick={() => setClearOpen(o => !o)} aria-expanded={clearOpen}>
+                        {localize('Clear transactions')}
+                    </button>
                 </div>
+                {clearOpen && (
+                    <div className='jrnl__clear' role='group' aria-label={localize('Clear transactions')}>
+                        <select value={clearRange} onChange={e => setClearRange(e.target.value)}>
+                            <option value='24h'>{localize('Older than 24 hours')}</option>
+                            <option value='7d'>{localize('Older than 7 days')}</option>
+                            <option value='all'>{localize('Everything for this account')}</option>
+                        </select>
+                        <button type='button' className='jrnl__danger' onClick={doClear}>
+                            {localize('Clear now')}
+                        </button>
+                        <button type='button' onClick={() => setClearOpen(false)}>
+                            {localize('Cancel')}
+                        </button>
+                    </div>
+                )}
             </header>
             {sync_note && <div className='jrnl__note'>{sync_note}</div>}
             {sync_error && <div className='jrnl__error'>{sync_error}</div>}

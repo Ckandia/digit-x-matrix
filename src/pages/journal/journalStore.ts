@@ -41,6 +41,22 @@ const storage = (): Storage | null => {
 
 type TAccountData = { map: Map<string, TJournalTrade>; sorted: TJournalTrade[] | null };
 
+// "Clear transactions" leaves a cutoff per account so a later Sync from Deriv does not bring the cleared trades back.
+const CLEARED_PREFIX = 'digitx.journal.cleared.v1.';
+const cleared_cache = new Map<string, number>();
+const clearedBefore = (account: string): number => {
+    const hit = cleared_cache.get(account);
+    if (hit !== undefined) return hit;
+    let v = 0;
+    try {
+        v = Number(storage()?.getItem(CLEARED_PREFIX + account) ?? 0) || 0;
+    } catch {
+        v = 0;
+    }
+    cleared_cache.set(account, v);
+    return v;
+};
+
 const accounts = new Map<string, TAccountData>();
 const listeners = new Set<() => void>();
 let version = 0;
@@ -114,6 +130,7 @@ export const journalStore = {
         const touched_accounts = new Set<string>();
         let added = 0;
         for (const t of trades) {
+            if (t.sell_ts < clearedBefore(t.account)) continue; // cleared by the user: stays cleared
             const data = load(t.account);
             const existing = data.map.get(t.id);
             if (!existing) added += 1;
@@ -126,6 +143,34 @@ export const journalStore = {
 
     add(trade: TJournalTrade | null): void {
         if (trade) this.addMany([trade]);
+    },
+
+    /**
+     * Deletes stored trades for an account. `older_than_ms` removes only trades that settled longer ago than that;
+     * omit it to remove everything held so far. A cutoff is remembered so Sync from Deriv will not re-import them.
+     * Returns how many trades were removed.
+     */
+    clear(account: string = activeAccount(), older_than_ms?: number): number {
+        const cutoff = older_than_ms === undefined ? Date.now() + 1 : Date.now() - older_than_ms;
+        const data = load(account);
+        let removed = 0;
+        for (const [id, t] of [...data.map]) {
+            if (t.sell_ts < cutoff) {
+                data.map.delete(id);
+                removed += 1;
+            }
+        }
+        const next = Math.max(clearedBefore(account), cutoff);
+        cleared_cache.set(account, next);
+        try {
+            storage()?.setItem(CLEARED_PREFIX + account, String(next));
+        } catch {
+            /* the cutoff then lasts for this session only */
+        }
+        data.sorted = null;
+        touched(account);
+        saveNow(account); // persist at once: closing the tab right after Clear must not bring the trades back
+        return removed;
     },
 
     /** Attaches the AI's decision context to a trade (creating the trade if only the AI knows about it). */
@@ -176,6 +221,7 @@ export const journalStore = {
     /** Test helper: forget everything held in memory (stored data is untouched). */
     _resetMemory(): void {
         accounts.clear();
+        cleared_cache.clear();
         review_cache = null;
         version += 1;
     },
