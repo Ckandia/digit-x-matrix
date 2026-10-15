@@ -7,6 +7,7 @@ import { DIGIT_SYMBOLS, MarketFeed } from './marketFeed.js';
 import { attachSignalHub } from './signalHub.js';
 import { getStats, isValidProfile, parseOutcome, recordOutcome } from './learning.js';
 import { PaperTrader } from './paperTrader.js';
+import { RunnerService } from './runner/runnerService.js';
 import { startTradePurge } from './tradeStore.js';
 import { mountJournalIngest } from './journalIngest.js';
 import { mountMcp } from './mcpServer.js';
@@ -77,6 +78,34 @@ app.get('/api/contracts/:symbol', async (req, res) => {
     }
 });
 
+// The server-side AI runner (keeps trading when the browser is closed). Off unless RUNNER_KEY is set; every call needs it.
+const runner = new RunnerService({ marketFeed, port: Number(process.env.PORT) || 4000, key: process.env.RUNNER_KEY });
+const runnerAuth = (req, res, next) => {
+    if (!runner.enabled()) {
+        return res.status(503).json({ error: 'The server runner is off. Set RUNNER_KEY on the backend to turn it on.' });
+    }
+    if (!runner.keyMatches(req.get('x-runner-key'))) return res.status(401).json({ error: 'Wrong runner key.' });
+    next();
+};
+app.get('/api/runner/status', runnerAuth, (req, res) => res.json({ data: runner.status(Number(req.query.since) || 0) }));
+app.post('/api/runner/start', runnerAuth, async (req, res) => {
+    try {
+        await runner.start({
+            token: req.body?.token,
+            account_id: req.body?.account_id,
+            config: req.body?.config,
+            learn_mode: req.body?.learn_mode,
+        });
+        res.json({ data: runner.status(0) });
+    } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Could not start the runner.' });
+    }
+});
+app.post('/api/runner/stop', runnerAuth, (_req, res) => {
+    runner.stop('stopped from the app');
+    res.json({ data: runner.status(0) });
+});
+
 let paper_cache = { at: 0, body: null };
 app.get('/api/paper/stats', (_req, res) => {
     if (Date.now() - paper_cache.at > 10_000) paper_cache = { at: Date.now(), body: paperTrader.getReport() };
@@ -92,6 +121,12 @@ app.get('/api/analysis/snapshot', (_req, res) => {
 });
 
 // Two-tick pair frequencies (% of two-tick windows showing each contract's pattern) for every 1s market.
+app.get('/api/analysis/runs', (_req, res) => {
+    const data = {};
+    for (const [symbol, snapshot] of Object.entries(marketFeed.getAllSnapshots())) if (snapshot?.runs) data[symbol] = snapshot.runs;
+    res.json({ data });
+});
+
 app.get('/api/analysis/pairs', (_req, res) => {
     const data = {};
     for (const [symbol, snapshot] of Object.entries(marketFeed.getAllSnapshots())) if (snapshot?.pairs) data[symbol] = snapshot.pairs;

@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { computePairFrequencies, computePairSignals } from './pairScan.js';
+import { computeRunFrequencies } from './runScan.js';
 import { computeSignals, computeStats, createDigitWindow, pushDigit } from './digitAnalysis.js';
 import { computeContractSignals, createPriceWindow, pushPrice } from './contractAnalysis.js';
 import { computeStreakSignal } from './streakStrategy.js';
@@ -156,12 +157,14 @@ export class MarketFeed {
         let cached = this._pairCache?.get(symbol);
         if (!cached || cached.key !== cache_key) {
             const pairs = computePairFrequencies(priceWindow.prices, this.getPipSize(symbol));
-            cached = { key: cache_key, pairs, signals: computePairSignals(pairs, symbol) };
+            // Run scan: how often 3+ consecutive ticks favoured each ticked contract (the market-bias read the entry reader uses).
+            const runs = computeRunFrequencies(priceWindow.prices, this.getPipSize(symbol));
+            cached = { key: cache_key, pairs, runs, signals: computePairSignals(pairs, symbol) };
             if (!this._pairCache) this._pairCache = new Map();
             this._pairCache.set(symbol, cached);
         }
         const signals = [...digit_signals, ...contract_signals, ...cached.signals].sort((a, b) => b.confidence - a.confidence);
-        return { stats, signals, pairs: cached.pairs };
+        return { stats, signals, pairs: cached.pairs, runs: cached.runs };
     }
 
     /**

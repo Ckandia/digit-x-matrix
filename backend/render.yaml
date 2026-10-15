@@ -17,3 +17,7 @@ services:
             generateValue: true
           - key: JOURNAL_SYNC_KEY
             generateValue: true
+          # Server-side AI runner (keeps trading when your browser is closed). Copy this value into the AI tab's "Runner key" box.
+          # Delete this entry to switch the runner off completely.
+          - key: RUNNER_KEY
+            generateValue: true

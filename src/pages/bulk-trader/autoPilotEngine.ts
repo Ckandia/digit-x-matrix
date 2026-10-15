@@ -20,6 +20,7 @@ import { candidatesFromSnapshots, LearningEngine } from './learningEngine';
 import { applyGate, isBlocked, TReviewGate } from '../journal/selfReview';
 import { markRefused, tradeTicks } from './contractRules';
 import { detectTrend, TREND_WINDOW } from './trendFilter';
+import { biasBoost, runBiasZ } from './runBias';
 
 export type TRiskLevel = 'conservative' | 'moderate' | 'aggressive';
 
@@ -1005,7 +1006,8 @@ export class AutoPilotEngine {
         );
         if (!this.running) return null;
         const now = Date.now();
-        const scored: { score: number; symbol: string; type: string; order: number }[] = [];
+        const snaps = this.getSnapshots();
+        const scored: { score: number; rank: number; bias: number; symbol: string; type: string; order: number }[] = [];
         let order = 0;
         for (const family of families) {
             for (const symbol of symbols) {
@@ -1017,11 +1019,14 @@ export class AutoPilotEngine {
                     const need = TREND_NEEDED[type];
                     if (need && detectTrend(h.prices.slice(-TREND_WINDOW)) !== need) continue;
                     const prediction = type === 'DIGITOVER' ? 4 : type === 'DIGITUNDER' ? 5 : undefined;
-                    scored.push({ score: entryScore(type, prediction, h.prices, h.pip, target), symbol, type, order: order++ });
+                    const score = entryScore(type, prediction, h.prices, h.pip, target);
+                    // Market bias (the backend's 3+ tick run scan) only separates entries that are about equally close to firing.
+                    const bias = runBiasZ(snaps[symbol], type);
+                    scored.push({ score, rank: score + biasBoost(bias), bias, symbol, type, order: order++ });
                 }
             }
         }
-        scored.sort((a, b) => b.score - a.score || a.order - b.order);
+        scored.sort((a, b) => b.rank - a.rank || a.order - b.order);
         for (const pick of scored.slice(0, 8)) {
             if (isTouch(pick.type) && !(await this._probeTouch(pick.symbol, pick.type))) {
                 if (!this.running) return null;
@@ -1030,7 +1035,7 @@ export class AutoPilotEngine {
             const ticks = tradeTicks(pick.symbol, pick.type);
             if (ticks === null) continue;
             const kind = pick.type.startsWith('DIGIT') ? 'digits' : isTouch(pick.type) ? 'touch' : pick.type.startsWith('RUN') ? 'only_up_down' : 'rise_fall';
-            this.hooks?.onLog?.('info', `Entry reader: ${OPPOSITE_LABEL[pick.type] ?? pick.type} on ${pick.symbol} reads best from the latest ticks (score ${pick.score.toFixed(2)}).`);
+            this.hooks?.onLog?.('info', `Entry reader: ${OPPOSITE_LABEL[pick.type] ?? pick.type} on ${pick.symbol} reads best from the latest ticks (score ${pick.score.toFixed(2)}${pick.bias > 0 ? `, market bias z ${pick.bias.toFixed(1)}` : ''}).`);
             return {
                 symbol: pick.symbol,
                 family: kind,
