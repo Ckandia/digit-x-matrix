@@ -17,7 +17,11 @@ services:
             generateValue: true
           - key: JOURNAL_SYNC_KEY
             generateValue: true
-          # Server-side AI runner (keeps trading when your browser is closed). Copy this value into the AI tab's "Runner key" box.
-          # Delete this entry to switch the runner off completely.
-          - key: RUNNER_KEY
+          # 24/7 server-side AI runs (the "Keep trading when I close this page" switch in the AI tab).
+          # NOTE: a run only survives while this service stays awake. Render's free plan sleeps a service after 15 minutes
+          # without a request, which ends the run, so use an always-on (paid) instance for this.
+          - key: RUNNER_ENABLED
+            value: 'true'
+          # Encrypts the saved Deriv login so a restart can resume a run (needs DATABASE_URL). Without it a restart stops runs.
+          - key: RUNNER_ENC_KEY
             generateValue: true

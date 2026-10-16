@@ -75,24 +75,25 @@ video {
     }
 
     @media (max-width: 1024px) {
-        .ai-trader,
-        .bulk-trader,
-        .jrnl {
+        html .ai-trader,
+        html .bulk-trader,
+        html .jrnl {
             max-height: calc(100dvh - 13rem);
         }
     }
 }
 
 @media (max-width: 1024px) {
-    .ai-trader,
-    .bulk-trader,
-    .jrnl {
+    html .ai-trader,
+    html .bulk-trader,
+    html .jrnl {
         max-width: 100%;
         box-sizing: border-box;
         overflow-x: hidden;
         padding-left: max(10px, env(safe-area-inset-left));
         padding-right: max(10px, env(safe-area-inset-right));
-        padding-bottom: max(16px, env(safe-area-inset-bottom));
+        /* the Run bar is fixed to the bottom of the screen: leave room so the last card can scroll clear of it */
+        padding-bottom: calc(max(16px, env(safe-area-inset-bottom)) + 120px);
         overflow-wrap: anywhere;
     }
 
@@ -100,6 +101,23 @@ video {
     .bulk-trader *,
     .jrnl * {
         min-width: 0; // let flex/grid children shrink instead of pushing the page wider
+    }
+
+    /* a <select> is as wide as its longest option unless told otherwise: that is what pushed the AI tab off the screen */
+    .ai-trader select,
+    .bulk-trader select,
+    .jrnl select {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        text-overflow: ellipsis;
+    }
+
+    .ai-trader input:not([type='checkbox']):not([type='radio']),
+    .bulk-trader input:not([type='checkbox']):not([type='radio']),
+    .jrnl input:not([type='checkbox']):not([type='radio']) {
+        max-width: 100%;
+        box-sizing: border-box;
     }
 
     .jrnl table,
@@ -113,9 +131,9 @@ video {
 }
 
 @media (max-width: 640px) {
-    .ai-trader,
-    .bulk-trader,
-    .jrnl {
+    html .ai-trader,
+    html .bulk-trader,
+    html .jrnl {
         padding-top: 10px;
         border-radius: 0;
     }
@@ -151,58 +169,58 @@ video {
     }
 
     /* two-column forms and stat grids stack on a phone */
-    .ai-agent-panel__fields,
-    .ai-agent-panel__stats-grid,
-    .bulk-trader__advanced {
+    .ai-trader .ai-agent-panel__fields,
+    .ai-trader .ai-agent-panel__stats-grid,
+    .bulk-trader .bulk-trader__advanced {
         grid-template-columns: 1fr;
     }
 
-    .bulk-trader__action-row {
+    .bulk-trader .bulk-trader__action-row {
         grid-template-columns: 1fr;
     }
 
-    .bulk-trader__digit-grid {
+    .bulk-trader .bulk-trader__digit-grid {
         grid-template-columns: repeat(5, minmax(0, 1fr));
         gap: 4px;
     }
 
-    .bulk-trader__history-matrix {
+    .bulk-trader .bulk-trader__history-matrix {
         grid-template-columns: repeat(10, minmax(0, 1fr));
     }
 
-    .jrnl__head,
-    .jrnl__actions {
+    .jrnl .jrnl__head,
+    .jrnl .jrnl__actions {
         flex-wrap: wrap;
     }
 
-    .jrnl__actions button {
+    .jrnl .jrnl__actions button {
         flex: 1 1 auto;
     }
 
-    .jrnl__cal {
+    .jrnl .jrnl__cal {
         gap: 2px;
     }
 }
 
 /* Very small phones (iPhone SE, small Androids) */
 @media (max-width: 380px) {
-    .ai-trader,
-    .bulk-trader,
-    .jrnl {
+    html .ai-trader,
+    html .bulk-trader,
+    html .jrnl {
         padding-left: 8px;
         padding-right: 8px;
     }
 
-    .jrnl__filters {
+    .jrnl .jrnl__filters {
         grid-template-columns: 1fr;
     }
 }
 
 /* Landscape phones are short: let the page itself scroll rather than a tiny inner box */
 @media (max-height: 480px) and (orientation: landscape) {
-    .ai-trader,
-    .bulk-trader,
-    .jrnl {
+    html .ai-trader,
+    html .bulk-trader,
+    html .jrnl {
         max-height: none;
     }
 }

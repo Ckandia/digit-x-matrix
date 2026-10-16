@@ -94,47 +94,11 @@ export type TPairRow = {
 
 export type TPairScan = { n: number; barrier: number; rows: TPairRow[] };
 
-/** One contract's row of the backend's run scan (see backend/src/runScan.js): appearances of 3+ consecutive favouring ticks. */
-export type TRunRow = {
-    key: string;
-    label: string;
-    contract_types: string[];
-    /** Three-tick windows in which all three ticks favoured the contract (a run of 6 holds four). */
-    triples: number;
-    windows: number;
-    /** % of the three-tick windows that were all in the contract's favour. */
-    pct: number;
-    /** What a fair market gives (12.5% for the digit contracts). */
-    expected_pct: number;
-    /** Separate runs of 3 or more, how many reached 4 and 5, the longest run, and runs per 100 ticks. */
-    runs: number;
-    runs4: number;
-    runs5: number;
-    longest: number;
-    per100: number;
-    /** The run in progress at the newest tick (2 = the next favouring tick makes three). */
-    current_run: number;
-    share_pct: number;
-    /** Gap to a fair market in standard errors: the market bias. Null until enough ticks are in. */
-    z: number | null;
-    /** The same gap against this market's own single-tick rate (is it clustering more than its rate explains?). */
-    cluster_z: number | null;
-    /** 0-100, from z. */
-    bias: number;
-    favoured: boolean;
-    recent_pct: number;
-    recent_z: number | null;
-};
-
-export type TRunScan = { n: number; min_run: number; recent_ticks: number; rows: TRunRow[]; ranked: string[] };
-
 export type TSymbolSnapshot = {
     stats: TDigitStats;
     signals: TDigitSignal[];
     /** Two-tick pair frequencies for the ten contracts on this market. */
     pairs?: TPairScan;
-    /** Three-or-more-tick run frequencies (market bias) for the six ticked contracts. */
-    runs?: TRunScan;
 };
 
 export type TSnapshotMap = Record<string, TSymbolSnapshot>;

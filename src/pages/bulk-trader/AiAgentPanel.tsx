@@ -23,13 +23,13 @@ import {
     SPREAD_PER_STAKE,
 } from './autoPilotEngine';
 import InfoNote from './InfoNote';
+import { hasServerRunHandle, reattachServerRun, serverRunConfigured, startServerRun, stopServerRun } from './serverRunClient';
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow } from './tradeHistory';
 import type { TRecoveryMode } from './autoPilotEngine';
 import { PaperLearningCard } from './PaperLearningCard';
 import { PairFrequencyCard } from './PairFrequencyCard';
-import { RunBiasCard } from './RunBiasCard';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { keepScreenAwake } from './wakeLock';
 import { loadLiveRules } from './contractRules';
@@ -37,11 +37,7 @@ import { CONTRACT_NOTES, playbookLines } from './tradingKnowledge';
 import { activeAccount } from '../journal/derivMapping';
 import { journalStore } from '../journal/journalStore';
 import { labReport, suggestLimits, TLabRow } from './strategyLab';
-import { getRemoteOn, getRunnerKey, runnerAvailable, runnerStart, runnerStatus, runnerStop, setRemoteOn, setRunnerKey, TRunnerItem } from './runnerClient';
 import './ai-agent-panel.scss';
-
-// Where the poll of the server runner has got to. Module-level so leaving and re-opening this tab does not replay old items.
-let remote_since = 0;
 
 const RISK_LEVELS: { value: TRiskLevel; label: string }[] = [
     { value: 'conservative', label: 'Conservative' },
@@ -92,16 +88,18 @@ const AiAgentPanel = ({
     const [learnInfo, setLearnInfo] = useState<ReturnType<LearningEngine['summary']> | null>(null);
     const [labRows, setLabRows] = useState<TLabRow[]>([]);
     const [limitNote, setLimitNote] = useState('');
-    const [showActivity, setShowActivity] = useState(false);
-    // Server runner: the AI runs on the backend, so it keeps trading when this page or the device is closed.
-    const [remoteOn, setRemoteOnState] = useState(getRemoteOn());
-    const [runnerKey, setRunnerKeyState] = useState(getRunnerKey());
-    const [patToken, setPatToken] = useState(''); // never stored: it lives here only until Start is pressed
-    const [remoteRunning, setRemoteRunning] = useState(false);
-    const [remoteMsg, setRemoteMsg] = useState('');
-    const handleEventRef = useRef<(e: TAutoPilotEvent) => void>(() => {});
     const { learnerRef, capStopLossRef, connectionRef, engineRef } = aiRuntime;
     const is_running = status === 'running';
+    // "Keep trading when I close this page": the run lives on the backend instead of in this tab. Remembered per browser.
+    const cloud_available = serverRunConfigured();
+    const [cloudRun, setCloudRun] = useState<boolean>(() => {
+        try {
+            return localStorage.getItem('dxm_cloud_run') !== 'off';
+        } catch {
+            return true;
+        }
+    });
+    const on_server = is_running && hasServerRunHandle() && !engineRef.current?.isRunning;
 
     const [connectError, setConnectError] = useState<string | null>(null);
     const [isConnecting, setIsConnecting] = useState(false);
@@ -152,6 +150,8 @@ const AiAgentPanel = ({
 
     useEffect(() => {
         aiRuntime.mounted += 1;
+        // A run started with "keep trading when I close this page" lives on the server: find it again and show it.
+        if (!engineRef.current?.isRunning) void reattachServerRun();
         const live_connection = connectionRef.current;
         if (engineRef.current?.isRunning && live_connection) {
             // The run kept going while this tab was closed: pick it up again instead of opening a second
@@ -341,17 +341,26 @@ const AiAgentPanel = ({
             setError(localize('Still reading your account balance — try again in a moment.'));
             return;
         }
-        if (remoteOn) {
-            await handleStartRemote();
-            return;
-        }
-        if (remoteRunning) {
-            setError(localize('The AI is already running on your server. Stop it there first, or it would trade twice.'));
-            return;
-        }
         const token = getActiveToken();
         if (!token) {
             setError(localize('No active session token found. Please log in again.'));
+            return;
+        }
+
+        if (cloud_available && cloudRun) {
+            const loginid = connectedLoginid || activeLoginid;
+            if (!loginid) {
+                setError(localize('Still connecting to your account: try again in a moment.'));
+                return;
+            }
+            setStatus('connecting');
+            try {
+                await startServerRun(loginid, config, learnMode);
+                journal.pushMessage('AI auto-pilot started on the server', MessageTypes.NOTIFY);
+            } catch (err) {
+                setStatus('error');
+                setError(err instanceof Error ? err.message : localize('The server could not start the run.'));
+            }
             return;
         }
 
@@ -459,87 +468,13 @@ const AiAgentPanel = ({
         }
     };
 
-    handleEventRef.current = handleEngineEvent;
-
-    const applyRemoteItem = (item: TRunnerItem) => {
-        if (item.kind === 'event') {
-            handleEventRef.current(item.data as TAutoPilotEvent);
-        } else if (item.kind === 'contract') {
-            const contract = item.data;
-            setHistory(prev => mergeTradeRow(prev, contract));
-            const c = { ...contract, id: contract.id ?? contract.contract_id };
-            transactions.onBotContractEvent(c as never);
-            summary_card.onBotContractEvent(c as never);
-            run_panel.onBotContractEvent(c as never);
-        } else if (item.kind === 'log') {
-            setActivity(prev => [{ ts: item.data.ts, kind: item.data.kind, text: item.data.text }, ...prev].slice(0, 40));
-        }
-    };
-
-    // While the server runner is switched on, follow it: this is also how a run that kept going while the page was closed shows up.
-    useEffect(() => {
-        if (!remoteOn || !runnerKey || !runnerAvailable()) return;
-        let alive = true;
-        const poll = async () => {
-            try {
-                let st = await runnerStatus(runnerKey, remote_since);
-                if (st.seq < remote_since) {
-                    remote_since = 0; // a new run on the server started its numbering again
-                    st = await runnerStatus(runnerKey, 0);
-                }
-                if (!alive) return;
-                setRemoteMsg('');
-                st.items.forEach(applyRemoteItem);
-                remote_since = st.seq;
-                setRemoteRunning(st.running);
-                if (st.account) setConnectedLoginid(st.account);
-                if (st.running && !aiRuntime.engineRef.current) setStatus('running');
-            } catch (err) {
-                if (alive) setRemoteMsg(err instanceof Error ? err.message : localize('Could not reach the server runner.'));
-            }
-        };
-        void poll();
-        const timer = setInterval(() => void poll(), 3000);
-        return () => {
-            alive = false;
-            clearInterval(timer);
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [remoteOn, runnerKey]);
-
-    const handleStartRemote = async () => {
-        const token = patToken.trim();
-        if (!token) {
-            setError(localize('Paste a Deriv API token with only the Read and Trade permissions (developers.deriv.com, API tokens). The login token of this site is not used: it expires.'));
-            return;
-        }
-        if (!runnerKey) {
-            setError(localize('Enter the runner key (the RUNNER_KEY you set on the backend).'));
-            return;
-        }
-        if (!activeLoginid) {
-            setError(localize('Still reading which account is active — try again in a moment.'));
-            return;
-        }
-        setStatus('connecting');
+    const handleStop = async () => {
+        if (engineRef.current?.isRunning) return engineRef.current.stop('stopped by user');
         try {
-            remote_since = 0;
-            await runnerStart(runnerKey, { token, account_id: activeLoginid, config, learn_mode: learnMode });
-            setPatToken('');
-            setRemoteRunning(true);
-            journal.pushMessage('AI auto-pilot started on the server', MessageTypes.NOTIFY);
+            await stopServerRun();
         } catch (err) {
-            setStatus('error');
-            setError(err instanceof Error ? err.message : localize('Could not start the server runner.'));
+            setError(err instanceof Error ? err.message : localize('Could not stop the run.'));
         }
-    };
-
-    const handleStop = () => {
-        if (remoteRunning && !engineRef.current?.isRunning) {
-            runnerStop(runnerKey).catch(err => setError(err instanceof Error ? err.message : localize('Could not stop the server runner.')));
-            return;
-        }
-        engineRef.current?.stop('stopped by user');
     };
 
     const closed = history.filter(r => !r.open);
@@ -907,45 +842,23 @@ const AiAgentPanel = ({
                             })}
                         </span>
                     )}
-                    <label className='ai-agent-panel__hint'>
-                        <input
-                            type='checkbox'
-                            checked={remoteOn}
-                            disabled={!runnerAvailable() || status === 'connecting' || remoteRunning}
-                            onChange={e => {
-                                setRemoteOnState(e.target.checked);
-                                setRemoteOn(e.target.checked);
-                            }}
-                        />{' '}
-                        <strong>{localize('Keep trading when I close this page or phone (runs on my server)')}</strong>
-                        <InfoNote
-                            text={localize(
-                                'The AI runs on your backend instead of in this browser, so closing the laptop or phone does not stop it. You paste a Deriv API token (create one at developers.deriv.com, API tokens, with ONLY Read and Trade): it is sent to YOUR backend over HTTPS and kept in its memory only while the run lasts (never saved, never shown again). A restart or redeploy of the backend stops the run. The backend needs RUNNER_KEY set and must stay awake (an always-on instance; a sleeping free instance stops it). The run ends by itself after 24 hours and every limit (stop loss, profit goal, pacing) still applies. Try it on a DEMO account first, and revoke the token on Deriv when you are done. Stop it from this tab at any time.'
-                            )}
-                        />
-                    </label>
-                    {remoteOn && (
-                        <div className='ai-agent-panel__hint'>
+                    {cloud_available && (
+                        <label className='ai-agent-panel__hint'>
                             <input
-                                type='password'
-                                autoComplete='off'
-                                placeholder={localize('Runner key')}
-                                value={runnerKey}
+                                type='checkbox'
+                                checked={cloudRun}
+                                disabled={status === 'connecting'}
                                 onChange={e => {
-                                    setRunnerKeyState(e.target.value);
-                                    setRunnerKey(e.target.value);
+                                    setCloudRun(e.target.checked);
+                                    try {
+                                        localStorage.setItem('dxm_cloud_run', e.target.checked ? 'on' : 'off');
+                                    } catch {
+                                        /* the choice just is not remembered */
+                                    }
                                 }}
                             />{' '}
-                            <input
-                                type='password'
-                                autoComplete='off'
-                                placeholder={localize('Deriv API token (Read + Trade)')}
-                                value={patToken}
-                                onChange={e => setPatToken(e.target.value)}
-                            />
-                            {remoteMsg && <span className='ai-agent-panel__activity-line is-error'> {remoteMsg}</span>}
-                            {!remoteMsg && remoteRunning && <span> {localize('A run is active on your server.')}</span>}
-                        </div>
+                            <InfoNote text={localize('Keep trading when I close this page: the run is handed to the server, so it carries on after you close this tab, the laptop or the phone. Open the AI tab again to watch it or press Stop. The server uses your current Deriv login to trade this account, and a stop loss is always applied. It needs the backend to stay awake (an always-on Render plan) and is not tested against live Deriv from here: try it on a demo account first. Off = the run stays in this browser tab and stops when the tab closes.')} />
+                        </label>
                     )}
                     <button
                         type='button'
@@ -965,8 +878,13 @@ const AiAgentPanel = ({
                 <div className='ai-agent-panel__card'>
                     <div className='ai-agent-panel__card-top'>
                         <span className='ai-agent-panel__card-title'>{localize('Running')}</span>
-                        <span className='ai-agent-panel__scanning'>{remoteRunning ? localize('on your server') : localize('scanning')}</span>
+                        <span className='ai-agent-panel__scanning'>{localize('scanning')}</span>
                     </div>
+                    {on_server && (
+                        <div className='ai-agent-panel__hint'>
+                            <InfoNote text={localize('Running on the server: you can close this page, the laptop or the phone. It keeps trading until the stop loss, the take profit or you press Stop. Open this tab again any time to see it.')} />
+                        </div>
+                    )}
                     <div className={`ai-agent-panel__account${connectedLoginid && activeLoginid && connectedLoginid !== activeLoginid ? ' is-warning' : ''}`}>
                         {localize('Trading on account')} <strong>{connectedLoginid || '—'}</strong>
                         {connectedType ? ` (${connectedType})` : ''}
@@ -1079,7 +997,6 @@ const AiAgentPanel = ({
                 </div>
             )}
 
-            <RunBiasCard snapshots={snapshots} />
             <PairFrequencyCard snapshots={snapshots} />
 
             <PaperLearningCard />
@@ -1190,18 +1107,8 @@ const AiAgentPanel = ({
                     )}
                     {activity.length > 0 && (
                         <div className='ai-agent-panel__activity'>
-                            <button
-                                type='button'
-                                className='ai-info__icon'
-                                aria-expanded={showActivity}
-                                onClick={() => setShowActivity(v => !v)}
-                            >
-                                {'\uD83D\uDCDC'} {localize('Activity and errors')} ({activity.length})
-                            </button>
-                            {!showActivity && activity.find(a => a.kind === 'error') && (
-                                <div className='ai-agent-panel__activity-line is-error'>{activity.find(a => a.kind === 'error')?.text}</div>
-                            )}
-                            {showActivity && activity.map((a, i) => (
+                            <strong>{localize('Activity and errors')}</strong>
+                            {activity.map((a, i) => (
                                 <div key={`${a.ts}-${i}`} className={`ai-agent-panel__activity-line is-${a.kind}`}>
                                     {new Date(a.ts).toLocaleTimeString()} {a.text}
                                 </div>

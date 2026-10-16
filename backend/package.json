@@ -12,7 +12,6 @@
         "check:pairs": "node test/pairScan.check.mjs",
         "check:mcp": "node test/mcp.check.mjs",
         "check:keepalive": "node test/keepalive.check.mjs",
-        "check:runs": "node test/runScan.check.mjs",
         "check:runner": "node test/runner.check.mjs"
     },
     "dependencies": {
