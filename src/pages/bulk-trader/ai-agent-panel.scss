@@ -444,3 +444,9 @@
         opacity: 0.9;
     }
 }
+
+.ai-agent-panel__backend {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}

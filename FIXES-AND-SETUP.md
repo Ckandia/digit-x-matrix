@@ -1,3 +1,10 @@
+# Run panel feed, collapsed backend cards, scrolling (October 2026, v19)
+
+- **Right-hand Summary / Transactions panel empty.** Two causes. (1) A server run (v18) had no way to feed that panel: the server now sends the latest 40 contracts (trimmed) and the AI tab passes new and changed ones into the panel while it is open. (2) The panel only counts a contract once it has a `status` other than "open" and groups its updates by `transaction_ids.buy`. I ran the app's real transactions store: a contract without a `status` was counted as 0 trades (stake, payout, won, lost all 0), the same contract after normalising counted correctly. `contractFeed.ts` (`forRunPanel`) now fills those fields in for Bulk Trades, the AI tab and the server run. I could not run a real Deriv trade from here, so I cannot say for certain that your Bulk Trades contracts were missing `status`; this is the cause I could demonstrate. If Bulk Trades still show nothing after this, send me a screenshot after one settled trade.
+- **Backend paper trades hidden.** The two-tick frequency table and the backend paper trader card now sit behind an "i" under the AI tab, closed by default and only loaded (and polled) when opened, so the tab is much shorter.
+- **Scrolling.** The Bulk Trades, AI and Journal boxes had `overscroll-behavior: contain` (the finger gets stuck at the end of the box, so the page never scrolls on) and Bulk Trades had `touch-action: pan-y` (which also blocked sideways scrolling of tables inside it). Both removed. In Chromium, mouse-wheel scrolling works at desktop and phone size and nothing is wider than the screen. Touch scrolling on a real phone not tested.
+- Tests: `run-panel-feed.spec.ts`; `npm run check:runner` also checks the contracts feed. Full jest 58 suites / 563 tests, tsc clean.
+
 # Phone fit + keep trading after you close the page (October 2026, v18)
 
 **Phone fit (the AI tab running off the right edge).** Found by rendering the real AI tab at 412px and 360px wide in Chromium: two causes.

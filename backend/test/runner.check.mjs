@@ -172,6 +172,7 @@ assert(st.running && st.status === 'running', 'run is running');
 assert(st.virtual.rows.length >= 1, 'it paper-traded first (virtual hook)');
 assert(seen.buys >= 1 && st.ladder.length >= 1, 'it placed live trades');
 assert(st.history.length >= 1, 'trade history is kept');
+assert(st.contracts.length >= 1 && st.contracts[0].contract_id, 'contracts for the run panel are kept');
 assert(seen.refresh >= 1, 'a login about to expire is refreshed before use');
 
 // the run survives a dropped Deriv socket

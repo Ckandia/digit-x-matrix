@@ -31,6 +31,8 @@ export type TServerRunState = {
     totalProfit: number;
     ladder: TServerLadderRow[];
     history: TTradeRow[];
+    /** The latest contracts in Deriv's own shape (trimmed to the fields the Summary / Transactions panel reads), newest first. */
+    contracts: Record<string, unknown>[];
     activity: { ts: number; kind: string; text: string }[];
     virtual: {
         active: boolean;
@@ -62,6 +64,28 @@ export type TServerRunOptions = {
 const emptyVirtual = (): TServerRunState['virtual'] => ({ active: false, current: '', losses: 0, wins: 0, needed: 2, rows: [] });
 
 const MAX_ACTIVITY = 60;
+const MAX_CONTRACTS = 40;
+const CONTRACT_FIELDS = [
+    'contract_id', 'id', 'underlying', 'display_name', 'contract_type', 'shortcode', 'currency', 'buy_price', 'sell_price', 'bid_price',
+    'payout', 'profit', 'profit_percentage', 'is_sold', 'is_expired', 'is_settleable', 'status', 'date_start', 'date_expiry', 'purchase_time',
+    'sell_time', 'entry_spot', 'exit_spot', 'entry_tick', 'exit_tick', 'entry_tick_time', 'exit_tick_time', 'transaction_ids', 'transaction_id',
+    'tick_count', 'longcode', 'barrier', 'current_spot', 'current_spot_time',
+];
+const trimContract = (c: Record<string, unknown>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const k of CONTRACT_FIELDS) if (c[k] !== undefined) out[k] = c[k];
+    return out;
+};
+export const upsertContract = (rows: Record<string, unknown>[], c: Record<string, unknown>): Record<string, unknown>[] => {
+    const id = String(c.contract_id ?? c.id ?? '');
+    if (!id) return rows;
+    const t = trimContract(c);
+    const i = rows.findIndex(r => String(r.contract_id ?? r.id) === id);
+    if (i === -1) return [t, ...rows].slice(0, MAX_CONTRACTS);
+    const next = [...rows];
+    next[i] = t;
+    return next;
+};
 
 export class ServerRun {
     private opts: TServerRunOptions;
@@ -76,6 +100,7 @@ export class ServerRun {
             totalProfit: 0,
             ladder: [],
             history: [],
+            contracts: [],
             activity: [],
             virtual: emptyVirtual(),
             started_at: Date.now(),
@@ -181,7 +206,7 @@ export class ServerRun {
         }
         learner.mode = learnMode;
         this.engine = new AutoPilotEngine(connection, currency, config, getSnapshots, this.onEvent, learner, {
-            onContract: contract => this.patch({ history: mergeTradeRow(this.state.history, contract) }),
+            onContract: contract => this.patch({ history: mergeTradeRow(this.state.history, contract), contracts: upsertContract(this.state.contracts, contract) }),
             onLog: (kind, message) => this.log(kind, message),
             onSettled: trade => {
                 try {

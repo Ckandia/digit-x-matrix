@@ -23,6 +23,7 @@ import { MessageTypes } from '@/external/bot-skeleton';
 import TradeResults from './TradeResults';
 import { keepScreenAwake } from './wakeLock';
 import { tradeBus } from './tradeBus';
+import { forRunPanel } from './contractFeed';
 import './bulk-trader.scss';
 
 const STORAGE_KEY = 'bulk_trader_run_id';
@@ -172,7 +173,7 @@ const BulkTrader = () => {
         // while another tab is open and its trades must still be recorded.
         bulk_mirror_off?.();
         const off_contract = tradeBus.onContract(contract => {
-            const c = { ...contract, id: contract.id ?? contract.contract_id };
+            const c = forRunPanel(contract);
             transactions.onBotContractEvent(c as never);
             summary_card.onBotContractEvent(c as never);
         });

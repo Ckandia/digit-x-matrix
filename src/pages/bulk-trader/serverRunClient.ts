@@ -36,6 +36,29 @@ export const serverRunConfigured = () => !!rest_base;
 let timer: ReturnType<typeof setInterval> | null = null;
 let polling = false;
 
+// The AI tab registers a sink so the server run's trades also land in the run panel on the right (Summary / Transactions).
+type TContractSink = (contract: Record<string, unknown>) => void;
+let sink: TContractSink | null = null;
+const seen = new Map<string, string>(); // contract id -> what was last passed on (so an unchanged contract is not sent twice)
+export const setServerContractSink = (fn: TContractSink | null) => {
+    sink = fn;
+};
+const feedContracts = (contracts: Record<string, unknown>[] | undefined) => {
+    if (!sink || !contracts) return;
+    // oldest first, so the panel's newest-first list ends up in the right order
+    for (const c of [...contracts].reverse()) {
+        const id = String(c.contract_id ?? c.id ?? '');
+        const sig = `${c.is_sold ? 1 : 0}|${c.profit}|${c.status}`;
+        if (!id || seen.get(id) === sig) continue;
+        seen.set(id, sig);
+        try {
+            sink(c);
+        } catch {
+            /* the side panel must never break the poll */
+        }
+    }
+};
+
 /** Copies the server's state into the AI tab. Returns false if the server no longer knows the run. */
 const applyState = (s: TServerRunState & { loginid?: string }) => {
     aiSet.status(s.status);
@@ -46,6 +69,7 @@ const applyState = (s: TServerRunState & { loginid?: string }) => {
     aiSet.history(s.history);
     aiSet.activity(s.activity.slice(0, 40));
     aiSet.virtual(s.virtual);
+    feedContracts(s.contracts);
 };
 
 const pollOnce = async (): Promise<'ok' | 'gone' | 'unreachable'> => {

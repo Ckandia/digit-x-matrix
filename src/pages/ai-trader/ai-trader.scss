@@ -9,7 +9,7 @@
     // cap this one to the visible area to let it scroll.
     max-height: calc(100vh - 18rem);
     overflow-y: auto;
-    overscroll-behavior: contain;
+    overscroll-behavior-y: auto; // 'contain' trapped the finger: at the end of the box nothing scrolled at all
     -webkit-overflow-scrolling: touch;
 
     @media (max-width: 1024px) {

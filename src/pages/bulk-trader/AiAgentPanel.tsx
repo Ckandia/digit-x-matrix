@@ -23,7 +23,8 @@ import {
     SPREAD_PER_STAKE,
 } from './autoPilotEngine';
 import InfoNote from './InfoNote';
-import { hasServerRunHandle, reattachServerRun, serverRunConfigured, startServerRun, stopServerRun } from './serverRunClient';
+import { forRunPanel } from './contractFeed';
+import { hasServerRunHandle, reattachServerRun, serverRunConfigured, setServerContractSink, startServerRun, stopServerRun } from './serverRunClient';
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow } from './tradeHistory';
@@ -91,6 +92,7 @@ const AiAgentPanel = ({
     const { learnerRef, capStopLossRef, connectionRef, engineRef } = aiRuntime;
     const is_running = status === 'running';
     // "Keep trading when I close this page": the run lives on the backend instead of in this tab. Remembered per browser.
+    const [showBackend, setShowBackend] = useState(false);
     const cloud_available = serverRunConfigured();
     const [cloudRun, setCloudRun] = useState<boolean>(() => {
         try {
@@ -151,6 +153,13 @@ const AiAgentPanel = ({
     useEffect(() => {
         aiRuntime.mounted += 1;
         // A run started with "keep trading when I close this page" lives on the server: find it again and show it.
+        // Server-run trades also go into the run panel on the right (Summary / Transactions), like a run in this tab.
+        setServerContractSink(contract => {
+            const c = forRunPanel(contract);
+            transactions.onBotContractEvent(c as never);
+            summary_card.onBotContractEvent(c as never);
+            run_panel.onBotContractEvent(c as never);
+        });
         if (!engineRef.current?.isRunning) void reattachServerRun();
         const live_connection = connectionRef.current;
         if (engineRef.current?.isRunning && live_connection) {
@@ -355,6 +364,8 @@ const AiAgentPanel = ({
             }
             setStatus('connecting');
             try {
+                run_panel.run_id = `ai-server-${Date.now()}`;
+                run_panel.toggleDrawer(true);
                 await startServerRun(loginid, config, learnMode);
                 journal.pushMessage('AI auto-pilot started on the server', MessageTypes.NOTIFY);
             } catch (err) {
@@ -420,7 +431,7 @@ const AiAgentPanel = ({
                 {
                     onContract: contract => {
                         setHistory(prev => mergeTradeRow(prev, contract));
-                        const c = { ...contract, id: contract.id ?? contract.contract_id };
+                        const c = forRunPanel(contract);
                         transactions.onBotContractEvent(c as never);
                         summary_card.onBotContractEvent(c as never);
                         run_panel.onBotContractEvent(c as never);
@@ -997,9 +1008,28 @@ const AiAgentPanel = ({
                 </div>
             )}
 
-            <PairFrequencyCard snapshots={snapshots} />
-
-            <PaperLearningCard />
+            {/* The backend's two-tick frequencies and 24/7 paper trader are long: hidden behind an icon, and only loaded when opened. */}
+            <div className='ai-agent-panel__backend'>
+                <span className='ai-info'>
+                    <span className='ai-info__head'>{localize('Backend paper trades and tick frequencies')}</span>
+                    <button
+                        type='button'
+                        className={`ai-info__icon${showBackend ? ' is-open' : ''}`}
+                        aria-expanded={showBackend}
+                        aria-label={localize('Backend paper trades and tick frequencies')}
+                        title={localize('More info')}
+                        onClick={() => setShowBackend(o => !o)}
+                    >
+                        i
+                    </button>
+                </span>
+                {showBackend && (
+                    <>
+                        <PairFrequencyCard snapshots={snapshots} />
+                        <PaperLearningCard />
+                    </>
+                )}
+            </div>
 
             {(virtual.active || virtual.rows.length > 0) && (
                 <div className='ai-agent-panel__history ai-agent-panel__virtual'>
