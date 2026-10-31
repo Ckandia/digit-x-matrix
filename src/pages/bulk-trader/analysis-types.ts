@@ -81,9 +81,9 @@ export type TDigitSignal = {
     /** run_bias family only: true when 3 or more ticks in a row favour this contract RIGHT NOW in a market whose bias favours it. The AI buys on it. */
     entry?: boolean;
     /** run_bias family only: which run of ticks this is (the tick count when it started), so one run is traded once. */
-    run_id?: number;
-    /** run_bias family only: the numbers behind the signal. */
-    run?: { current: number; runs: number; ticks_in_runs: number; longest: number; bias: number };
+    run_id?: number | string;
+    /** run_bias family only: the numbers behind the signal (`min_run` = the run length this signal was measured on). */
+    run?: { current: number; runs: number; ticks_in_runs: number; longest: number; bias: number; min_run?: number };
 };
 
 /** One contract's row of the backend's two-tick pair scan (see backend/src/pairScan.js). */
@@ -118,9 +118,11 @@ export type TRunBiasRow = {
     ticks_in_runs: number;
     longest: number;
     current: number;
-    /** This contract's share (%) of all run ticks of its pair: 50 = balanced, higher = more favoured. */
+    /** Bias on the shortest run length this contract is analysed on. */
     bias: number;
-    run_id: number | null;
+    /** The same numbers per analysed run length: Even/Odd and Over 4/Under 5 on 2 AND 3 ticks, the others from 2. Bias = share (%) of all run ticks of the pair: 50 = balanced, higher = more favoured. */
+    levels?: { min_run: number; runs: number; ticks_in_runs: number; bias: number }[];
+    run_start?: number | null;
 };
 export type TRunBias = { n: number; min_run: number; rows: TRunBiasRow[] };
 

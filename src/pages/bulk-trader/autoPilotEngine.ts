@@ -86,6 +86,8 @@ export const CONTRACT_FAMILIES: { key: string; label: string; types: [string, st
     { key: 'only_ups_downs', label: 'Only Ups / Only Downs', types: ['RUNHIGH', 'RUNLOW'], trend: true },
 ];
 export const ALL_FAMILY_KEYS = CONTRACT_FAMILIES.map(f => f.key);
+/** The families ticked by default: Touch / No Touch is the focus, the others are on the back burner (tick them on the AI Trader tab to use them). */
+export const FOCUS_FAMILY_KEYS = ['touch'];
 
 /** The early loss limit during capital protection, in base stakes. */
 export const PROTECT_LOSS_STAKES = 3;
@@ -217,7 +219,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         stop_loss,
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
         protect_trades: 0, // protection capped the first 10 stakes at the base stake, which switched recovery off
-        contract_families: ALL_FAMILY_KEYS,
+        contract_families: FOCUS_FAMILY_KEYS, // Touch / No Touch is the focus; every other family stays available but is not ticked
         both_sides: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
     };
 };
@@ -921,13 +923,25 @@ export class AutoPilotEngine {
         // payout that cannot even cover the stake is never bought.
         this.connection
             .send({ proposal: 1, ...parameters })
-            .then(res => {
+            .then(async res => {
                 const quote = res?.proposal;
                 if (!quote) throw new Error('Deriv returned no price for this contract');
                 const ask = Number(quote.ask_price);
                 const payout = Number(quote.payout);
                 if (ask > 0 && payout > 0 && payout / ask < MIN_PAYOUT_RATIO) {
                     throw Object.assign(new Error(`payout is only ${(payout / ask).toFixed(2)}x the stake`), { skip: true });
+                }
+                // Both sides: the winning side's payout must cover BOTH stakes, otherwise a win would still be a net loss. Checked on
+                // both prices before anything is bought, so a pair is never half-justified.
+                if (partner && partner_parameters) {
+                    const other = await this.connection.send({ proposal: 1, ...partner_parameters });
+                    const need = Number((stake * 2).toFixed(2));
+                    const pay_a = Number(quote.payout);
+                    const pay_b = Number(other?.proposal?.payout);
+                    if (!(pay_a >= need) || !(pay_b >= need)) {
+                        const low = Math.min(pay_a, Number.isFinite(pay_b) ? pay_b : 0);
+                        throw Object.assign(new Error(`both sides cost ${need.toFixed(2)} but a winning side would pay only ${low.toFixed(2)}`), { cover: true });
+                    }
                 }
                 return this.connection.send({ buy: '1', price: stake, parameters });
             })
@@ -963,6 +977,15 @@ export class AutoPilotEngine {
                 if (/dropped/i.test(raw)) this.hooks?.onLog?.('error', 'The connection dropped while buying. Check Transactions: that contract may still be open.');
                 const detail = `${candidate.contract_type} on ${candidate.symbol} for ${tried_duration} tick(s): ${raw}`;
                 this.hooks?.onLog?.('error', detail);
+                // Both sides whose winning payout would not cover the two stakes: not worth buying right now. Rest this contract
+                // briefly (payouts move) and look for the next signal; nothing is marked as refused.
+                if (err?.cover === true) {
+                    this.hooks?.onLog?.('info', `Both sides skipped: ${raw}. Waiting for the next signal.`);
+                    this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 60_000);
+                    if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+                    setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
+                    return;
+                }
                 // Touch / No Touch: Deriv refused 5 ticks here, so use 10 ticks with the same 0.5 barrier before giving up.
                 const touch_key = `${candidate.symbol}|${candidate.contract_type}`;
                 if (isTouch(candidate.contract_type) && tried_duration === 5 && !touch_ticks.has(touch_key) && /duration|tick|barrier|offered|no return|offers no/i.test(raw)) {

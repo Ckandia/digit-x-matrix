@@ -579,7 +579,7 @@ const AiAgentPanel = ({
                     )}
 
                     <div className='ai-agent-panel__hint'>
-                        <InfoNote text={localize('Entries come from the backend: it reads the tick stream and flags a contract the moment 3 or more ticks in a row favour it (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4; Rise, Fall, Only Ups, Only Downs, Touch, No Touch the same way) in a market whose bias favours it. The AI buys on that signal as soon as it arrives. Nothing is paper-traded first.')} />
+                        <InfoNote text={localize('Entries come from the backend: it reads the tick stream and flags a contract the moment consecutive ticks favour it in a market whose bias favours it: Even/Odd and Over 4/Under 5 on 2 AND on 3 ticks (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4), Only Ups/Only Downs from 2 ticks (both are bought together, and only when a winning side pays more than both stakes), Rise/Fall and Touch/No Touch from 2 ticks. The AI buys on that signal as soon as it arrives, across all markets. Nothing is paper-traded first.')} />
                     </div>
                     <label className='ai-agent-panel__hint'>
                         <input

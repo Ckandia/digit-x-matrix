@@ -1,5 +1,5 @@
 // Run bias. Pure and stateless: reads a rolling window of raw prices for ONE symbol and reports, for each contract,
-// how often 3 OR MORE ticks IN A ROW favoured it (a "run"), and whether such a run is happening right now.
+// how often 2 or 3 (or more) ticks IN A ROW favoured it (a "run"), and whether such a run is happening right now.
 //
 // What counts as a tick in favour of a contract:
 //   Even / Odd        the last digit is even / odd          (even 2,4,6   odd 1,3,7)
@@ -9,19 +9,40 @@
 //   Touch             an up move at least as big as the market's typical tick move (it is reaching for the +0.5 barrier)
 //   No Touch          a quiet tick: a move smaller than the market's typical tick move (or any down move)
 //
-// Per contract the report carries: runs (how many separate runs of >= 3 appeared in the window), ticks_in_runs (how many ticks sat
+// Per contract the report carries: runs (how many separate runs of the shortest analysed length appeared in the window), ticks_in_runs (how many ticks sat
 // inside them), longest run, the CURRENT run length, and a bias in percent: that contract's share of all run ticks of the pair
 // (Even vs Odd, Over 4 vs Under 5, Rise vs Fall, ...). 50 = balanced; the higher the number, the more the market is favouring it.
-// An ENTRY signal is raised when the current run is >= 3 ticks AND the bias is above 50 by at least MIN_ENTRY_BIAS_EDGE.
+// An ENTRY signal is raised, per level (see LEVELS), when the current run has just reached that level AND the bias on that level is
+// at least 50 + MIN_ENTRY_BIAS_EDGE.
 //
 // This is a description of the last few hundred ticks. Deriv's synthetic indices are random processes: a bias reading is not a
 // validated edge, and every contract still pays less than 2x. The numbers are here so the AI has a consistent, fast signal.
 
-export const MIN_RUN = 3;
+export const MIN_RUN = 2; // the shortest run any contract is analysed on
 export const RUN_WINDOW = 300; // ticks the bias is measured on (the freshest, so it follows the market)
 export const MIN_RUN_SAMPLE = 60; // ticks needed before anything is reported
 export const MIN_ENTRY_BIAS_EDGE = 5; // bias must be at least 55 for an entry signal
-const MAX_RUN_SIGNALS = 4; // per symbol, strongest first
+export const FRESH_SLACK = 1; // a level still fires when the run is at most this many ticks past it (a late poll), never on an old run
+const MAX_EXTRA_SIGNALS = 3; // per symbol, besides the entry signals
+
+/**
+ * The run lengths each contract is analysed and fired on (the owner's rules):
+ *   Even / Odd, Over 4 / Under 5   BOTH 2 and 3 consecutive ticks, every market, fire whenever a level's condition is met
+ *   Only Ups / Only Downs          2 ticks and above (the AI fires both at the same time)
+ *   Rise / Fall, Touch / No Touch  2 or more consecutive ticks
+ */
+export const LEVELS = {
+    even: [2, 3],
+    odd: [2, 3],
+    over4: [2, 3],
+    under5: [2, 3],
+    rise: [2],
+    fall: [2],
+    only_up: [2],
+    only_down: [2],
+    touch: [2],
+    no_touch: [2],
+};
 
 export const RUN_CONTRACTS = [
     { key: 'even', contract_type: 'DIGITEVEN', label: 'Even', pair: 'odd', duration: 1 },
@@ -106,52 +127,69 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
     const n = tail.length;
     if (n < MIN_RUN_SAMPLE) return { n, min_run: MIN_RUN, rows: [] };
     const flags = favourFlags(tail, decimals);
-    const stats = Object.fromEntries(RUN_CONTRACTS.map(c => [c.key, runStats(flags[c.key])]));
+    const first_tick_of_window = total_ticks - n; // index (since the symbol started ticking) of tail[0]
     const rows = RUN_CONTRACTS.map(c => {
-        const mine = stats[c.key];
-        const theirs = stats[c.pair];
-        const both = mine.ticks_in_runs + theirs.ticks_in_runs;
-        const bias = both ? round2((mine.ticks_in_runs / both) * 100) : 50;
-        const first_tick_of_window = total_ticks - n; // index (since the symbol started ticking) of tail[0]
+        const mine = runStats(flags[c.key], MIN_RUN);
+        const levels = LEVELS[c.key].map(min_run => {
+            const m = runStats(flags[c.key], min_run);
+            const t = runStats(flags[c.pair], min_run);
+            const both = m.ticks_in_runs + t.ticks_in_runs;
+            return {
+                min_run,
+                runs: m.runs,
+                ticks_in_runs: m.ticks_in_runs,
+                bias: both ? round2((m.ticks_in_runs / both) * 100) : 50,
+            };
+        });
         return {
             key: c.key,
             contract_type: c.contract_type,
             label: c.label,
-            runs: mine.runs,
-            ticks_in_runs: mine.ticks_in_runs,
+            runs: levels[0].runs,
+            ticks_in_runs: levels[0].ticks_in_runs,
             longest: mine.longest,
             current: mine.current,
-            bias,
-            run_id: mine.current ? first_tick_of_window + mine.current_start : null,
+            bias: levels[0].bias, // the bias on the shortest level this contract is analysed on
+            levels,
+            run_start: mine.current ? first_tick_of_window + mine.current_start : null,
         };
     });
     return { n, min_run: MIN_RUN, rows };
 }
 
-/** Signals for the AI: every contract whose bias is above 50 (strongest first); `entry` is true when its 3+ tick run is happening now. */
+/**
+ * Signals for the AI. One signal per contract per level whose run is on right now:
+ *   entry = the run has reached that level (and is not stale) AND the bias on that level is at least 55%.
+ * The run id is per run AND per level, so a run can fire at 2 ticks and again at 3 without ever firing the same level twice.
+ */
 export function computeRunSignals(scan, symbol) {
     if (!scan || !scan.rows.length) return [];
-    const signals = [];
+    const entries = [];
+    const extras = [];
     for (const row of scan.rows) {
-        if (row.bias <= 50) continue;
         const def = RUN_CONTRACTS.find(c => c.key === row.key);
-        const confidence = Math.round(clamp((row.bias - 50) * 2, 0, 100));
-        const entry = row.current >= MIN_RUN && row.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
-        signals.push({
-            family: 'run_bias',
-            strategy: 'run_bias',
-            contract_type: row.contract_type,
-            duration_ticks: def.duration,
-            prediction: row.contract_type === 'DIGITOVER' ? 4 : row.contract_type === 'DIGITUNDER' ? 5 : row.contract_type === 'ONETOUCH' || row.contract_type === 'NOTOUCH' ? '+0.5' : undefined,
-            label: row.label,
-            confidence,
-            entry,
-            run_id: entry ? row.run_id : undefined,
-            run: { current: row.current, runs: row.runs, ticks_in_runs: row.ticks_in_runs, longest: row.longest, bias: row.bias },
-            basis: `Run bias: ${row.label} had ${row.runs} runs of ${MIN_RUN}+ ticks on ${symbol} over the last ${scan.n} ticks (bias ${row.bias}%, run now ${row.current}).`,
-        });
+        for (const level of row.levels) {
+            if (level.bias <= 50) continue;
+            const confidence = Math.round(clamp((level.bias - 50) * 2, 0, 100));
+            const fresh = row.current >= level.min_run && row.current <= level.min_run + FRESH_SLACK;
+            const entry = fresh && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
+            const signal = {
+                family: 'run_bias',
+                strategy: 'run_bias',
+                contract_type: row.contract_type,
+                duration_ticks: def.duration,
+                prediction: row.contract_type === 'DIGITOVER' ? 4 : row.contract_type === 'DIGITUNDER' ? 5 : row.contract_type === 'ONETOUCH' || row.contract_type === 'NOTOUCH' ? '+0.5' : undefined,
+                label: row.label,
+                confidence,
+                entry,
+                run_id: entry ? `${row.run_start}:${level.min_run}` : undefined,
+                run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run },
+                basis: `Run bias: ${row.label} had ${level.runs} runs of ${level.min_run}+ ticks on ${symbol} over the last ${scan.n} ticks (bias ${level.bias}%, run now ${row.current}).`,
+            };
+            (entry ? entries : extras).push(signal);
+        }
     }
-    // Entry signals first (strongest bias first), then the rest, capped so the ranking is not flooded.
-    signals.sort((a, b) => Number(b.entry) - Number(a.entry) || b.confidence - a.confidence);
-    return signals.slice(0, MAX_RUN_SIGNALS * 2).filter((s, i) => s.entry || i < MAX_RUN_SIGNALS);
+    entries.sort((a, b) => b.confidence - a.confidence);
+    extras.sort((a, b) => b.confidence - a.confidence);
+    return [...entries, ...extras.slice(0, MAX_EXTRA_SIGNALS)];
 }

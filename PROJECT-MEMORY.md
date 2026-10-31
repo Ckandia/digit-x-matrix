@@ -18,7 +18,11 @@ Where things stand (latest first). This file is the project's memory: Claude's o
 - ~1M paper trades: every contract wins about 50% against ~55% needed; each loses roughly 8-10c per 1.00 staked. No timing rule found a real edge. Both-sides pairs (Even+Odd, Over 4+Under 5) lose a guaranteed slice; Only Ups + Only Downs usually both lose.
 - Touch/No Touch at +0.5 pays only about 5% on a No Touch win.
 
-## Latest build (run bias + signal execution, virtual hook removed)
+## Latest build (per-contract run levels; Touch / No Touch focus)
+- Even/Odd and Over 4/Under 5 fire on 2 AND 3 consecutive ticks; Only Ups/Downs from 2 ticks (both bought together, only if a win pays both stakes); Rise/Fall and Touch/No Touch from 2 ticks. Backend does all the analysis; the AI only executes entries.
+- Owner's priority: Touch / No Touch first (only family ticked by default); the other contracts are on the back burner.
+
+## Previous build (run bias + signal execution, virtual hook removed)
 - Backend `backend/src/runBias.js`: for each market, how often 3+ ticks in a row favoured each contract (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4; Rise, Fall, Only Ups/Downs, Touch/No Touch). Bias % = a contract's share of all run ticks of its pair (50 balanced, higher = more favoured). An ENTRY signal (family `run_bias`, `entry: true`, `run_id`) is raised when the run is on now and the bias is >= 55.
 - Frontend engine: polls the backend snapshot every 300 ms and buys the strongest entry signal at once (no paper test, no wait on its own tick stream); one run is traded once; Rise/Fall and Only Ups/Downs still need their 1-tick trend. After a loss the recovery stake goes on the next best signal across all ticked contracts.
 - Removed: `paperTrader.js`, `/api/paper/stats`, `paperStats.ts`, `PaperLearningCard`, the virtual hook, follow-stream/entry-tick/entry-reader/rotate/auto-flip settings, their tests. The learner no longer uses paper evidence (edge gate uses the account's own trades only).

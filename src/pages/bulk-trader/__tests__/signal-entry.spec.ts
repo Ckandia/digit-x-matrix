@@ -1,4 +1,4 @@
-import { AutoPilotEngine, buildConfigFromPreset, TAutoPilotConfig, TAutoPilotEvent } from '../autoPilotEngine';
+import { AutoPilotEngine, buildConfigFromPreset, FOCUS_FAMILY_KEYS, TAutoPilotConfig, TAutoPilotEvent } from '../autoPilotEngine';
 import type { TSnapshotMap } from '../analysis-types';
 
 jest.mock('uuid', () => ({ v4: () => 'test-id' }));
@@ -9,6 +9,7 @@ class Conn {
     sent: any[] = [];
     subs = new Map<number, { req: any; cb: any }>();
     history: Record<string, number[]> = {};
+    payout = 1.9;
     private n = 1;
     private buys = 0;
     accountInfo = { balance: 100000, loginid: 'VRTC1', currency: 'USD' };
@@ -17,7 +18,7 @@ class Conn {
     onReconnect: any;
     async send(req: any) {
         this.sent.push(req);
-        if (req.proposal) return { proposal: { ask_price: 1, payout: 1.9 } };
+        if (req.proposal) return { proposal: { ask_price: 1, payout: this.payout } };
         if (req.buy) return { buy: { contract_id: `c${++this.buys}` } };
         if (req.ticks_history) {
             const prices = this.history[req.ticks_history] ?? [];
@@ -41,7 +42,7 @@ class Conn {
     buys_ = () => this.sent.filter(r => r.buy);
 }
 
-type TSig = { type: string; label: string; entry: boolean; run_id?: number; confidence?: number; family?: string };
+type TSig = { type: string; label: string; entry: boolean; run_id?: number | string; confidence?: number; family?: string };
 const sig = (o: TSig) => ({ family: o.family ?? 'run_bias', strategy: 'run_bias', entry: o.entry, run_id: o.run_id, contract_type: o.type, label: o.label, confidence: o.confidence ?? 70, basis: '' }) as never;
 const base: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 2, max_steps: 4, stop_loss: 1000, take_profit: 1000, protect_trades: 0 };
 
@@ -130,6 +131,59 @@ describe('the AI executes on the backend signal', () => {
         await wait(700);
         expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.41]);
         expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'DIGITUNDER' });
+        h.engine.stop();
+    });
+});
+
+describe('Only Ups / Only Downs fire together, only when a win covers both stakes', () => {
+    const zigzag = Array.from({ length: 60 }, (_, i) => Number((100 + i * 0.2 + Math.sin(i / 2) * 1.5).toFixed(2))); // higher highs and higher lows: a confirmed uptrend
+
+    it('buys Only Ups AND Only Downs, one stake each, when the winning payout covers both', async () => {
+        const h = make({ R_UD: [sig({ type: 'RUNHIGH', label: 'Only Ups', entry: true, run_id: '5:2' })] });
+        h.conn.history.R_UD = zigzag;
+        h.conn.payout = 3.8; // a 2-tick Only Ups / Only Downs pays about 3.8x
+        h.engine.start();
+        await wait(300);
+        expect(h.conn.buys_().map(b => b.parameters.contract_type).sort()).toEqual(['RUNHIGH', 'RUNLOW']);
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 1]);
+        h.engine.stop();
+    });
+
+    it('buys nothing when a winning side would pay less than both stakes together', async () => {
+        const h = make({ R_UD2: [sig({ type: 'RUNHIGH', label: 'Only Ups', entry: true, run_id: '5:2' })] });
+        h.conn.history.R_UD2 = zigzag;
+        h.conn.payout = 1.9; // 1.9 < 2 stakes of 1
+        h.engine.start();
+        await wait(300);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
+    });
+
+    it('with both sides off only the signalled side is bought', async () => {
+        const h = make({ R_UD3: [sig({ type: 'RUNHIGH', label: 'Only Ups', entry: true, run_id: '5:2' })] }, { both_sides: false });
+        h.conn.history.R_UD3 = zigzag;
+        h.engine.start();
+        await wait(300);
+        expect(h.conn.buys_().map(b => b.parameters.contract_type)).toEqual(['RUNHIGH']);
+        h.engine.stop();
+    });
+});
+
+describe('Touch / No Touch is the focus', () => {
+    it('is the only family ticked by default', () => {
+        expect(buildConfigFromPreset('moderate', 1000).contract_families).toEqual(FOCUS_FAMILY_KEYS);
+        expect(FOCUS_FAMILY_KEYS).toEqual(['touch']);
+    });
+
+    it('with the default families only Touch / No Touch signals are bought, with the 0.5 barrier', async () => {
+        const h = make(
+            { R_TCH: [sig({ type: 'DIGITEVEN', label: 'Even', entry: true, run_id: '1:2', confidence: 99 }), sig({ type: 'ONETOUCH', label: 'Touch', entry: true, run_id: '1:2', confidence: 40 })] },
+            { contract_families: FOCUS_FAMILY_KEYS }
+        );
+        h.engine.start();
+        await wait(300);
+        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'ONETOUCH', barrier: '+0.5', duration: 5 });
         h.engine.stop();
     });
 });

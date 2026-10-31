@@ -18,7 +18,8 @@ const shortName = (symbol: string) => symbol.replace(/^1HZ(\d+)V$/, 'V$1 (1s)');
 
 /**
  * The backend's run bias: for every 1-second market, how strongly the last ticks favour each contract, measured as its share of
- * all the runs of 3 or more ticks in a row (50% = balanced; the higher, the more the market favours it). A number in brackets is
+ * all the runs of consecutive ticks (50% = balanced; the higher, the more the market favours it). Even/Odd and Over 4/Under 5 show
+ * the 2-tick bias / 3-tick bias; the other contracts the bias from 2 ticks. A number in brackets is
  * a run that is on right now; green means the backend has flagged it as an entry signal, which is what the AI buys on.
  */
 export const RunBiasCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
@@ -29,7 +30,7 @@ export const RunBiasCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
     return (
         <div className='ai-agent-panel__history ai-agent-panel__pairs'>
             <div className='ai-agent-panel__history-head'>
-                <strong>{localize('Run bias: 3+ ticks in a row in favour of a contract')}</strong>
+                <strong>{localize('Run bias: consecutive ticks in favour of a contract')}</strong>
                 <span>{symbols.length ? localize('{{n}} ticks per market', { n: snapshots[symbols[0]].run_bias?.n ?? 0 }) : ''}</span>
             </div>
             {!symbols.length ? (
@@ -54,7 +55,7 @@ export const RunBiasCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
                                         const entry = !!row && entryKeys(s).has(row.contract_type);
                                         return (
                                             <td key={s} className={entry ? 'is-win' : ''} title={row ? `${row.runs} runs, ${row.ticks_in_runs} ticks in runs, longest ${row.longest}` : ''}>
-                                                {row ? `${row.bias.toFixed(0)}%${row.current ? ` (${row.current})` : ''}` : '-'}
+                                                {row ? `${(row.levels?.length ? row.levels.map(l => `${l.bias.toFixed(0)}%`).join(' / ') : `${row.bias.toFixed(0)}%`)}${row.current ? ` (${row.current})` : ''}` : '-'}
                                             </td>
                                         );
                                     })}

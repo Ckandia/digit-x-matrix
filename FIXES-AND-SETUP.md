@@ -1,3 +1,13 @@
+# Per-contract run rules, Touch / No Touch focus, both sides must be covered
+
+- **Backend run levels** (`backend/src/runBias.js`, `LEVELS`): Even/Odd and Over 4/Under 5 are analysed on BOTH 2 and 3 consecutive ticks across every market and fire whenever a level's condition is met (a run fires at 2 ticks and again at 3, each with its own run id like `250:2` / `250:3`, never the same level twice, never on an old run). Only Ups/Only Downs from 2 ticks. Rise/Fall and Touch/No Touch from 2 ticks. Entry = the run has just reached the level AND that level's bias (the contract's share of all run ticks of its pair) is at least 55%.
+- **Frontend**: nothing to analyse any more: the AI takes the strongest `entry` signal the backend sends and buys it. Run table on the AI tab shows the 2-tick / 3-tick bias for the digit contracts.
+- **Virtual hook**: gone from frontend and backend (the last comment mentioning it is reworded).
+- **Touch / No Touch is the focus**: it is the only family ticked by default (`FOCUS_FAMILY_KEYS`); Even/Odd, Over/Under, Rise/Fall and Only Ups/Downs are available but un-ticked (tick them on the AI Trader tab).
+- **Both sides (Only Ups + Only Downs)**: both legs are priced first; the pair is bought only if a winning side pays at least both stakes together (otherwise it waits for the next signal, no 6-hour ban).
+- Checks: `cd backend && npm run check:runbias`; specs `signal-entry` (13), `safe-plan`, `recovery-and-reading`, `edge-gate`. Full `jest`, whole-app `tsc` and a live Deriv run were not possible here.
+- Note: Touch/No Touch at +0.5 can pay very little (No Touch ~5%); the engine skips any contract paying under 1.05x the stake, and a recovery ladder on a low payout needs very large stakes.
+
 # Run bias + signal execution; virtual hook removed
 
 - **Backend run bias** (`backend/src/runBias.js`, wired in `marketFeed.getSnapshot`): per market it counts the appearances of 3 or more ticks in a row in favour of each contract (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4; Rise/Fall and Only Ups/Downs = rising/falling ticks; Touch = an up move at least the typical tick move; No Touch = a quiet tick). Each contract gets `runs`, `ticks_in_runs`, `longest`, `current` and a `bias` % (its share of all run ticks of its pair: 50 = balanced, higher = more favoured). The snapshot carries `run_bias` and new signals of family `run_bias`; `entry: true` + `run_id` when the run is on now and bias >= 55.
