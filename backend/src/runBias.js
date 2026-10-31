@@ -6,8 +6,8 @@
 //   Over 4 / Under 5  the last digit is 5-9 / 0-4           (over 4: 5,8,9   under 5: 2,1,4)
 //   Rise / Fall       the price moved up / down from the tick before
 //   Only Up / Down    the same as Rise / Fall: a run of rising (falling) ticks is exactly what Only Ups (Only Downs) needs
-//   Touch             an up move at least as big as the market's typical tick move (it is reaching for the +0.5 barrier)
-//   No Touch          a quiet tick: a move smaller than the market's typical tick move (or any down move)
+//   Touch / No Touch  the real outcome of a 5-tick contract with a +0.5 barrier that started 5 ticks earlier: touched (Touch) or
+//                     never touched (No Touch). Exact complements.
 //
 // Per contract the report carries: runs (how many separate runs of the shortest analysed length appeared in the window), ticks_in_runs (how many ticks sat
 // inside them), longest run, the CURRENT run length, and a bias in percent: that contract's share of all run ticks of the pair
@@ -18,6 +18,8 @@
 // This is a description of the last few hundred ticks. Deriv's synthetic indices are random processes: a bias reading is not a
 // validated edge, and every contract still pays less than 2x. The numbers are here so the AI has a consistent, fast signal.
 
+export const TOUCH_BARRIER = 0.5; // the barrier the AI buys Touch / No Touch with (+0.5 above the entry)
+export const TOUCH_TICKS = 5; // ... for 5 ticks
 export const MIN_RUN = 2; // the shortest run any contract is analysed on
 export const RUN_WINDOW = 300; // ticks the bias is measured on (the freshest, so it follows the market)
 export const MIN_RUN_SAMPLE = 60; // ticks needed before anything is reported
@@ -85,8 +87,16 @@ export function favourFlags(prices, decimals = 2) {
         flags.fall[i] = move < 0;
         flags.only_up[i] = move > 0;
         flags.only_down[i] = move < 0;
-        flags.touch[i] = move > 0 && move >= typical;
-        flags.no_touch[i] = move <= 0 || Math.abs(move) < typical;
+        // Touch / No Touch: the REAL outcome of the contract bought 5 ticks ago (touched +0.5 above its entry within 5 ticks or not).
+        // They are exact complements, so a run of 2+ consecutive outcomes is a fair "bias for the contract", and a market that
+        // seldom reaches +0.5 shows a long No Touch bias (and a tiny No Touch payout, which the AI refuses).
+        if (i >= TOUCH_TICKS) {
+            let top = -Infinity;
+            for (let k = i - TOUCH_TICKS + 1; k <= i; k++) top = Math.max(top, prices[k]);
+            const hit = top - prices[i - TOUCH_TICKS] >= TOUCH_BARRIER;
+            flags.touch[i] = hit;
+            flags.no_touch[i] = !hit;
+        }
     }
     return flags;
 }

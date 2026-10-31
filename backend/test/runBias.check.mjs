@@ -48,6 +48,15 @@ const rising = Array.from({ length: 80 }, (_, i) => 100 + i * 0.3 + (i % 5 === 4
 const f = favourFlags(rising, 2);
 assert.ok(f.rise[10] && !f.fall[10]);
 
+// Touch / No Touch are exact complements of the real 5-tick, +0.5 outcome
+const wave = Array.from({ length: 90 }, (_, i) => 100 + (i % 10 < 5 ? (i % 10) * 0.2 : 1 - ((i % 10) - 5) * 0.2)); // swings of ~0.8
+const tf = favourFlags(wave, 2);
+for (let i = 5; i < wave.length; i++) assert.notEqual(tf.touch[i], tf.no_touch[i]);
+const flat = Array.from({ length: 90 }, (_, i) => 100 + (i % 2) * 0.01); // never travels 0.5
+const ff = favourFlags(flat, 2);
+assert.ok(ff.no_touch[20] && !ff.touch[20]);
+assert.ok(tf.touch.some(Boolean), 'a market that swings 0.8 touches +0.5');
+
 // signals shape
 const scan = computeRunBias(rising, 2, 5000);
 for (const s of computeRunSignals(scan, 'R_TEST')) {

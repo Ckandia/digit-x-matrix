@@ -137,10 +137,10 @@ describe('recovery in the engine (martingale + recover_losses)', () => {
         expect(h.conn.buys_().map(b => b.price)).toEqual([1]);
         h.conn.settle('c1', -1);
         await wait();
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.41]);
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.23]);
         h.conn.settle('c2', -2.41);
         await wait();
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.41, 5.32]); // (1 + 2.41 + 1) / 0.83
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.23, 4.7]); // (1 + 2.23 + 1) / 0.9
         h.conn.settle('c3', 4.5); // the recovery step wins
         await wait();
         expect(h.conn.buys_()[3].price).toBe(1);
@@ -155,7 +155,7 @@ describe('recovery in the engine (martingale + recover_losses)', () => {
         await wait();
         h.conn.settle('c2', -2.41); // step 2 of 2 lost
         await wait();
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.41, 1]);
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.23, 1]);
         expect(h.events.some(e => e.startsWith('stopped'))).toBe(false);
         h.engine.stop();
     });

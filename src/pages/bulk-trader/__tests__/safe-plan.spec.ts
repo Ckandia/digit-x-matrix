@@ -72,12 +72,12 @@ describe('24-hour run plan', () => {
 });
 
 describe('24-hour defaults (recovery)', () => {
-    it('presets use the recovery martingale, a ladder-sized base stake and Touch / No Touch as the ticked family', () => {
+    it('presets use the recovery martingale, a ladder-sized base stake and every contract family ticked', () => {
         const c = buildConfigFromPreset('moderate', 10000);
         expect(c.recovery_mode).toBe('martingale');
         expect(c.recover_losses).toBe(true);
         expect(c.stake).toBe(planMartingale(c.stop_loss, c.max_steps).stake);
-        expect(c.contract_families).toEqual(['touch']); // Touch / No Touch is the focus; the other families are available but not ticked
+        expect(c.contract_families).toEqual(ALL_FAMILY_KEYS);
         expect(c.protect_trades).toBe(0);
         expect(c.both_sides).toBe(true); // applies only to Only Ups / Only Downs, which the default families exclude
         expect(SAFE_FAMILY_KEYS).toEqual(['even_odd', 'over_under']);

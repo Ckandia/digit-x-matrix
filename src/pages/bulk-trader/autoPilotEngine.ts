@@ -87,7 +87,7 @@ export const CONTRACT_FAMILIES: { key: string; label: string; types: [string, st
 ];
 export const ALL_FAMILY_KEYS = CONTRACT_FAMILIES.map(f => f.key);
 /** The families ticked by default: Touch / No Touch is the focus, the others are on the back burner (tick them on the AI Trader tab to use them). */
-export const FOCUS_FAMILY_KEYS = ['touch'];
+export const FOCUS_FAMILY_KEYS = ['touch']; // kept for anyone who wants Touch / No Touch only
 
 /** The early loss limit during capital protection, in base stakes. */
 export const PROTECT_LOSS_STAKES = 3;
@@ -155,7 +155,7 @@ export const MARTINGALE_STOP_LOSS_SHARE = 0.6;
  */
 export const recoveryStake = (ladder_spent: number, base: number, payout_ratio = ASSUMED_PAYOUT_RATIO): number => {
     const ratio = payout_ratio > 0.2 && payout_ratio < 2 ? payout_ratio : ASSUMED_PAYOUT_RATIO;
-    return Math.max(MIN_STAKE, Math.ceil(((ladder_spent + base) / ratio) * 100) / 100);
+    return Math.max(MIN_STAKE, Math.ceil(((ladder_spent + base) / ratio) * 100 - 1e-9) / 100);
 };
 
 /** The stakes of a whole recovery ladder (every step lost): base, then each recovery stake. */
@@ -219,7 +219,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         stop_loss,
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
         protect_trades: 0, // protection capped the first 10 stakes at the base stake, which switched recovery off
-        contract_families: FOCUS_FAMILY_KEYS, // Touch / No Touch is the focus; every other family stays available but is not ticked
+        contract_families: ALL_FAMILY_KEYS,
         both_sides: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
     };
 };
@@ -483,6 +483,14 @@ export const preferOneTick = (snapshots: TSnapshotMap): TSnapshotMap => {
 
 /** A quote whose payout is below this multiple of the stake is a guaranteed-loss trade: never buy it. */
 const MIN_PAYOUT_RATIO = 1.05;
+/** Touch / No Touch: a quote paying less than this multiple of the stake (profit under 70%) is not bought: a 6% No Touch win cannot be recovered. */
+export const TOUCH_MIN_PAYOUT_RATIO = 1.7;
+/** Touch / No Touch recovery ladders are capped at this many steps. */
+export const TOUCH_MAX_STEPS = 3;
+/** A recovery stake may be at most this many base stakes; a bigger one means the payout is too low to recover with, so the ladder is dropped. */
+export const MAX_RECOVERY_MULTIPLE = 8;
+/** The payout (profit per unit stake) below which recovery is not even attempted. */
+export const MIN_RECOVERY_PAYOUT = 0.5;
 /** Deriv wording for "this contract itself is not available right now" (as opposed to balance/stake/connection errors). */
 const REFUSAL_PATTERN = /not offered|duration|barrier|not available|unavailable|suspended|market is closed|no longer offered|selected tick|no return|offers no/i;
 
@@ -790,7 +798,7 @@ export class AutoPilotEngine {
             this.used_runs.add(`${candidate.symbol}|${candidate.contract_type}|${run_id}`);
         }
         if (!TREND_NEEDED[candidate.contract_type]) {
-            this._enterNow(candidate, wanted_stake, tag);
+            this._sizeAndEnter(candidate, wanted_stake, tag);
             return;
         }
         this.busy = true;
@@ -798,7 +806,7 @@ export class AutoPilotEngine {
             this.busy = false;
             if (!this.running) return;
             if (trend_ok) {
-                this._enterNow(candidate, wanted_stake, tag);
+                this._sizeAndEnter(candidate, wanted_stake, tag);
                 return;
             }
             this.hooks?.onLog?.('info', `Signal on ${candidate.symbol} for ${candidate.label} skipped: the 1-tick chart shows no confirmed trend.`);
@@ -808,6 +816,46 @@ export class AutoPilotEngine {
     }
 
     /** Rise/Fall: bought only once the 1-tick chart shows a higher high (Rise) or a lower low (Fall). */
+    /**
+     * Recovery steps are sized on the REAL payout of the contract about to be bought (a quote at the base stake), not on the last
+     * trade's payout or an assumed 83%: the stake that wins back everything lost plus one base stake, at what THIS contract pays.
+     * If that payout is too low to recover with (under MIN_RECOVERY_PAYOUT) or the stake would pass MAX_RECOVERY_MULTIPLE base stakes
+     * or the stop-loss budget, the ladder is dropped: the loss is accepted and the trade goes in at the base stake.
+     */
+    private _sizeAndEnter(candidate: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag']) {
+        const recovering = this.config.recover_losses === true && (this.config.recovery_mode ?? 'reverse') === 'martingale' && this.step > 1 && this.ladder_spent > 0;
+        if (!recovering || (this.config.both_sides !== false && bothSidesType(candidate.contract_type))) {
+            this._enterNow(candidate, wanted_stake, tag);
+            return;
+        }
+        this.busy = true;
+        void (async () => {
+            let stake = wanted_stake;
+            try {
+                const base = this.config.stake;
+                const quote = (await this.connection.send({ proposal: 1, ...buildTradeParameters(candidate, base, this.currency) }))?.proposal;
+                const ratio = Number(quote?.payout) / Number(quote?.ask_price) - 1;
+                if (Number.isFinite(ratio)) {
+                    const sized = ratio >= MIN_RECOVERY_PAYOUT ? recoveryStake(this.ladder_spent, base, ratio) : Infinity;
+                    if (sized > base * MAX_RECOVERY_MULTIPLE || this.ladder_spent + sized > Math.abs(this.config.stop_loss)) {
+                        this.hooks?.onLog?.('info', `Recovery dropped: ${candidate.label} on ${candidate.symbol} pays ${(ratio * 100).toFixed(0)}% profit, too little to win back ${this.ladder_spent.toFixed(2)} ${this.currency} with a sensible stake. ${this.ladder_spent.toFixed(2)} accepted as a loss, stake back to ${base}.`);
+                        this.step = 1;
+                        this.ladder_spent = 0;
+                        stake = base;
+                    } else {
+                        stake = sized;
+                        this.hooks?.onLog?.('info', `Recovery stake ${stake} ${this.currency} on the real payout of ${(ratio * 100).toFixed(0)}% profit.`);
+                    }
+                }
+            } catch {
+                /* no quote: keep the planned stake, _enterNow prices it again and refuses what Deriv will not sell */
+            }
+            this.busy = false;
+            if (!this.running) return;
+            this._enterNow(candidate, stake, tag);
+        })();
+    }
+
     private async _trendOk(candidate: TCandidate): Promise<boolean> {
         const need = TREND_NEEDED[candidate.contract_type];
         if (!need) return true;
@@ -931,6 +979,9 @@ export class AutoPilotEngine {
                 if (ask > 0 && payout > 0 && payout / ask < MIN_PAYOUT_RATIO) {
                     throw Object.assign(new Error(`payout is only ${(payout / ask).toFixed(2)}x the stake`), { skip: true });
                 }
+                if (isTouch(candidate.contract_type) && ask > 0 && payout > 0 && payout / ask < TOUCH_MIN_PAYOUT_RATIO) {
+                    throw Object.assign(new Error(`${candidate.label} on ${candidate.symbol} pays only ${((payout / ask - 1) * 100).toFixed(0)}% profit (needs ${Math.round((TOUCH_MIN_PAYOUT_RATIO - 1) * 100)}%)`), { rest: 120_000 });
+                }
                 // Both sides: the winning side's payout must cover BOTH stakes, otherwise a win would still be a net loss. Checked on
                 // both prices before anything is bought, so a pair is never half-justified.
                 if (partner && partner_parameters) {
@@ -979,6 +1030,13 @@ export class AutoPilotEngine {
                 this.hooks?.onLog?.('error', detail);
                 // Both sides whose winning payout would not cover the two stakes: not worth buying right now. Rest this contract
                 // briefly (payouts move) and look for the next signal; nothing is marked as refused.
+                if (typeof err?.rest === 'number') {
+                    this.hooks?.onLog?.('info', `Skipped: ${raw}. Resting that contract and waiting for the next signal.`);
+                    this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + err.rest);
+                    if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+                    setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
+                    return;
+                }
                 if (err?.cover === true) {
                     this.hooks?.onLog?.('info', `Both sides skipped: ${raw}. Waiting for the next signal.`);
                     this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 60_000);
@@ -1156,9 +1214,10 @@ export class AutoPilotEngine {
                 this.ladder_spent = 0;
                 this._findAndEnter(base_stake);
             };
-            if (this.step >= this.config.max_steps) {
+            const steps_cap = isTouch(candidate.contract_type) ? Math.min(TOUCH_MAX_STEPS, this.config.max_steps) : this.config.max_steps;
+            if (this.step >= steps_cap) {
                 if (recover) {
-                    dropLadder(`${this.config.max_steps} steps lost`);
+                    dropLadder(`${steps_cap} steps lost`);
                     return;
                 }
                 this.stop('max recovery steps reached');

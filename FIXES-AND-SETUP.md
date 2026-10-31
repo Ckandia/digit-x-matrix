@@ -1,3 +1,12 @@
+# Why only No Touch was bought (and losing), and the fixes
+
+- **Why only Touch / No Touch:** the last build ticked only that family by default (the owner had put the others on the back burner). All five families are ticked again by default.
+- **Why No Touch and never Touch:** the old backend flags counted a "quiet tick" or any down move as No Touch and only fast UP moves as Touch, so No Touch runs were about three times as common and always won the ranking. Touch / No Touch now use the REAL outcome of a 5-tick, +0.5 contract (touched or not), as exact complements, per market. A calm market now shows a long No Touch bias, and its tiny payout is refused (below).
+- **Minimum payout:** a Touch / No Touch quote paying under 70% profit (`TOUCH_MIN_PAYOUT_RATIO` = 1.7x the stake) is not bought; that contract rests 2 minutes. (The log showed No Touch wins of 6%: one such win needs ~17 wins to cover one loss.)
+- **Recovery uses the real payout:** a recovery step is sized from a quote of the contract about to be bought, not the last trade's payout or an assumed 83%. If the payout is under 50% profit, or the stake would pass 8 base stakes or the stop-loss budget, the ladder is dropped (the loss is accepted, stake back to the base).
+- **Touch / No Touch ladders stop at 3 steps.**
+- Tests: `signal-entry` (17), `recovery-and-reading`, `safe-plan`, `edge-gate`, and `npm run check:runbias` in backend. Not run: full jest, whole-app tsc, live Deriv.
+
 # Per-contract run rules, Touch / No Touch focus, both sides must be covered
 
 - **Backend run levels** (`backend/src/runBias.js`, `LEVELS`): Even/Odd and Over 4/Under 5 are analysed on BOTH 2 and 3 consecutive ticks across every market and fire whenever a level's condition is met (a run fires at 2 ticks and again at 3, each with its own run id like `250:2` / `250:3`, never the same level twice, never on an old run). Only Ups/Only Downs from 2 ticks. Rise/Fall and Touch/No Touch from 2 ticks. Entry = the run has just reached the level AND that level's bias (the contract's share of all run ticks of its pair) is at least 55%.

@@ -20,7 +20,7 @@ Where things stand (latest first). This file is the project's memory: Claude's o
 
 ## Latest build (per-contract run levels; Touch / No Touch focus)
 - Even/Odd and Over 4/Under 5 fire on 2 AND 3 consecutive ticks; Only Ups/Downs from 2 ticks (both bought together, only if a win pays both stakes); Rise/Fall and Touch/No Touch from 2 ticks. Backend does all the analysis; the AI only executes entries.
-- Owner's priority: Touch / No Touch first (only family ticked by default); the other contracts are on the back burner.
+- Owner's priority was Touch / No Touch first, but a live run lost on No Touch only (5 losses in a row, net -80.84, wins paying 6%). Now all families are ticked by default; Touch / No Touch needs >= 70% payout, recovery is sized on the real payout, ladders capped at 3 steps.
 
 ## Previous build (run bias + signal execution, virtual hook removed)
 - Backend `backend/src/runBias.js`: for each market, how often 3+ ticks in a row favoured each contract (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4; Rise, Fall, Only Ups/Downs, Touch/No Touch). Bias % = a contract's share of all run ticks of its pair (50 balanced, higher = more favoured). An ENTRY signal (family `run_bias`, `entry: true`, `run_id`) is raised when the run is on now and the bias is >= 55.
