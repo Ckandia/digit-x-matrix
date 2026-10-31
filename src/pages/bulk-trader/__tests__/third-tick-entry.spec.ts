@@ -154,17 +154,4 @@ describe('no entry found: skip the contract', () => {
         expect(h.conn.sent.some(r => r.ticks_history)).toBe(true);
         h.engine.stop();
     });
-
-    it('a Rise run that completes without a confirmed trend is skipped too: nothing bought', async () => {
-        const h = make('CALL'); // no ticks_history, so no higher-highs trend can be confirmed
-        h.engine.start();
-        await wait();
-        for (const d of [1, 2, 3, 4]) {
-            h.conn.tick('R_T3', d); // four rising ticks: a run of three rising moves
-            await wait(5);
-        }
-        await wait(60);
-        expect(h.conn.buys_()).toHaveLength(0);
-        h.engine.stop();
-    });
 });

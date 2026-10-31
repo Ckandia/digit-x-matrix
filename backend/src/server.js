@@ -6,11 +6,9 @@ import { getSignalHistory, isPersistenceEnabled, logSignalSnapshot } from './db.
 import { DIGIT_SYMBOLS, MarketFeed } from './marketFeed.js';
 import { attachSignalHub } from './signalHub.js';
 import { getStats, isValidProfile, parseOutcome, recordOutcome } from './learning.js';
-import { PaperTrader } from './paperTrader.js';
 import { startTradePurge } from './tradeStore.js';
 import { mountJournalIngest } from './journalIngest.js';
 import { mountMcp } from './mcpServer.js';
-import { mountRunner } from './runner/mountRunner.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -35,11 +33,6 @@ mountMcp(app); // the Claude connector (read-only); needs MCP_SECRET
 // the window is warm by the time the first client connects.
 const marketFeed = new MarketFeed();
 marketFeed.start();
-
-// The offline "virtual hook": paper trades on every market and contract, 24/7, no token and no money.
-// The AI Trader reads these results (GET /api/paper/stats) to see which contracts really beat the payout.
-const paperTrader = new PaperTrader(marketFeed);
-paperTrader.start().catch(err => console.error('[paper] failed to start:', err.message));
 
 // Optional (only runs when DATABASE_URL is set, e.g. a Neon connection
 // string): periodically persist each symbol's current stats + signals so
@@ -76,12 +69,6 @@ app.get('/api/contracts/:symbol', async (req, res) => {
         console.error('[contracts] failed:', err.message);
         res.json({ symbol: req.params.symbol, rules: null });
     }
-});
-
-let paper_cache = { at: 0, body: null };
-app.get('/api/paper/stats', (_req, res) => {
-    if (Date.now() - paper_cache.at > 10_000) paper_cache = { at: Date.now(), body: paperTrader.getReport() };
-    res.json({ data: paper_cache.body });
 });
 
 app.get('/api/analysis/symbols', (_req, res) => {
@@ -142,11 +129,12 @@ app.get('/api/learning/stats/:profile', async (req, res) => {
     }
 });
 
-// 24/7 server-side AI runs: the browser hands over its Deriv login once and the run keeps trading with every tab closed.
-// Off unless RUNNER_ENABLED=true. See runner/runnerManager.js for what is stored and how it is protected.
-// The AI's logic lives in src/pages/bulk-trader/autoPilotEngine.ts; runner/engine.bundle.mjs is that same engine, built by
-// scripts/build-runner.mjs (re-run it after any change to the engine).
-mountRunner(app, marketFeed, { port: PORT });
+// The AI auto-pilot (contract choice, duration, martingale ladder, flip on
+// loss, stop-loss/take-profit) runs entirely in the browser — see
+// src/pages/bulk-trader/autoPilotEngine.ts. It reads its signals straight off
+// this same /ws/signals feed (now covering 8 additional contract families
+// alongside digits — see contractAnalysis.js), so there is nothing left for
+// the backend to start/stop/status on its behalf.
 
 // Use a raw HTTP server so Express (REST) and the ws WebSocketServer (live
 // signals) can share one port — this is what Render exposes for the service.

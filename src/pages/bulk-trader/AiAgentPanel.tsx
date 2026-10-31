@@ -10,11 +10,6 @@ import {
     buildConfigFromPreset,
     ALL_FAMILY_KEYS,
     CONTRACT_FAMILIES,
-    DEFAULT_ENTRY_TICK,
-    MAX_ENTRY_TICK,
-    MIN_ENTRY_TICK,
-    DEFAULT_VIRTUAL_CONFIRMATIONS,
-    MAX_VIRTUAL_CONFIRMATIONS,
     RISK_PRESETS,
     TAutoPilotConfig,
     TAutoPilotEvent,
@@ -23,14 +18,12 @@ import {
     SPREAD_PER_STAKE,
 } from './autoPilotEngine';
 import InfoNote from './InfoNote';
-import { forRunPanel } from './contractFeed';
-import { hasServerRunHandle, reattachServerRun, serverRunConfigured, setServerContractSink, startServerRun, stopServerRun } from './serverRunClient';
 import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow } from './tradeHistory';
 import type { TRecoveryMode } from './autoPilotEngine';
-import { PaperLearningCard } from './PaperLearningCard';
 import { PairFrequencyCard } from './PairFrequencyCard';
+import { RunBiasCard } from './RunBiasCard';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
 import { keepScreenAwake } from './wakeLock';
 import { loadLiveRules } from './contractRules';
@@ -63,7 +56,7 @@ const AiAgentPanel = ({
 
     // Run state lives in aiRuntime (module level), not in this component: switching to another tab unmounts
     // this panel, and the run must carry on and be here, intact, when you come back.
-    const { status, stopReason, error, totalProfit, ladder, history, activity, virtual, config, riskLevel, learnMode } = useAiRuntime();
+    const { status, stopReason, error, totalProfit, ladder, history, activity, config, riskLevel, learnMode } = useAiRuntime();
     const setStatus = aiSet.status;
     const setStopReason = aiSet.stopReason;
     const setError = aiSet.error;
@@ -71,7 +64,6 @@ const AiAgentPanel = ({
     const setLadder = aiSet.ladder;
     const setHistory = aiSet.history;
     const setActivity = aiSet.activity;
-    const setVirtual = aiSet.virtual;
     const setConfig = aiSet.config;
     const setRiskLevel = aiSet.riskLevel;
     const setLearnMode = aiSet.learnMode;
@@ -91,17 +83,6 @@ const AiAgentPanel = ({
     const [limitNote, setLimitNote] = useState('');
     const { learnerRef, capStopLossRef, connectionRef, engineRef } = aiRuntime;
     const is_running = status === 'running';
-    // "Keep trading when I close this page": the run lives on the backend instead of in this tab. Remembered per browser.
-    const [showBackend, setShowBackend] = useState(false);
-    const cloud_available = serverRunConfigured();
-    const [cloudRun, setCloudRun] = useState<boolean>(() => {
-        try {
-            return localStorage.getItem('dxm_cloud_run') !== 'off';
-        } catch {
-            return true;
-        }
-    });
-    const on_server = is_running && hasServerRunHandle() && !engineRef.current?.isRunning;
 
     const [connectError, setConnectError] = useState<string | null>(null);
     const [isConnecting, setIsConnecting] = useState(false);
@@ -152,15 +133,6 @@ const AiAgentPanel = ({
 
     useEffect(() => {
         aiRuntime.mounted += 1;
-        // A run started with "keep trading when I close this page" lives on the server: find it again and show it.
-        // Server-run trades also go into the run panel on the right (Summary / Transactions), like a run in this tab.
-        setServerContractSink(contract => {
-            const c = forRunPanel(contract);
-            transactions.onBotContractEvent(c as never);
-            summary_card.onBotContractEvent(c as never);
-            run_panel.onBotContractEvent(c as never);
-        });
-        if (!engineRef.current?.isRunning) void reattachServerRun();
         const live_connection = connectionRef.current;
         if (engineRef.current?.isRunning && live_connection) {
             // The run kept going while this tab was closed: pick it up again instead of opening a second
@@ -277,30 +249,6 @@ const AiAgentPanel = ({
             keepScreenAwake('ai', true);
             setLadder([]);
             setTotalProfit(0);
-            setVirtual(prev => ({ ...prev, active: false, current: '', losses: 0, wins: 0 }));
-        } else if (event.phase === 'virtual') {
-            const what = `${event.label ?? event.contract_type ?? ''} on ${event.symbol ?? ''}`.trim();
-            if (event.virtual_state === 'result' && event.result) {
-                const row = { ts: Date.now(), symbol: event.symbol ?? '', label: event.label ?? '', result: event.result };
-                setVirtual(prev => ({
-                    ...prev,
-                    losses: event.virtual_losses ?? prev.losses,
-                    wins: event.virtual_wins ?? prev.wins,
-                    needed: event.virtual_needed ?? prev.needed,
-                    rows: [row, ...prev.rows].slice(0, 50),
-                }));
-            } else if (event.virtual_state === 'end') {
-                setVirtual(prev => ({ ...prev, active: false, current: '' }));
-            } else {
-                setVirtual(prev => ({
-                    ...prev,
-                    active: true,
-                    current: what,
-                    losses: event.virtual_losses ?? prev.losses,
-                    wins: event.virtual_wins ?? prev.wins,
-                    needed: event.virtual_needed ?? prev.needed,
-                }));
-            }
         } else if (event.phase === 'entering' && event.symbol && event.contract_type) {
             setLadder(prev => [
                 ...prev,
@@ -325,14 +273,12 @@ const AiAgentPanel = ({
             setTotalProfit(event.total_profit ?? 0);
         } else if (event.phase === 'stopped') {
             setStatus('stopped');
-            setVirtual(prev => ({ ...prev, active: false, current: '' }));
             keepScreenAwake('ai', false);
             setStopReason(event.reason);
             journal.pushMessage(`AI auto-pilot stopped: ${event.reason ?? 'no reason given'}`, MessageTypes.NOTIFY);
             releaseRun();
         } else if (event.phase === 'error') {
             setStatus('error');
-            setVirtual(prev => ({ ...prev, active: false, current: '' }));
             keepScreenAwake('ai', false);
             setError(event.error || 'Something went wrong.');
             releaseRun();
@@ -353,25 +299,6 @@ const AiAgentPanel = ({
         const token = getActiveToken();
         if (!token) {
             setError(localize('No active session token found. Please log in again.'));
-            return;
-        }
-
-        if (cloud_available && cloudRun) {
-            const loginid = connectedLoginid || activeLoginid;
-            if (!loginid) {
-                setError(localize('Still connecting to your account: try again in a moment.'));
-                return;
-            }
-            setStatus('connecting');
-            try {
-                run_panel.run_id = `ai-server-${Date.now()}`;
-                run_panel.toggleDrawer(true);
-                await startServerRun(loginid, config, learnMode);
-                journal.pushMessage('AI auto-pilot started on the server', MessageTypes.NOTIFY);
-            } catch (err) {
-                setStatus('error');
-                setError(err instanceof Error ? err.message : localize('The server could not start the run.'));
-            }
             return;
         }
 
@@ -410,7 +337,6 @@ const AiAgentPanel = ({
                 learnerRef.current = learner;
             }
             learnerRef.current.mode = learnMode;
-            await learnerRef.current.syncPaper(); // the backend's 24/7 paper results count as evidence too
             setLearnInfo(learnerRef.current.summary());
 
             const journal_account = connection.accountInfo?.loginid || activeLoginid || activeAccount();
@@ -431,7 +357,7 @@ const AiAgentPanel = ({
                 {
                     onContract: contract => {
                         setHistory(prev => mergeTradeRow(prev, contract));
-                        const c = forRunPanel(contract);
+                        const c = { ...contract, id: contract.id ?? contract.contract_id };
                         transactions.onBotContractEvent(c as never);
                         summary_card.onBotContractEvent(c as never);
                         run_panel.onBotContractEvent(c as never);
@@ -479,14 +405,7 @@ const AiAgentPanel = ({
         }
     };
 
-    const handleStop = async () => {
-        if (engineRef.current?.isRunning) return engineRef.current.stop('stopped by user');
-        try {
-            await stopServerRun();
-        } catch (err) {
-            setError(err instanceof Error ? err.message : localize('Could not stop the run.'));
-        }
-    };
+    const handleStop = () => engineRef.current?.stop('stopped by user');
 
     const closed = history.filter(r => !r.open);
 
@@ -659,34 +578,9 @@ const AiAgentPanel = ({
                         </div>
                     )}
 
-                    <label className='ai-agent-panel__hint'>
-                        <input
-                            type='checkbox'
-                            checked={!!config?.follow_stream}
-                            disabled={!config || status === 'connecting'}
-                            onChange={e => config && setConfig({ ...config, follow_stream: e.target.checked })}
-                        />{' '}
-                        <InfoNote text={localize('Two-tick entry: a live trade is bought on the third matching tick, never the 4th or 5th (5,7,8 buys Over 4 on the 8; 2,4,6 buys Even on the 6; Rise/Fall use rising/falling ticks). The AI watches the live stream and waits (up to about 90 ticks) for a fresh run.')} />
-                    </label>
-                    {config?.follow_stream && (
-                        <FieldBox
-                            label={localize('Buy on the Nth matching tick (3 = two ticks agree, buy on the third) ({{min}}-{{max}})', { min: MIN_ENTRY_TICK, max: MAX_ENTRY_TICK })}
-                            value={config.entry_tick ?? DEFAULT_ENTRY_TICK}
-                            step={1}
-                            disabled={status === 'connecting'}
-                            onChange={v => updateField('entry_tick', Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(v))))}
-                        />
-                    )}
-
-                    <label className='ai-agent-panel__hint'>
-                        <input
-                            type='checkbox'
-                            checked={!!config?.read_entries}
-                            disabled={!config || status === 'connecting'}
-                            onChange={e => config && setConfig({ ...config, read_entries: e.target.checked })}
-                        />{' '}
-                        <InfoNote text={localize('Entry reader: the AI reads the latest ticks of every market for every ticked contract and takes the contract whose entry is closest to firing (a run one tick short of the entry tick; a fast market for Touch, a calm one for No Touch). Signal confidence is not used.')} />
-                    </label>
+                    <div className='ai-agent-panel__hint'>
+                        <InfoNote text={localize('Entries come from the backend: it reads the tick stream and flags a contract the moment 3 or more ticks in a row favour it (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4; Rise, Fall, Only Ups, Only Downs, Touch, No Touch the same way) in a market whose bias favours it. The AI buys on that signal as soon as it arrives. Nothing is paper-traded first.')} />
+                    </div>
                     <label className='ai-agent-panel__hint'>
                         <input
                             type='checkbox'
@@ -697,15 +591,6 @@ const AiAgentPanel = ({
                         <InfoNote text={localize('Recovery stake (needs the martingale stake method): after a loss the next stake wins back everything lost in the ladder plus one base stake. When the ladder runs out of steps or budget the loss is accepted, the stake goes back to the base stake and trading goes on; only the stop loss ends the run.')} />
                     </label>
 
-                    <label className='ai-agent-panel__hint'>
-                        <input
-                            type='checkbox'
-                            checked={!!config?.virtual_hook}
-                            disabled={!config || status === 'connecting'}
-                            onChange={e => config && setConfig({ ...config, virtual_hook: e.target.checked })}
-                        />{' '}
-                        <InfoNote text={localize('Virtual hook: before EVERY live trade the AI makes one paper trade (no money). A paper win buys the SAME contract for real. Even/Odd follows the hook: after a paper loss nothing is bought, it keeps paper-testing until it wins. Other contracts buy the OPPOSITE after a paper loss (Over 4/Under 5, Rise/Fall, Touch/No Touch, Only Ups/Only Downs). After each live trade it paper-tests again. While it is on, auto flip and contract switching are off.')} />
-                    </label>
                     <div className='ai-agent-panel__hint'>
                         <strong>{localize('Contracts the AI may trade')}</strong>
                         {CONTRACT_FAMILIES.map(family => {
@@ -731,15 +616,6 @@ const AiAgentPanel = ({
                         <label style={{ display: 'block' }}>
                             <input
                                 type='checkbox'
-                                checked={config?.rotate_contracts !== false}
-                                disabled={!config || status === 'connecting'}
-                                onChange={e => config && setConfig({ ...config, rotate_contracts: e.target.checked })}
-                            />{' '}
-                            <InfoNote text={localize('Rotate: after every live trade the next paper test is on the next ticked contract, so each one gets its turn. Off = the AI stays on the contract it just traded. Rise/Fall and Only Ups/Downs wait for a higher-high / lower-low on the 1-tick chart.')} />
-                        </label>
-                        <label style={{ display: 'block' }}>
-                            <input
-                                type='checkbox'
                                 checked={config?.both_sides !== false}
                                 disabled={!config || status === 'connecting'}
                                 onChange={e => config && setConfig({ ...config, both_sides: e.target.checked })}
@@ -747,16 +623,6 @@ const AiAgentPanel = ({
                             <InfoNote text={localize('Both sides: the AI buys Only Ups AND Only Downs together on the same market (same stake each). Every other contract is a single trade. The two results count as one trade. Careful: both can lose when the ticks neither only rise nor only fall, which is the usual case, so the doubled payout of the one that wins does not reliably cover the other.')} />
                         </label>
                     </div>
-                    <label className='ai-agent-panel__hint'>
-                        <input
-                            type='checkbox'
-                            checked={!!config?.auto_flip && !config?.virtual_hook}
-                            disabled={!config || status === 'connecting' || !!config?.virtual_hook}
-                            onChange={e => config && setConfig({ ...config, auto_flip: e.target.checked })}
-                        />{' '}
-                        <InfoNote text={localize('Auto flip (off while the virtual hook is on): after a loss the AI switches to the partner contract, and after the next loss it switches back. Pairs: Even / Over 4, Odd / Under 5, Touch / Under 5, No Touch / Over 4, Rise / Under 5, Fall / Over 4.')} />
-                    </label>
-
                     <label className='ai-agent-panel__hint'>
                         {localize('Stake method')}{' '}
                         <select
@@ -853,24 +719,6 @@ const AiAgentPanel = ({
                             })}
                         </span>
                     )}
-                    {cloud_available && (
-                        <label className='ai-agent-panel__hint'>
-                            <input
-                                type='checkbox'
-                                checked={cloudRun}
-                                disabled={status === 'connecting'}
-                                onChange={e => {
-                                    setCloudRun(e.target.checked);
-                                    try {
-                                        localStorage.setItem('dxm_cloud_run', e.target.checked ? 'on' : 'off');
-                                    } catch {
-                                        /* the choice just is not remembered */
-                                    }
-                                }}
-                            />{' '}
-                            <InfoNote text={localize('Keep trading when I close this page: the run is handed to the server, so it carries on after you close this tab, the laptop or the phone. Open the AI tab again to watch it or press Stop. The server uses your current Deriv login to trade this account, and a stop loss is always applied. It needs the backend to stay awake (an always-on Render plan) and is not tested against live Deriv from here: try it on a demo account first. Off = the run stays in this browser tab and stops when the tab closes.')} />
-                        </label>
-                    )}
                     <button
                         type='button'
                         className='ai-agent-panel__start'
@@ -891,11 +739,6 @@ const AiAgentPanel = ({
                         <span className='ai-agent-panel__card-title'>{localize('Running')}</span>
                         <span className='ai-agent-panel__scanning'>{localize('scanning')}</span>
                     </div>
-                    {on_server && (
-                        <div className='ai-agent-panel__hint'>
-                            <InfoNote text={localize('Running on the server: you can close this page, the laptop or the phone. It keeps trading until the stop loss, the take profit or you press Stop. Open this tab again any time to see it.')} />
-                        </div>
-                    )}
                     <div className={`ai-agent-panel__account${connectedLoginid && activeLoginid && connectedLoginid !== activeLoginid ? ' is-warning' : ''}`}>
                         {localize('Trading on account')} <strong>{connectedLoginid || '—'}</strong>
                         {connectedType ? ` (${connectedType})` : ''}
@@ -1008,79 +851,9 @@ const AiAgentPanel = ({
                 </div>
             )}
 
-            {/* The backend's two-tick frequencies and 24/7 paper trader are long: hidden behind an icon, and only loaded when opened. */}
-            <div className='ai-agent-panel__backend'>
-                <span className='ai-info'>
-                    <span className='ai-info__head'>{localize('Backend paper trades and tick frequencies')}</span>
-                    <button
-                        type='button'
-                        className={`ai-info__icon${showBackend ? ' is-open' : ''}`}
-                        aria-expanded={showBackend}
-                        aria-label={localize('Backend paper trades and tick frequencies')}
-                        title={localize('More info')}
-                        onClick={() => setShowBackend(o => !o)}
-                    >
-                        i
-                    </button>
-                </span>
-                {showBackend && (
-                    <>
-                        <PairFrequencyCard snapshots={snapshots} />
-                        <PaperLearningCard />
-                    </>
-                )}
-            </div>
+            <RunBiasCard snapshots={snapshots} />
 
-            {(virtual.active || virtual.rows.length > 0) && (
-                <div className='ai-agent-panel__history ai-agent-panel__virtual'>
-                    <div className='ai-agent-panel__history-head'>
-                        <strong>{localize('Virtual hook (paper trades, no money)')}</strong>
-                        <span className={virtual.active ? 'is-loss' : 'is-win'}>
-                            {virtual.active
-                                ? localize('PAPER TRADING {{what}}: {{w}}/{{need}} wins in a row ({{n}} virtual losses so far)', {
-                                      what: virtual.current,
-                                      w: virtual.wins,
-                                      need: virtual.needed,
-                                      n: virtual.losses,
-                                  })
-                                : localize('Real trading is live')}
-                        </span>
-                        <span>
-                            {localize('{{w}} virtual wins, {{l}} virtual losses', {
-                                w: virtual.rows.filter(r => r.result === 'win').length,
-                                l: virtual.rows.filter(r => r.result === 'loss').length,
-                            })}
-                        </span>
-                        <button type='button' className='ai-agent-panel__retry' onClick={() => setVirtual(prev => ({ ...prev, rows: [] }))}>
-                            {localize('Clear')}
-                        </button>
-                    </div>
-                    {virtual.rows.length > 0 && (
-                        <div className='ai-agent-panel__history-scroll'>
-                            <table className='ai-agent-panel__history-table'>
-                                <thead>
-                                    <tr>
-                                        <th>{localize('Time')}</th>
-                                        <th>{localize('Market')}</th>
-                                        <th>{localize('Contract')}</th>
-                                        <th>{localize('Virtual result')}</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {virtual.rows.map((r, i) => (
-                                        <tr key={`${r.ts}-${i}`}>
-                                            <td>{new Date(r.ts).toLocaleTimeString()}</td>
-                                            <td>{r.symbol}</td>
-                                            <td>{r.label}</td>
-                                            <td className={r.result === 'win' ? 'is-win' : 'is-loss'}>{r.result === 'win' ? localize('WIN') : localize('LOSS')}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                </div>
-            )}
+            <PairFrequencyCard snapshots={snapshots} />
 
             {(history.length > 0 || activity.length > 0) && (
                 <div className='ai-agent-panel__history'>

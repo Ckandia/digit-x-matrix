@@ -11,9 +11,8 @@
 //
 // For every contract the report also carries the frequency chance alone would give (the same market's own
 // single-tick rates, assuming ticks do not influence each other) and a z-score of the gap. A pattern that
-// shows up more often than that is a candidate; the frontend's virtual hook paper-tests it before any live
-// trade. This is a statistical description of the last few hundred ticks, NOT a validated edge: Deriv's
-// synthetic indices are built as random processes, and the paper/live results are the real test.
+// shows up more often than that is a candidate; it is a candidate, nothing more. This is a statistical description of the last few hundred ticks, NOT a validated edge: Deriv's
+// synthetic indices are built as random processes, and live results are the real test.
 
 export const PAIR_TOUCH_BARRIER = 0.5;
 export const MIN_PAIR_SAMPLE = 100; // windows needed before anything is reported as a signal
@@ -138,7 +137,7 @@ export function computePairFrequencies(prices, decimals = 2, barrier = PAIR_TOUC
     return { n, barrier, rows };
 }
 
-/** The patterns that show up more often than chance, as signals the auto-pilot can paper-test and then trade. */
+/** The patterns that show up more often than chance, as signals. */
 export function computePairSignals(scan, symbol) {
     if (!scan || scan.n < MIN_PAIR_SAMPLE) return [];
     const signals = [];

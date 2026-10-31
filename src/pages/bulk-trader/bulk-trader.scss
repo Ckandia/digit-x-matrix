@@ -29,8 +29,9 @@
     @media (max-width: 1024px) {
         max-height: calc(100vh - 13rem);
     }
-    overscroll-behavior-y: auto; // 'contain' trapped the finger: at the end of the box nothing scrolled at all
+    overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
     background: var(--bt-bg);
     color: var(--bt-text);
     border-radius: 8px;

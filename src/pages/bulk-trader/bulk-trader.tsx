@@ -1,4 +1,3 @@
-import { PaperLearningCard } from './PaperLearningCard';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { localize } from '@deriv-com/translations';
 import { useApiBase } from '@/hooks/useApiBase';
@@ -23,7 +22,6 @@ import { MessageTypes } from '@/external/bot-skeleton';
 import TradeResults from './TradeResults';
 import { keepScreenAwake } from './wakeLock';
 import { tradeBus } from './tradeBus';
-import { forRunPanel } from './contractFeed';
 import './bulk-trader.scss';
 
 const STORAGE_KEY = 'bulk_trader_run_id';
@@ -173,7 +171,7 @@ const BulkTrader = () => {
         // while another tab is open and its trades must still be recorded.
         bulk_mirror_off?.();
         const off_contract = tradeBus.onContract(contract => {
-            const c = forRunPanel(contract);
+            const c = { ...contract, id: contract.id ?? contract.contract_id };
             transactions.onBotContractEvent(c as never);
             summary_card.onBotContractEvent(c as never);
         });
@@ -454,7 +452,6 @@ const BulkTrader = () => {
                 </p>
             </div>
 
-            <PaperLearningCard />
 
             {!backend_configured && (
                 <div className='bulk-trader__notice bulk-trader__notice--warning'>

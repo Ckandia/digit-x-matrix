@@ -78,7 +78,6 @@ describe('24-hour defaults (recovery)', () => {
         expect(c.recover_losses).toBe(true);
         expect(c.stake).toBe(planMartingale(c.stop_loss, c.max_steps).stake);
         expect(c.contract_families).toEqual(ALL_FAMILY_KEYS);
-        expect(c.read_entries).toBe(true);
         expect(c.protect_trades).toBe(0);
         expect(c.both_sides).toBe(true); // applies only to Only Ups / Only Downs, which the default families exclude
         expect(SAFE_FAMILY_KEYS).toEqual(['even_odd', 'over_under']);
@@ -90,6 +89,8 @@ describe('24-hour defaults (recovery)', () => {
         expect(plan.worst_ladder).toBeLessThanOrEqual(c.stop_loss * MARTINGALE_STOP_LOSS_SHARE + 1);
     });
 });
+
+let rid = 0; // every read of a signal gets a fresh run id
 
 describe('pacing: max live trades per hour', () => {
     class Conn {
@@ -124,11 +125,11 @@ describe('pacing: max live trades per hour', () => {
         buys_ = () => this.sent.filter(r => r.buy);
     }
     const snapshots: TSnapshotMap = {
-        R_PACE: { stats: {} as never, signals: [{ family: 'digits', contract_type: 'DIGITEVEN', label: 'Even', confidence: 90, basis: '' } as never] },
+        R_PACE: { stats: {} as never, signals: [{ family: 'run_bias', strategy: 'run_bias', entry: true, contract_type: 'DIGITEVEN', label: 'Even', confidence: 90, basis: '', get run_id() { return ++rid; } } as never] },
     };
     const make = (per_hour: number) => {
         const conn = new Conn();
-        const config: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 1.2, max_steps: 5, stop_loss: 10000, take_profit: 10000, auto_flip: false, protect_trades: 0, virtual_hook: false, follow_stream: false, max_trades_per_hour: per_hour };
+        const config: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 1.2, max_steps: 5, stop_loss: 10000, take_profit: 10000, protect_trades: 0, max_trades_per_hour: per_hour };
         const engine = new AutoPilotEngine(conn as never, 'USD', config, () => snapshots, () => undefined, new LearningEngine(`pace-${Math.random()}`, 'learn'));
         return { conn, engine };
     };
