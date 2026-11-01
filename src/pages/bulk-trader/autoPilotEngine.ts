@@ -894,7 +894,7 @@ export class AutoPilotEngine {
             const res = await this.connection.send({ buy: '1', price: stake, parameters: params });
             const id = res?.buy?.contract_id;
             if (!id) throw new Error('Buy did not return a contract id');
-            return String(id);
+            return id as string; // keep it exactly as Deriv sent it (a number): proposal_open_contract rejects a string contract_id
         };
         const priced: Promise<void> =
             partner && partner_parameters
@@ -980,7 +980,9 @@ export class AutoPilotEngine {
     private _watch(candidate: TCandidate, stake: number, contract_id: string, duration: number, pair?: TPair) {
         const entry_step = this.step;
         const entry_tag = this.entry_tag;
-        const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id }, (data, err) => {
+        // Deriv validates contract_id as an integer; ids from Deriv are numbers, so a stringified one is turned back into a number.
+        const cid = Number.isFinite(Number(contract_id)) ? Number(contract_id) : contract_id;
+        const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id: cid }, (data, err) => {
             if (err) {
                 this.busy = false;
                 this._emit({ phase: 'error', symbol: candidate.symbol, error: err.message });

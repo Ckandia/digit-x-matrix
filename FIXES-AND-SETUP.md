@@ -1,3 +1,8 @@
+# Fix: "Input validation failed: contract_id" / "lost track of an open contract"
+
+- Cause (introduced in the previous build): the new direct buy turned Deriv's numeric contract id into a string, and `proposal_open_contract` rejects a string `contract_id`, so every trade stopped the run at once. The id is now kept exactly as Deriv sends it, and `_watch` also converts a numeric-looking id back to a number.
+- The test connection now rejects a string `contract_id` like Deriv does, and two regression tests (`fast-entry`) cover a single contract, both legs of a pair, and a full settle.
+
 # No recovery ladder, buy the next tick after the signal, no Touch / No Touch
 
 - **Recovery ladder removed.** A loss never raises the stake any more. The AI Trader's stake methods are the reverse martingale (default: bigger stake only after wins) and flat; a saved `martingale` / `flip` setting runs as the reverse martingale. `recover_losses`, the recovery-stake maths, the ladder budget and the pre-trade payout quote are gone.

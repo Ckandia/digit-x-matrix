@@ -21,7 +21,7 @@ class Conn {
         this.sent.push(req);
         this.log.push(Object.keys(req).find(k => ['proposal', 'buy', 'ticks_history'].includes(k)) ?? 'other');
         if (req.proposal) return { proposal: { ask_price: 1, payout: this.payout } };
-        if (req.buy) return { buy: { contract_id: `c${++this.buys}` } };
+        if (req.buy) return { buy: { contract_id: 100 + ++this.buys } };
         if (req.ticks_history) {
             const prices = this.history[req.ticks_history] ?? [];
             return { history: { prices, times: prices.map((_, i) => i + 1) }, pip_size: 2 };
@@ -29,6 +29,8 @@ class Conn {
         return {};
     }
     subscribe(req: any, cb: any) {
+        // Deriv validates contract_id as an integer: a string is rejected ("Input validation failed: contract_id").
+        if (req.proposal_open_contract && typeof req.contract_id !== 'number') throw new Error('Input validation failed: contract_id');
         const id = this.n++;
         this.subs.set(id, { req, cb });
         return id;
@@ -36,7 +38,7 @@ class Conn {
     unsubscribe(id: number) {
         this.subs.delete(id);
     }
-    settle(contract_id: string, profit: number) {
+    settle(contract_id: number, profit: number) {
         for (const { req, cb } of this.subs.values()) {
             if (req.proposal_open_contract && req.contract_id === contract_id) cb({ proposal_open_contract: { contract_id, is_sold: 1, profit, buy_price: 1 } }, null);
         }
@@ -119,10 +121,36 @@ describe('the buy right after the signal is as fast as it can be', () => {
         h.engine.start();
         await wait(100);
         h.snapshots.R_F7.signals = [sig({ type: 'DIGITEVEN', label: 'Even', run_id: 2 })] as never;
-        h.conn.settle('c1', 0.9);
+        h.conn.settle(101, 0.9);
         await wait(300);
         expect(h.conn.buys_()).toHaveLength(2);
         h.engine.stop();
+    });
+});
+
+describe('open contracts are followed by their numeric id', () => {
+    it('a single contract and both legs of a pair are watched with the integer contract id Deriv sent', async () => {
+        const h = make({ R_F10: [sig({ type: 'RUNHIGH', label: 'Only Ups', run_id: '9:2', trend: 'bullish' })] });
+        h.engine.start();
+        await wait(250);
+        const watched = [...h.conn.subs.values()].map(x => x.req).filter(r => r.proposal_open_contract);
+        expect(watched).toHaveLength(2);
+        for (const r of watched) expect(typeof r.contract_id).toBe('number');
+        h.engine.stop();
+    });
+
+    it('a run is not stopped by "lost track of an open contract"', async () => {
+        const events: string[] = [];
+        const conn = new Conn();
+        const snapshots: TSnapshotMap = { R_F11: { stats: {} as never, signals: [sig({ type: 'DIGITEVEN', label: 'Even', run_id: 1 })] as never } };
+        const engine = new AutoPilotEngine(conn as never, 'USD', base, () => snapshots, e => events.push(`${e.phase}${e.reason ? ':' + e.reason : ''}`));
+        engine.start();
+        await wait(200);
+        conn.settle(101, 0.9);
+        await wait(200);
+        expect(events.some(e => e.includes('lost track'))).toBe(false);
+        expect(events.some(e => e.startsWith('settled'))).toBe(true);
+        engine.stop();
     });
 });
 
@@ -142,7 +170,7 @@ describe('no recovery ladder', () => {
         h.engine.start();
         await wait(100);
         h.snapshots.R_F9.signals = [sig({ type: 'DIGITEVEN', label: 'Even', run_id: 2 })] as never;
-        h.conn.settle('c1', -1);
+        h.conn.settle(101, -1);
         await wait(300);
         expect(h.conn.buys_().map(b => b.price)).toEqual([1, 1]);
         h.engine.stop();

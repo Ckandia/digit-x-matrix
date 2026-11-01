@@ -19,7 +19,7 @@ class Conn {
     async send(req: any) {
         this.sent.push(req);
         if (req.proposal) return { proposal: { ask_price: 1, payout: this.payout } };
-        if (req.buy) return { buy: { contract_id: `c${++this.buys}` } };
+        if (req.buy) return { buy: { contract_id: 100 + ++this.buys } };
         if (req.ticks_history) {
             const prices = this.history[req.ticks_history] ?? [];
             return { history: { prices, times: prices.map((_, i) => i + 1) }, pip_size: 2 };
@@ -27,6 +27,8 @@ class Conn {
         return {};
     }
     subscribe(req: any, cb: any) {
+        // Deriv validates contract_id as an integer: a string is rejected ("Input validation failed: contract_id").
+        if (req.proposal_open_contract && typeof req.contract_id !== 'number') throw new Error('Input validation failed: contract_id');
         const id = this.n++;
         this.subs.set(id, { req, cb });
         return id;
@@ -34,7 +36,7 @@ class Conn {
     unsubscribe(id: number) {
         this.subs.delete(id);
     }
-    settle(contract_id: string, profit: number) {
+    settle(contract_id: number, profit: number) {
         for (const { req, cb } of this.subs.values()) {
             if (req.proposal_open_contract && req.contract_id === contract_id) cb({ proposal_open_contract: { contract_id, is_sold: 1, profit, buy_price: 1 } }, null);
         }
@@ -82,7 +84,7 @@ describe('the AI executes on the backend signal', () => {
         const h = make({ R_SIG3: [sig({ type: 'DIGITUNDER', label: 'Under 5', entry: true, run_id: 7 })] });
         h.engine.start();
         await wait();
-        h.conn.settle('c1', 0.9);
+        h.conn.settle(101, 0.9);
         await wait(700);
         expect(h.conn.buys_()).toHaveLength(1); // the same run id is not bought again
         h.snapshots.R_SIG3.signals = [sig({ type: 'DIGITUNDER', label: 'Under 5', entry: true, run_id: 8 })] as never;
@@ -127,7 +129,7 @@ describe('the AI executes on the backend signal', () => {
         h.engine.start();
         await wait();
         h.snapshots.R_REC.signals = [sig({ type: 'DIGITUNDER', label: 'Under 5', entry: true, run_id: 2 })] as never; // a different contract signals
-        h.conn.settle('c1', -1);
+        h.conn.settle(101, -1);
         await wait(500);
         expect(h.conn.buys_().map(b => b.price)).toEqual([1, 1]);
         expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'DIGITUNDER' });
