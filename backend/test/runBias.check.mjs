@@ -17,7 +17,6 @@ assert.equal(row(px(pad(3, [2, 4])), 'even').current, 2, 'two even ticks are a r
 assert.deepEqual(LEVELS.even, [2, 3]);
 assert.deepEqual(LEVELS.under5, [2, 3]);
 assert.deepEqual(LEVELS.only_up, [2]);
-assert.deepEqual(LEVELS.touch, [2]);
 assert.deepEqual(row(px(pad(3, [2, 4, 6])), 'even').levels.map(l => l.min_run), [2, 3]);
 
 // runStats counts only runs of >= minRun
@@ -48,14 +47,20 @@ const rising = Array.from({ length: 80 }, (_, i) => 100 + i * 0.3 + (i % 5 === 4
 const f = favourFlags(rising, 2);
 assert.ok(f.rise[10] && !f.fall[10]);
 
-// Touch / No Touch are exact complements of the real 5-tick, +0.5 outcome
-const wave = Array.from({ length: 90 }, (_, i) => 100 + (i % 10 < 5 ? (i % 10) * 0.2 : 1 - ((i % 10) - 5) * 0.2)); // swings of ~0.8
-const tf = favourFlags(wave, 2);
-for (let i = 5; i < wave.length; i++) assert.notEqual(tf.touch[i], tf.no_touch[i]);
-const flat = Array.from({ length: 90 }, (_, i) => 100 + (i % 2) * 0.01); // never travels 0.5
-const ff = favourFlags(flat, 2);
-assert.ok(ff.no_touch[20] && !ff.touch[20]);
-assert.ok(tf.touch.some(Boolean), 'a market that swings 0.8 touches +0.5');
+// Touch / No Touch are gone from the analysis
+assert.ok(!computeRunBias(rising, 2).rows.some(r => /touch/.test(r.key)));
+assert.equal(LEVELS.touch, undefined);
+
+// Trend gate: Rise / Only Ups fire only in a confirmed uptrend, Fall / Only Downs only in a downtrend; the signal carries the trend
+const wavy = Array.from({ length: 120 }, (_, i) => 100 + i * 0.2 + Math.sin(i / 2) * 1.5); // higher highs and higher lows
+const bullish = computeRunBias(wavy, 2, 5000);
+assert.equal(bullish.trend, 'bullish');
+const tsigs = computeRunSignals(bullish, 'R_T');
+assert.ok(!tsigs.some(s => s.entry && (s.contract_type === 'PUT' || s.contract_type === 'RUNLOW')), 'no Fall / Only Downs entry in an uptrend');
+for (const s of tsigs.filter(x => x.contract_type === 'CALL' || x.contract_type === 'RUNHIGH')) assert.equal(s.trend, 'bullish');
+const sideways = Array.from({ length: 120 }, (_, i) => 100 + (i % 2) * 0.3);
+assert.equal(computeRunBias(sideways, 2).trend, 'none');
+assert.ok(!computeRunSignals(computeRunBias(sideways, 2), 'R_S').some(s => s.entry && ['CALL', 'PUT', 'RUNHIGH', 'RUNLOW'].includes(s.contract_type)), 'no trend contract fires without a trend');
 
 // signals shape
 const scan = computeRunBias(rising, 2, 5000);

@@ -4,9 +4,7 @@ import {
     EXPECTED_LOSS_PER_STAKE,
     MIN_STAKE,
     planRun,
-    planMartingale,
     ALL_FAMILY_KEYS,
-    MARTINGALE_STOP_LOSS_SHARE,
     PLAN_STOP_LOSS_SHARE,
     SAFE_FAMILY_KEYS,
     SPREAD_PER_STAKE,
@@ -71,22 +69,18 @@ describe('24-hour run plan', () => {
     });
 });
 
-describe('24-hour defaults (recovery)', () => {
-    it('presets use the recovery martingale, a ladder-sized base stake and every contract family ticked', () => {
+describe('24-hour defaults (no recovery ladder)', () => {
+    it('presets use the reverse martingale (a loss never raises the stake), the run-plan base stake, no pacing and every contract family', () => {
         const c = buildConfigFromPreset('moderate', 10000);
-        expect(c.recovery_mode).toBe('martingale');
-        expect(c.recover_losses).toBe(true);
-        expect(c.stake).toBe(planMartingale(c.stop_loss, c.max_steps).stake);
+        expect(c.recovery_mode).toBe('reverse');
+        expect(c.stake).toBe(planRun(c.stop_loss).stake);
+        expect(c.max_trades_per_hour).toBe(0); // a signal is bought the next tick, not when a timer allows
         expect(c.contract_families).toEqual(ALL_FAMILY_KEYS);
+        expect(ALL_FAMILY_KEYS).toEqual(['even_odd', 'over_under', 'rise_fall', 'only_ups_downs']); // Touch / No Touch are gone
         expect(c.protect_trades).toBe(0);
-        expect(c.both_sides).toBe(true); // applies only to Only Ups / Only Downs, which the default families exclude
+        expect(c.both_sides).toBe(true);
+        expect('recover_losses' in c).toBe(false);
         expect(SAFE_FAMILY_KEYS).toEqual(['even_odd', 'over_under']);
-    });
-
-    it('a full failed ladder fits inside the stop-loss share, so one bad run cannot reach the stop loss alone', () => {
-        const c = buildConfigFromPreset('moderate', 10000);
-        const plan = planMartingale(c.stop_loss, c.max_steps);
-        expect(plan.worst_ladder).toBeLessThanOrEqual(c.stop_loss * MARTINGALE_STOP_LOSS_SHARE + 1);
     });
 });
 

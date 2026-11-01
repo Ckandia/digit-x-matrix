@@ -1,3 +1,11 @@
+# No recovery ladder, buy the next tick after the signal, no Touch / No Touch
+
+- **Recovery ladder removed.** A loss never raises the stake any more. The AI Trader's stake methods are the reverse martingale (default: bigger stake only after wins) and flat; a saved `martingale` / `flip` setting runs as the reverse martingale. `recover_losses`, the recovery-stake maths, the ladder budget and the pre-trade payout quote are gone.
+- **The real delay was the pacing cap.** The previous build set `max_trades_per_hour: 60`, which makes every live trade wait one minute after the last (your results show trades exactly 60 s apart). The default is now 0 (no pacing); the field is still there if you want a cap.
+- **Buy on the next tick after the signal:** polling is 100 ms and the panel calls `engine.signalReceived()` the moment a snapshot arrives; a single contract is bought with ONE request (no price check, no chart request first); the backend checks the 1-tick trend itself and puts it on the signal (`trend`), so Rise/Fall and Only Ups/Downs do not ask for the chart; Only Ups + Only Downs are priced together then bought together (the second leg is no longer bought after the first); a signal whose run already ended is dropped before buying (only on the chart-check path).
+- **Touch / No Touch removed from the AI** (families, backend analysis, run-bias table). The Bulk Trades tab is untouched.
+- **Checks:** `cd backend && npm run check:runbias`; specs `fast-entry` (9), `signal-entry`, `safe-plan`, `edge-gate`, `follow-stream`, `ai-trader-rules`, `one-second-only`. Not run: full jest, whole-app tsc, live Deriv.
+
 # Why only No Touch was bought (and losing), and the fixes
 
 - **Why only Touch / No Touch:** the last build ticked only that family by default (the owner had put the others on the back burner). All five families are ticked again by default.

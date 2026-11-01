@@ -11,8 +11,6 @@ const ORDER: { key: string; label: string }[] = [
     { key: 'fall', label: 'Fall' },
     { key: 'only_up', label: 'Only Ups' },
     { key: 'only_down', label: 'Only Downs' },
-    { key: 'touch', label: 'Touch' },
-    { key: 'no_touch', label: 'No Touch' },
 ];
 const shortName = (symbol: string) => symbol.replace(/^1HZ(\d+)V$/, 'V$1 (1s)');
 

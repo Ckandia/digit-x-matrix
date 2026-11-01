@@ -82,6 +82,11 @@ const AiAgentPanel = ({
     const [labRows, setLabRows] = useState<TLabRow[]>([]);
     const [limitNote, setLimitNote] = useState('');
     const { learnerRef, capStopLossRef, connectionRef, engineRef } = aiRuntime;
+
+    // A new snapshot from the backend: a waiting AI looks at it right now instead of at its next poll, so a signal is bought on the next tick.
+    useEffect(() => {
+        engineRef.current?.signalReceived();
+    }, [snapshots, engineRef]);
     const is_running = status === 'running';
 
     const [connectError, setConnectError] = useState<string | null>(null);
@@ -422,7 +427,7 @@ const AiAgentPanel = ({
             <header className='ai-agent-panel__header'>
                 <h3>{localize('AI auto-trader')}</h3>
                 <p>
-                    <InfoNote text={localize('Reads your balance, sets the stake from a risk level, and scans every market for Even/Odd (including your streak-reversal rule) and Rise/Fall on the next tick, plus the barrier contracts (Touch/No Touch, Stays Between/Goes Outside) when the market state suits them, and picks the market and contract with the strongest signal, all on 1 tick (barrier contracts use the shortest duration Deriv offers). Every trade is priced with Deriv first, so a contract Deriv would reject is skipped before any money is spent. The stake grows only on a winning streak (reverse martingale) and returns to the base stake after a loss; after 2 losses in a row it switches to a different contract. The signal is a statistical deviation score, not a win-probability estimate.')} />
+                    <InfoNote text={localize('Reads your balance and sets the stake from a risk level. The backend reads the tick stream of every market and sends entry signals; the AI buys the strongest one on the very next tick, on 1 tick (Only Ups/Only Downs on 2). The stake grows only on a winning streak (reverse martingale) and returns to the base stake after a loss: there is no recovery ladder. The signal is a statistical description of recent ticks, not a win-probability estimate.')} />
                 </p>
             </header>
 
@@ -579,18 +584,8 @@ const AiAgentPanel = ({
                     )}
 
                     <div className='ai-agent-panel__hint'>
-                        <InfoNote text={localize('Entries come from the backend: it reads the tick stream and flags a contract the moment consecutive ticks favour it in a market whose bias favours it: Even/Odd and Over 4/Under 5 on 2 AND on 3 ticks (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4), Only Ups/Only Downs from 2 ticks (both are bought together, and only when a winning side pays more than both stakes), Rise/Fall and Touch/No Touch from 2 ticks. The AI buys on that signal as soon as it arrives, across all markets. Nothing is paper-traded first.')} />
+                        <InfoNote text={localize('Entries come from the backend: it reads the tick stream and flags a contract the moment consecutive ticks favour it in a market whose bias favours it: Even/Odd and Over 4/Under 5 on 2 AND on 3 ticks (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4), Only Ups/Only Downs from 2 ticks (both are bought together, and only when a winning side pays more than both stakes), Rise/Fall from 2 ticks (Rise and Only Ups only in a confirmed higher-high trend, Fall and Only Downs only in a lower-low trend, checked by the backend). The AI buys on the very next tick after the signal, across all markets. There is no recovery ladder and no paper test first.')} />
                     </div>
-                    <label className='ai-agent-panel__hint'>
-                        <input
-                            type='checkbox'
-                            checked={!!config?.recover_losses}
-                            disabled={!config || status === 'connecting'}
-                            onChange={e => config && setConfig({ ...config, recover_losses: e.target.checked })}
-                        />{' '}
-                        <InfoNote text={localize('Recovery stake (needs the martingale stake method): after a loss the next stake wins back everything lost in the ladder plus one base stake. When the ladder runs out of steps or budget the loss is accepted, the stake goes back to the base stake and trading goes on; only the stop loss ends the run.')} />
-                    </label>
-
                     <div className='ai-agent-panel__hint'>
                         <strong>{localize('Contracts the AI may trade')}</strong>
                         {CONTRACT_FAMILIES.map(family => {
@@ -631,8 +626,6 @@ const AiAgentPanel = ({
                             onChange={e => config && setConfig({ ...config, recovery_mode: e.target.value as TRecoveryMode })}
                         >
                             <option value='reverse'>{localize('Reverse martingale: bigger stake after wins, base stake after a loss')}</option>
-                            <option value='martingale'>{localize('Martingale / recovery: bigger stake after a loss to win the losses back')}</option>
-                            <option value='flip'>{localize('Auto-flip: opposite side, bigger stake')}</option>
                             <option value='flat'>{localize('Flat: same stake, no recovery')}</option>
                         </select>
                     </label>
@@ -640,7 +633,7 @@ const AiAgentPanel = ({
                         <InfoNote text={localize('Conservative / Moderate / Aggressive change the stake sizes only (stake, stake growth, stop loss, take profit). They never change which contracts the AI trades. After 2 losses in a row the AI switches to a different contract.')} />
                     </p>
                     <p className='ai-agent-panel__hint'>
-                        <InfoNote text={localize('Quick contracts first: 1-tick contracts (Even/Odd, Over 4/Under 5, Rise/Fall) are always preferred; Touch/No Touch (5 ticks, barrier 0.5, or 10 ticks if Deriv refuses 5) is used only when no 1-tick contract is available. Rise needs a higher-high and Fall a lower-low on the 1-tick chart first. Capital protection: for the first N trades the stake stays at the base stake and the run stops if it loses 3 base stakes. It reduces risk; it cannot guarantee profit.')} />
+                        <InfoNote text={localize('Contracts: Even/Odd, Over 4/Under 5, Rise/Fall and Only Ups/Only Downs (Touch/No Touch are not traded here). Rise and Only Ups need a higher-high and Fall and Only Downs a lower-low on the 1-tick chart first; the backend checks that before it sends the signal. Capital protection: for the first N trades the stake stays at the base stake and the run stops if it loses 3 base stakes. It reduces risk; it cannot guarantee profit.')} />
                     </p>
                     <details className='ai-agent-panel__hint'>
                         <summary>{localize('AI playbook (your notes)')}</summary>

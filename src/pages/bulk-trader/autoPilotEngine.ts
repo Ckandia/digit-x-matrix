@@ -44,6 +44,8 @@ export const RISK_PRESETS: Record<TRiskLevel, TRiskPreset> = {
  *  Classic modes, which raise the stake after a LOSS: 'martingale' = same contract again, 'flip' = the opposite side.
  *  'flat' = same base stake always. */
 export type TRecoveryMode = 'reverse' | 'martingale' | 'flip' | 'flat';
+/** Only two stake methods exist now: the reverse martingale (default) and a flat stake. A saved 'martingale' / 'flip' (the old recovery ladders) runs as 'reverse'. */
+export const stakeMode = (m?: TRecoveryMode): 'reverse' | 'flat' => (m === 'flat' ? 'flat' : 'reverse');
 
 /** After this many losses in a row the AI switches to a different contract (does not wait for the market). */
 export const SWITCH_AFTER_LOSSES = 2;
@@ -69,12 +71,6 @@ export type TAutoPilotConfig = {
      * every contract here pays under 2x, so each trade loses a little on average and the loss grows with the NUMBER of trades.
      */
     max_trades_per_hour?: number;
-    /**
-     * Recovery stake (martingale mode). After a loss the next stake is sized to win back EVERYTHING the current ladder has lost
-     * plus one base stake, at the payout the last contract showed. When the ladder runs out of steps or of budget it is dropped
-     * (the loss is accepted), the stake goes back to the base stake and the run carries on; only the overall stop loss ends it.
-     */
-    recover_losses?: boolean;
 };
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
@@ -82,12 +78,9 @@ export const CONTRACT_FAMILIES: { key: string; label: string; types: [string, st
     { key: 'even_odd', label: 'Even / Odd', types: ['DIGITEVEN', 'DIGITODD'] },
     { key: 'over_under', label: 'Over 4 / Under 5', types: ['DIGITOVER', 'DIGITUNDER'] },
     { key: 'rise_fall', label: 'Rise / Fall', types: ['CALL', 'PUT'], trend: true },
-    { key: 'touch', label: 'Touch / No Touch', types: ['ONETOUCH', 'NOTOUCH'] },
     { key: 'only_ups_downs', label: 'Only Ups / Only Downs', types: ['RUNHIGH', 'RUNLOW'], trend: true },
 ];
 export const ALL_FAMILY_KEYS = CONTRACT_FAMILIES.map(f => f.key);
-/** The families ticked by default: Touch / No Touch is the focus, the others are on the back burner (tick them on the AI Trader tab to use them). */
-export const FOCUS_FAMILY_KEYS = ['touch']; // kept for anyone who wants Touch / No Touch only
 
 /** The early loss limit during capital protection, in base stakes. */
 export const PROTECT_LOSS_STAKES = 3;
@@ -146,50 +139,6 @@ export const planRun = (stop_loss: number, hours = 24, trades_per_hour = DEFAULT
     };
 };
 
-/** The share of the stop loss a full failed recovery ladder may use, so the stop loss stays a net and not the plan. */
-export const MARTINGALE_STOP_LOSS_SHARE = 0.6;
-
-/**
- * The recovery stake: wins back everything lost so far in the ladder plus one base stake, at the payout the contract pays
- * (profit per unit stake). Example at 0.83: after a 1.00 loss the next stake is (1 + 1) / 0.83 = 2.41.
- */
-export const recoveryStake = (ladder_spent: number, base: number, payout_ratio = ASSUMED_PAYOUT_RATIO): number => {
-    const ratio = payout_ratio > 0.2 && payout_ratio < 2 ? payout_ratio : ASSUMED_PAYOUT_RATIO;
-    return Math.max(MIN_STAKE, Math.ceil(((ladder_spent + base) / ratio) * 100 - 1e-9) / 100);
-};
-
-/** The stakes of a whole recovery ladder (every step lost): base, then each recovery stake. */
-export const recoveryLadder = (base: number, steps: number, payout_ratio = ASSUMED_PAYOUT_RATIO): number[] => {
-    const out: number[] = [];
-    let spent = 0;
-    let stake = base;
-    for (let i = 0; i < Math.max(1, steps); i++) {
-        out.push(Number(stake.toFixed(2)));
-        spent += stake;
-        stake = recoveryStake(spent, base, payout_ratio);
-    }
-    return out;
-};
-
-export type TMartingalePlan = { stake: number; ladder: number[]; worst_ladder: number; trimmed: boolean };
-
-/**
- * Sizes the BASE stake so that a full failed ladder (`steps` losses in a row) costs at most MARTINGALE_STOP_LOSS_SHARE of the
- * stop loss. A bigger stop loss gives a bigger base stake; a small account is held to the minimum stake (trimmed = true).
- * A recovery ladder wins back its losses when ANY step wins; it does not change the odds of a single trade.
- */
-export const planMartingale = (stop_loss: number, steps: number, share = MARTINGALE_STOP_LOSS_SHARE): TMartingalePlan => {
-    const budget = Math.max(0, Math.abs(stop_loss)) * share;
-    const unit = recoveryLadder(1, steps).reduce((a, b) => a + b, 0);
-    let stake = Math.floor((budget / unit) * 100) / 100;
-    let trimmed = false;
-    if (stake < MIN_STAKE) {
-        stake = MIN_STAKE;
-        trimmed = true;
-    }
-    const ladder = recoveryLadder(stake, steps);
-    return { stake, ladder, worst_ladder: Number(ladder.reduce((a, b) => a + b, 0).toFixed(2)), trimmed };
-};
 /**
  * Both sides: a live trade fires the contract AND its opposite at once, but ONLY for Only Ups / Only Downs.
  * Every other contract (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch) is bought on one side only.
@@ -204,21 +153,20 @@ type TPair = { pending: number; profit: number; stake: number };
 export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
     const preset = RISK_PRESETS[level];
     const stop_loss = Number(((balance * preset.stop_loss_pct) / 100).toFixed(2));
-    // 24-hour plan with RECOVERY: the base stake is sized so a full failed ladder fits inside part of the stop loss, a loss is
-    // followed by a recovery stake that wins the ladder back, and every ticked contract is read from the latest ticks.
-    const plan = planMartingale(stop_loss, preset.max_steps);
+    // 24-hour plan, no recovery ladder: a loss never raises the stake. The base stake is sized by planRun so a bad run stays inside
+    // part of the stop loss; the reverse martingale (stake grows only after wins) is the default stake method.
+    const plan = planRun(stop_loss);
     return {
-        recovery_mode: 'martingale',
-        recover_losses: true,
+        recovery_mode: 'reverse',
         stake: plan.stake,
-        max_trades_per_hour: 60,
+        max_trades_per_hour: 0, // no pacing: a signal is bought the next tick, not when a trades-per-hour timer allows
         streak_multiplier: preset.streak_multiplier,
         max_streak: preset.max_streak,
         martingale_multiplier: preset.martingale_multiplier,
         max_steps: preset.max_steps,
         stop_loss,
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
-        protect_trades: 0, // protection capped the first 10 stakes at the base stake, which switched recovery off
+        protect_trades: 0,
         contract_families: ALL_FAMILY_KEYS,
         both_sides: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
     };
@@ -338,7 +286,7 @@ const OPPOSITE_LABEL: Record<string, string> = {
 
 /** Contracts that wait for a confirmed trend on the 1-tick chart: Rise needs a higher high, Fall a lower low. */
 /** How often the AI asks for a backend entry signal while it has none. */
-export const SIGNAL_POLL_MS = 300;
+export const SIGNAL_POLL_MS = 100;
 export const DEFAULT_FOLLOW_TICKS = 2;
 export const MAX_FOLLOW_TICKS = 5;
 export const DEFAULT_ENTRY_TICK = 3;
@@ -483,14 +431,6 @@ export const preferOneTick = (snapshots: TSnapshotMap): TSnapshotMap => {
 
 /** A quote whose payout is below this multiple of the stake is a guaranteed-loss trade: never buy it. */
 const MIN_PAYOUT_RATIO = 1.05;
-/** Touch / No Touch: a quote paying less than this multiple of the stake (profit under 70%) is not bought: a 6% No Touch win cannot be recovered. */
-export const TOUCH_MIN_PAYOUT_RATIO = 1.7;
-/** Touch / No Touch recovery ladders are capped at this many steps. */
-export const TOUCH_MAX_STEPS = 3;
-/** A recovery stake may be at most this many base stakes; a bigger one means the payout is too low to recover with, so the ladder is dropped. */
-export const MAX_RECOVERY_MULTIPLE = 8;
-/** The payout (profit per unit stake) below which recovery is not even attempted. */
-export const MIN_RECOVERY_PAYOUT = 0.5;
 /** Deriv wording for "this contract itself is not available right now" (as opposed to balance/stake/connection errors). */
 const REFUSAL_PATTERN = /not offered|duration|barrier|not available|unavailable|suspended|market is closed|no longer offered|selected tick|no return|offers no/i;
 
@@ -680,6 +620,7 @@ export class AutoPilotEngine {
     private trade_count = 0; // settled trades in this run (capital protection counts these)
     private used_runs = new Set<string>(); // symbol|type|run id of the backend signals already traded: one run is traded once
     private poll_timer: ReturnType<typeof setTimeout> | null = null;
+    private waiting: { stake: number; tag?: TAutoPilotEvent['tag'] } | null = null; // set while the AI waits for a signal
     private blocked = new Map<string, number>(); // symbol|type -> until: no trend confirmed on the 1-tick chart yet
 
     constructor(
@@ -762,6 +703,7 @@ export class AutoPilotEngine {
         for (const [symbol, snap] of Object.entries(gated)) {
             for (const sig of snap.signals) {
                 if (sig.family !== 'run_bias' || !sig.entry) continue;
+                if (sig.contract_type === 'ONETOUCH' || sig.contract_type === 'NOTOUCH') continue; // Touch / No Touch are not traded by the AI
                 if (allowed && !allowed.has(sig.contract_type)) continue;
                 if ((this.blocked.get(`${symbol}|${sig.contract_type}`) ?? 0) > now) continue;
                 if (sig.run_id !== undefined && this.used_runs.has(`${symbol}|${sig.contract_type}|${sig.run_id}`)) continue;
@@ -773,12 +715,19 @@ export class AutoPilotEngine {
         return best;
     }
 
+    /** The panel calls this the moment a new snapshot arrives from the backend: a waiting AI looks at it at once instead of at its next poll. */
+    signalReceived() {
+        if (!this.running || this.busy || !this.waiting) return;
+        this._findAndEnter(this.waiting.stake, this.waiting.tag);
+    }
+
     /** Looks for a backend entry signal; with none yet it asks again shortly (signals come and go with every tick). */
     private _findAndEnter(stake: number, tag?: TAutoPilotEvent['tag']) {
         if (!this.running || this.busy) return;
         if (this.poll_timer) clearTimeout(this.poll_timer);
         this.poll_timer = null;
         const candidate = this._pickSignal();
+        this.waiting = candidate ? null : { stake, tag };
         if (!candidate) {
             if (Date.now() - this.last_wait_emit > 30_000) {
                 this.last_wait_emit = Date.now();
@@ -790,70 +739,42 @@ export class AutoPilotEngine {
         this._enter(candidate, stake, tag);
     }
 
-    /** Buys the signalled contract right away; Rise/Fall and Only Ups/Downs first need their trend on the 1-tick chart. */
+    /** Is the signal still on the backend's feed right now (same contract, market and run)? A run that already ended is not bought. */
+    private _stillValid(candidate: TCandidate): boolean {
+        const run_id = (candidate as { run_id?: number | string }).run_id;
+        const snap = this.getSnapshots()[candidate.symbol];
+        if (!snap) return true;
+        return snap.signals.some(sg => sg.family === 'run_bias' && sg.entry && sg.contract_type === candidate.contract_type && (run_id === undefined || sg.run_id === run_id));
+    }
+
+    /**
+     * Buys the signalled contract on the very next tick: no price check first, no chart request. The backend has already confirmed the
+     * trend on the 1-tick chart for Rise/Fall and Only Ups/Downs (the signal carries it); only a signal without that confirmation
+     * falls back to asking for the chart.
+     */
     private _enter(candidate: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag']) {
         const run_id = (candidate as { run_id?: number | string }).run_id;
         if (run_id !== undefined) {
             if (this.used_runs.size > 500) this.used_runs.clear();
             this.used_runs.add(`${candidate.symbol}|${candidate.contract_type}|${run_id}`);
         }
-        if (!TREND_NEEDED[candidate.contract_type]) {
-            this._sizeAndEnter(candidate, wanted_stake, tag);
+        const need = TREND_NEEDED[candidate.contract_type];
+        if (!need || (candidate as { trend?: string }).trend === need) {
+            this._enterNow(candidate, wanted_stake, tag);
             return;
         }
         this.busy = true;
         void this._trendOk(candidate).then(trend_ok => {
             this.busy = false;
             if (!this.running) return;
-            if (trend_ok) {
-                this._sizeAndEnter(candidate, wanted_stake, tag);
+            if (trend_ok && this._stillValid(candidate)) {
+                this._enterNow(candidate, wanted_stake, tag);
                 return;
             }
-            this.hooks?.onLog?.('info', `Signal on ${candidate.symbol} for ${candidate.label} skipped: the 1-tick chart shows no confirmed trend.`);
+            this.hooks?.onLog?.('info', `Signal on ${candidate.symbol} for ${candidate.label} skipped: ${trend_ok ? 'the run already ended' : 'the 1-tick chart shows no confirmed trend'}.`);
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
             this._findAndEnter(wanted_stake, tag);
         });
-    }
-
-    /** Rise/Fall: bought only once the 1-tick chart shows a higher high (Rise) or a lower low (Fall). */
-    /**
-     * Recovery steps are sized on the REAL payout of the contract about to be bought (a quote at the base stake), not on the last
-     * trade's payout or an assumed 83%: the stake that wins back everything lost plus one base stake, at what THIS contract pays.
-     * If that payout is too low to recover with (under MIN_RECOVERY_PAYOUT) or the stake would pass MAX_RECOVERY_MULTIPLE base stakes
-     * or the stop-loss budget, the ladder is dropped: the loss is accepted and the trade goes in at the base stake.
-     */
-    private _sizeAndEnter(candidate: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag']) {
-        const recovering = this.config.recover_losses === true && (this.config.recovery_mode ?? 'reverse') === 'martingale' && this.step > 1 && this.ladder_spent > 0;
-        if (!recovering || (this.config.both_sides !== false && bothSidesType(candidate.contract_type))) {
-            this._enterNow(candidate, wanted_stake, tag);
-            return;
-        }
-        this.busy = true;
-        void (async () => {
-            let stake = wanted_stake;
-            try {
-                const base = this.config.stake;
-                const quote = (await this.connection.send({ proposal: 1, ...buildTradeParameters(candidate, base, this.currency) }))?.proposal;
-                const ratio = Number(quote?.payout) / Number(quote?.ask_price) - 1;
-                if (Number.isFinite(ratio)) {
-                    const sized = ratio >= MIN_RECOVERY_PAYOUT ? recoveryStake(this.ladder_spent, base, ratio) : Infinity;
-                    if (sized > base * MAX_RECOVERY_MULTIPLE || this.ladder_spent + sized > Math.abs(this.config.stop_loss)) {
-                        this.hooks?.onLog?.('info', `Recovery dropped: ${candidate.label} on ${candidate.symbol} pays ${(ratio * 100).toFixed(0)}% profit, too little to win back ${this.ladder_spent.toFixed(2)} ${this.currency} with a sensible stake. ${this.ladder_spent.toFixed(2)} accepted as a loss, stake back to ${base}.`);
-                        this.step = 1;
-                        this.ladder_spent = 0;
-                        stake = base;
-                    } else {
-                        stake = sized;
-                        this.hooks?.onLog?.('info', `Recovery stake ${stake} ${this.currency} on the real payout of ${(ratio * 100).toFixed(0)}% profit.`);
-                    }
-                }
-            } catch {
-                /* no quote: keep the planned stake, _enterNow prices it again and refuses what Deriv will not sell */
-            }
-            this.busy = false;
-            if (!this.running) return;
-            this._enterNow(candidate, stake, tag);
-        })();
     }
 
     private async _trendOk(candidate: TCandidate): Promise<boolean> {
@@ -966,61 +887,47 @@ export class AutoPilotEngine {
             `Buying ${candidate.contract_type} on ${candidate.symbol}, ${tried_duration} tick(s), stake ${stake} ${this.currency}` +
                 (candidate.prediction !== undefined ? `, prediction ${candidate.prediction}` : '')
         );
-        // Ask Deriv for a price first (the documented contracts_for -> proposal -> buy flow). A proposal
-        // costs nothing, so a bad duration/barrier/stake is caught here instead of as a failed buy, and a
-        // payout that cannot even cover the stake is never bought.
-        this.connection
-            .send({ proposal: 1, ...parameters })
-            .then(async res => {
-                const quote = res?.proposal;
-                if (!quote) throw new Error('Deriv returned no price for this contract');
-                const ask = Number(quote.ask_price);
-                const payout = Number(quote.payout);
-                if (ask > 0 && payout > 0 && payout / ask < MIN_PAYOUT_RATIO) {
-                    throw Object.assign(new Error(`payout is only ${(payout / ask).toFixed(2)}x the stake`), { skip: true });
-                }
-                if (isTouch(candidate.contract_type) && ask > 0 && payout > 0 && payout / ask < TOUCH_MIN_PAYOUT_RATIO) {
-                    throw Object.assign(new Error(`${candidate.label} on ${candidate.symbol} pays only ${((payout / ask - 1) * 100).toFixed(0)}% profit (needs ${Math.round((TOUCH_MIN_PAYOUT_RATIO - 1) * 100)}%)`), { rest: 120_000 });
-                }
-                // Both sides: the winning side's payout must cover BOTH stakes, otherwise a win would still be a net loss. Checked on
-                // both prices before anything is bought, so a pair is never half-justified.
-                if (partner && partner_parameters) {
-                    const other = await this.connection.send({ proposal: 1, ...partner_parameters });
-                    const need = Number((stake * 2).toFixed(2));
-                    const pay_a = Number(quote.payout);
-                    const pay_b = Number(other?.proposal?.payout);
-                    if (!(pay_a >= need) || !(pay_b >= need)) {
-                        const low = Math.min(pay_a, Number.isFinite(pay_b) ? pay_b : 0);
-                        throw Object.assign(new Error(`both sides cost ${need.toFixed(2)} but a winning side would pay only ${low.toFixed(2)}`), { cover: true });
-                    }
-                }
-                return this.connection.send({ buy: '1', price: stake, parameters });
-            })
-            .then(async res => {
-                const contract_id = res?.buy?.contract_id;
-                if (!contract_id) throw new Error('Buy did not return a contract id');
+        // Straight to the buy: a single contract is bought at once (price = the stake is the most Deriv may charge, and a refusal comes back
+        // from the buy itself). Both sides: both legs are priced together first (a winning side must pay at least BOTH stakes), then both
+        // legs are bought together, so the second leg lands on the same tick as the first.
+        const buyLeg = async (params: Record<string, unknown>): Promise<string> => {
+            const res = await this.connection.send({ buy: '1', price: stake, parameters: params });
+            const id = res?.buy?.contract_id;
+            if (!id) throw new Error('Buy did not return a contract id');
+            return String(id);
+        };
+        const priced: Promise<void> =
+            partner && partner_parameters
+                ? Promise.all([this.connection.send({ proposal: 1, ...parameters }), this.connection.send({ proposal: 1, ...partner_parameters })]).then(([a, b]) => {
+                      const need = Number((stake * 2).toFixed(2));
+                      const pay_a = Number(a?.proposal?.payout);
+                      const pay_b = Number(b?.proposal?.payout);
+                      if (!(pay_a >= need) || !(pay_b >= need)) {
+                          const low = Math.min(Number.isFinite(pay_a) ? pay_a : 0, Number.isFinite(pay_b) ? pay_b : 0);
+                          throw Object.assign(new Error(`both sides cost ${need.toFixed(2)} but a winning side would pay only ${low.toFixed(2)}`), { cover: true });
+                      }
+                  })
+                : Promise.resolve();
+        priced
+            .then(async () => {
                 if (!partner || !partner_parameters) {
-                    this._watch(candidate, stake, contract_id, tried_duration);
+                    this._watch(candidate, stake, await buyLeg(parameters), tried_duration);
                     return;
                 }
-                // The first side is bought: fire the other side right away. If it cannot be bought, the first side runs alone.
-                let partner_id: string | null = null;
-                try {
-                    await this.connection.send({ proposal: 1, ...partner_parameters });
-                    const bought = await this.connection.send({ buy: '1', price: stake, parameters: partner_parameters });
-                    partner_id = bought?.buy?.contract_id ?? null;
-                } catch (err) {
-                    this.hooks?.onLog?.('error', `Second side ${partner.label} could not be bought: ${err instanceof Error ? err.message : 'refused'}. ${candidate.label} runs alone.`);
-                }
-                if (!partner_id) {
-                    this._watch(candidate, stake, contract_id, tried_duration);
+                const [first, second] = await Promise.allSettled([buyLeg(parameters), buyLeg(partner_parameters)]);
+                if (first.status === 'rejected' && second.status === 'rejected') throw first.reason;
+                if (first.status === 'rejected' || second.status === 'rejected') {
+                    // Only one side got through: it runs alone.
+                    const alive = first.status === 'fulfilled' ? { c: candidate, id: first.value, lost: partner.label } : { c: partner, id: (second as PromiseFulfilledResult<string>).value, lost: candidate.label };
+                    this.hooks?.onLog?.('error', `Second side ${alive.lost} could not be bought. ${alive.c.label} runs alone.`);
+                    this._watch(alive.c, stake, alive.id, tried_duration);
                     return;
                 }
                 this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
-                this.hooks?.onLog?.('info', `Both sides fired: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
+                this.hooks?.onLog?.('info', `Both sides fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
                 const pair: TPair = { pending: 2, profit: 0, stake: Number((stake * 2).toFixed(2)) };
-                this._watch(candidate, stake, contract_id, tried_duration, pair);
-                this._watch(partner, stake, partner_id, tried_duration, pair);
+                this._watch(candidate, stake, first.value, tried_duration, pair);
+                this._watch(partner, stake, second.value, tried_duration, pair);
             })
             .catch(err => {
                 this.busy = false;
@@ -1116,7 +1023,7 @@ export class AutoPilotEngine {
                 duration_ticks: duration,
                 step: entry_step,
                 base_stake: this.config.stake,
-                mode: this.config.recovery_mode ?? 'reverse',
+                mode: stakeMode(this.config.recovery_mode),
                 confidence: candidate.confidence,
                 strategy: (candidate as { strategy?: string }).strategy,
                 tag: entry_tag,
@@ -1161,7 +1068,7 @@ export class AutoPilotEngine {
                 return;
             }
 
-            const mode = this.config.recovery_mode ?? 'reverse';
+            const mode = stakeMode(this.config.recovery_mode);
             const base_stake = this.config.stake;
 
             if (net_won) {
@@ -1197,49 +1104,9 @@ export class AutoPilotEngine {
             this.streak_profit = 0;
             this.consecutive_losses += 1;
 
-            if (mode === 'reverse' || mode === 'flat') {
-                // The stake does NOT go up after a loss: back to the base stake.
-                this.step = 1;
-                this._findAndEnter(base_stake);
-                return;
-            }
-
-            // Recovery stake: win back the whole ladder plus one base stake, at the payout this contract showed.
-            const recover = this.config.recover_losses === true && mode === 'martingale';
-            const shown_ratio = Number(contract.payout) / Number(contract.buy_price) - 1;
-            const dropLadder = (why: string) => {
-                // The ladder is out of steps or budget: accept the loss, back to the base stake, keep trading (the stop loss still ends the run).
-                this.hooks?.onLog?.('info', `Recovery ladder dropped (${why}): ${this.ladder_spent.toFixed(2)} ${this.currency} accepted as a loss, stake back to ${base_stake}.`);
-                this.step = 1;
-                this.ladder_spent = 0;
-                this._findAndEnter(base_stake);
-            };
-            const steps_cap = isTouch(candidate.contract_type) ? Math.min(TOUCH_MAX_STEPS, this.config.max_steps) : this.config.max_steps;
-            if (this.step >= steps_cap) {
-                if (recover) {
-                    dropLadder(`${steps_cap} steps lost`);
-                    return;
-                }
-                this.stop('max recovery steps reached');
-                return;
-            }
-
-            const next_stake = recover
-                ? recoveryStake(this.ladder_spent, base_stake, shown_ratio)
-                : Number((net_stake / (pair ? 2 : 1) * this.config.martingale_multiplier).toFixed(2));
-            // Ladder budget: the whole recovery run may risk at most stop_loss in total.
-            if (this.ladder_spent + next_stake > Math.abs(this.config.stop_loss)) {
-                if (recover) {
-                    dropLadder('the next stake would pass the stop-loss budget');
-                    return;
-                }
-                this.stop('recovery ladder would exceed the stop-loss budget');
-                return;
-            }
-            if (recover) this.hooks?.onLog?.('info', `Recovery stake ${next_stake} ${this.currency}: wins back ${this.ladder_spent.toFixed(2)} lost plus one base stake.`);
-            this.step += 1;
-            // The recovery trade is chosen by the AI: the best backend entry signal across every ticked contract and market.
-            this._findAndEnter(next_stake);
+            // The stake does NOT go up after a loss: back to the base stake, and the next signal is bought as it arrives.
+            this.step = 1;
+            this._findAndEnter(base_stake);
         });
     }
 }

@@ -1,4 +1,4 @@
-import { AutoPilotEngine, buildConfigFromPreset, FOCUS_FAMILY_KEYS, TAutoPilotConfig, TAutoPilotEvent } from '../autoPilotEngine';
+import { AutoPilotEngine, buildConfigFromPreset, TAutoPilotConfig, TAutoPilotEvent } from '../autoPilotEngine';
 import type { TSnapshotMap } from '../analysis-types';
 
 jest.mock('uuid', () => ({ v4: () => 'test-id' }));
@@ -122,14 +122,14 @@ describe('the AI executes on the backend signal', () => {
         h.engine.stop();
     });
 
-    it('a loss leads to a recovery stake on the next signal, chosen by the AI', async () => {
-        const h = make({ R_REC: [sig({ type: 'DIGITEVEN', label: 'Even', entry: true, run_id: 1 })] }, { recovery_mode: 'martingale', recover_losses: true });
+    it('a loss never raises the stake: the next signal, whichever contract it is on, is bought at the base stake', async () => {
+        const h = make({ R_REC: [sig({ type: 'DIGITEVEN', label: 'Even', entry: true, run_id: 1 })] }, { recovery_mode: 'reverse' });
         h.engine.start();
         await wait();
         h.snapshots.R_REC.signals = [sig({ type: 'DIGITUNDER', label: 'Under 5', entry: true, run_id: 2 })] as never; // a different contract signals
         h.conn.settle('c1', -1);
-        await wait(700);
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.23]);
+        await wait(500);
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 1]);
         expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'DIGITUNDER' });
         h.engine.stop();
     });
@@ -169,79 +169,12 @@ describe('Only Ups / Only Downs fire together, only when a win covers both stake
     });
 });
 
-describe('Touch / No Touch', () => {
-    it('every contract family is ticked by default (nothing is left on the back burner)', () => {
-        expect(buildConfigFromPreset('moderate', 1000).contract_families).toEqual(['even_odd', 'over_under', 'rise_fall', 'touch', 'only_ups_downs']);
-    });
-
-    it('with Touch only ticked, only Touch / No Touch signals are bought, with the 0.5 barrier', async () => {
-        const h = make(
-            { R_TCH: [sig({ type: 'DIGITEVEN', label: 'Even', entry: true, run_id: '1:2', confidence: 99 }), sig({ type: 'ONETOUCH', label: 'Touch', entry: true, run_id: '1:2', confidence: 40 })] },
-            { contract_families: FOCUS_FAMILY_KEYS }
-        );
-        h.engine.start();
-        await wait(300);
-        expect(h.conn.buys_()).toHaveLength(1);
-        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'ONETOUCH', barrier: '+0.5', duration: 5 });
-        h.engine.stop();
-    });
-
-    it('is not bought when it would pay under 70% profit (a 6% No Touch win cannot be recovered)', async () => {
-        const h = make({ R_LOW: [sig({ type: 'NOTOUCH', label: 'No Touch', entry: true, run_id: '1:2' })] });
-        h.conn.payout = 1.06;
-        h.engine.start();
-        await wait(300);
-        expect(h.conn.buys_()).toHaveLength(0);
-        h.engine.stop();
-    });
-
-    it('a pays-well contract is bought', async () => {
-        const h = make({ R_OK: [sig({ type: 'NOTOUCH', label: 'No Touch', entry: true, run_id: '1:2' })] });
-        h.conn.payout = 1.9;
-        h.engine.start();
-        await wait(300);
-        expect(h.conn.buys_()).toHaveLength(1);
-        h.engine.stop();
-    });
-});
-
-describe('recovery is sized on the real payout of the next contract', () => {
-    const recovering = (payout: number) => {
-        const h = make({ R_RP: [sig({ type: 'DIGITEVEN', label: 'Even', entry: true, run_id: 1 })] }, { recovery_mode: 'martingale', recover_losses: true, max_steps: 4 });
-        h.conn.payout = payout;
-        return h;
-    };
-
-    it('uses the quoted payout, not an assumed 83%', async () => {
-        const h = recovering(1.9); // 90% profit
-        h.engine.start();
-        await wait();
-        h.snapshots.R_RP.signals = [sig({ type: 'DIGITEVEN', label: 'Even', entry: true, run_id: 2 })] as never;
-        h.conn.settle('c1', -1);
-        await wait(900);
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.23]); // (1 + 1) / 0.9
-        h.engine.stop();
-    });
-
-    it('drops the ladder when the payout is too low to recover with (the loss is accepted, stake back to the base)', async () => {
-        const h = recovering(1.3); // 30% profit
-        h.engine.start();
-        await wait();
-        h.snapshots.R_RP.signals = [sig({ type: 'DIGITEVEN', label: 'Even', entry: true, run_id: 2 })] as never;
-        h.conn.settle('c1', -1);
-        await wait(900);
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 1]);
-        h.engine.stop();
-    });
-});
-
 describe('no virtual hook any more', () => {
     it('the preset has no virtual-hook, follow-stream or flip settings', () => {
         const c = buildConfigFromPreset('moderate', 1000) as Record<string, unknown>;
-        for (const k of ['virtual_hook', 'virtual_mode', 'virtual_confirmations', 'follow_stream', 'entry_tick', 'read_entries', 'rotate_contracts', 'auto_flip']) {
+        for (const k of ['virtual_hook', 'virtual_mode', 'virtual_confirmations', 'follow_stream', 'entry_tick', 'read_entries', 'rotate_contracts', 'auto_flip', 'recover_losses']) {
             expect(k in c).toBe(false);
         }
-        expect(c.recover_losses).toBe(true);
         expect(c.both_sides).toBe(true);
     });
 });

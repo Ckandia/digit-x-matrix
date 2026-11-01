@@ -18,7 +18,10 @@ Where things stand (latest first). This file is the project's memory: Claude's o
 - ~1M paper trades: every contract wins about 50% against ~55% needed; each loses roughly 8-10c per 1.00 staked. No timing rule found a real edge. Both-sides pairs (Even+Odd, Over 4+Under 5) lose a guaranteed slice; Only Ups + Only Downs usually both lose.
 - Touch/No Touch at +0.5 pays only about 5% on a No Touch win.
 
-## Latest build (per-contract run levels; Touch / No Touch focus)
+## Latest build (no recovery ladder, next-tick buy, no Touch / No Touch)
+- Owner removed the recovery ladder (it added delay) and Touch / No Touch from the AI; focus is Even/Odd, Over 4/Under 5, Rise/Fall, Only Ups/Only Downs. Buy happens on the next tick after the backend signal. The one-trade-a-minute gap in the earlier live results was `max_trades_per_hour: 60` in the preset (now 0).
+
+## Previous build (per-contract run levels; Touch / No Touch focus)
 - Even/Odd and Over 4/Under 5 fire on 2 AND 3 consecutive ticks; Only Ups/Downs from 2 ticks (both bought together, only if a win pays both stakes); Rise/Fall and Touch/No Touch from 2 ticks. Backend does all the analysis; the AI only executes entries.
 - Owner's priority was Touch / No Touch first, but a live run lost on No Touch only (5 losses in a row, net -80.84, wins paying 6%). Now all families are ticked by default; Touch / No Touch needs >= 70% payout, recovery is sized on the real payout, ladders capped at 3 steps.
 

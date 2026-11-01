@@ -6,8 +6,6 @@
 //   Over 4 / Under 5  the last digit is 5-9 / 0-4           (over 4: 5,8,9   under 5: 2,1,4)
 //   Rise / Fall       the price moved up / down from the tick before
 //   Only Up / Down    the same as Rise / Fall: a run of rising (falling) ticks is exactly what Only Ups (Only Downs) needs
-//   Touch / No Touch  the real outcome of a 5-tick contract with a +0.5 barrier that started 5 ticks earlier: touched (Touch) or
-//                     never touched (No Touch). Exact complements.
 //
 // Per contract the report carries: runs (how many separate runs of the shortest analysed length appeared in the window), ticks_in_runs (how many ticks sat
 // inside them), longest run, the CURRENT run length, and a bias in percent: that contract's share of all run ticks of the pair
@@ -18,8 +16,8 @@
 // This is a description of the last few hundred ticks. Deriv's synthetic indices are random processes: a bias reading is not a
 // validated edge, and every contract still pays less than 2x. The numbers are here so the AI has a consistent, fast signal.
 
-export const TOUCH_BARRIER = 0.5; // the barrier the AI buys Touch / No Touch with (+0.5 above the entry)
-export const TOUCH_TICKS = 5; // ... for 5 ticks
+import { detectTrend, TREND_WINDOW } from './trend.js';
+
 export const MIN_RUN = 2; // the shortest run any contract is analysed on
 export const RUN_WINDOW = 300; // ticks the bias is measured on (the freshest, so it follows the market)
 export const MIN_RUN_SAMPLE = 60; // ticks needed before anything is reported
@@ -31,8 +29,11 @@ const MAX_EXTRA_SIGNALS = 3; // per symbol, besides the entry signals
  * The run lengths each contract is analysed and fired on (the owner's rules):
  *   Even / Odd, Over 4 / Under 5   BOTH 2 and 3 consecutive ticks, every market, fire whenever a level's condition is met
  *   Only Ups / Only Downs          2 ticks and above (the AI fires both at the same time)
- *   Rise / Fall, Touch / No Touch  2 or more consecutive ticks
+ *   Rise / Fall                    2 or more consecutive ticks
  */
+/** Contracts that need a trend on the 1-tick chart before they may fire. */
+export const TREND_NEEDED = { rise: 'bullish', only_up: 'bullish', fall: 'bearish', only_down: 'bearish' };
+
 export const LEVELS = {
     even: [2, 3],
     odd: [2, 3],
@@ -42,8 +43,6 @@ export const LEVELS = {
     fall: [2],
     only_up: [2],
     only_down: [2],
-    touch: [2],
-    no_touch: [2],
 };
 
 export const RUN_CONTRACTS = [
@@ -55,8 +54,6 @@ export const RUN_CONTRACTS = [
     { key: 'fall', contract_type: 'PUT', label: 'Fall', pair: 'rise', duration: 1 },
     { key: 'only_up', contract_type: 'RUNHIGH', label: 'Only Ups', pair: 'only_down', duration: 2 },
     { key: 'only_down', contract_type: 'RUNLOW', label: 'Only Downs', pair: 'only_up', duration: 2 },
-    { key: 'touch', contract_type: 'ONETOUCH', label: 'Touch', pair: 'no_touch', duration: 5 },
-    { key: 'no_touch', contract_type: 'NOTOUCH', label: 'No Touch', pair: 'touch', duration: 5 },
 ];
 
 const round2 = n => Math.round(n * 100) / 100;
@@ -70,10 +67,6 @@ export const lastDigit = (price, decimals = 2) => {
 /** For every tick of `prices` (index >= 1) and every contract: is that tick in favour? Returns { key: boolean[] } aligned to prices. */
 export function favourFlags(prices, decimals = 2) {
     const n = prices.length;
-    const moves = [];
-    for (let i = 1; i < n; i++) moves.push(Math.abs(prices[i] - prices[i - 1]));
-    const sorted = [...moves].sort((a, b) => a - b);
-    const typical = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0; // median tick move
     const flags = Object.fromEntries(RUN_CONTRACTS.map(c => [c.key, new Array(n).fill(false)]));
     for (let i = 0; i < n; i++) {
         const d = lastDigit(prices[i], decimals);
@@ -87,16 +80,6 @@ export function favourFlags(prices, decimals = 2) {
         flags.fall[i] = move < 0;
         flags.only_up[i] = move > 0;
         flags.only_down[i] = move < 0;
-        // Touch / No Touch: the REAL outcome of the contract bought 5 ticks ago (touched +0.5 above its entry within 5 ticks or not).
-        // They are exact complements, so a run of 2+ consecutive outcomes is a fair "bias for the contract", and a market that
-        // seldom reaches +0.5 shows a long No Touch bias (and a tiny No Touch payout, which the AI refuses).
-        if (i >= TOUCH_TICKS) {
-            let top = -Infinity;
-            for (let k = i - TOUCH_TICKS + 1; k <= i; k++) top = Math.max(top, prices[k]);
-            const hit = top - prices[i - TOUCH_TICKS] >= TOUCH_BARRIER;
-            flags.touch[i] = hit;
-            flags.no_touch[i] = !hit;
-        }
     }
     return flags;
 }
@@ -164,7 +147,7 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
             run_start: mine.current ? first_tick_of_window + mine.current_start : null,
         };
     });
-    return { n, min_run: MIN_RUN, rows };
+    return { n, min_run: MIN_RUN, trend: detectTrend(tail.slice(-TREND_WINDOW)), rows };
 }
 
 /**
@@ -182,13 +165,18 @@ export function computeRunSignals(scan, symbol) {
             if (level.bias <= 50) continue;
             const confidence = Math.round(clamp((level.bias - 50) * 2, 0, 100));
             const fresh = row.current >= level.min_run && row.current <= level.min_run + FRESH_SLACK;
-            const entry = fresh && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
+            // Rise / Only Ups need a confirmed higher-high trend, Fall / Only Downs a lower-low trend on the 1-tick chart (checked here, so
+            // the AI can buy the very next tick without asking for the chart).
+            const need = TREND_NEEDED[row.key];
+            const trend_ok = !need || scan.trend === need;
+            const entry = fresh && trend_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
             const signal = {
                 family: 'run_bias',
                 strategy: 'run_bias',
                 contract_type: row.contract_type,
                 duration_ticks: def.duration,
-                prediction: row.contract_type === 'DIGITOVER' ? 4 : row.contract_type === 'DIGITUNDER' ? 5 : row.contract_type === 'ONETOUCH' || row.contract_type === 'NOTOUCH' ? '+0.5' : undefined,
+                prediction: row.contract_type === 'DIGITOVER' ? 4 : row.contract_type === 'DIGITUNDER' ? 5 : undefined,
+                trend: need ? scan.trend : undefined,
                 label: row.label,
                 confidence,
                 entry,
