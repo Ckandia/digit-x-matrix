@@ -51,6 +51,11 @@ assert.ok(f.rise[10] && !f.fall[10]);
 assert.ok(!computeRunBias(rising, 2).rows.some(r => /touch/.test(r.key)));
 assert.equal(LEVELS.touch, undefined);
 
+// Confluence: 2-tick AND 3-tick bias both favour the contract
+const conf = computeRunSignals(computeRunBias(px([...biasedEven, 1, 2, 4, 6]), 2), 'T').filter(x => x.contract_type === 'DIGITEVEN');
+for (const c of conf) assert.equal(typeof c.confluence, 'boolean');
+assert.ok(computeRunSignals(computeRunBias(px([...biasedEven, 1, 2, 4, 6]), 2), 'T').every(x => 'confluence' in x));
+
 // Trend gate: Rise / Only Ups fire only in a confirmed uptrend, Fall / Only Downs only in a downtrend; the signal carries the trend
 const wavy = Array.from({ length: 120 }, (_, i) => 100 + i * 0.2 + Math.sin(i / 2) * 1.5); // higher highs and higher lows
 const bullish = computeRunBias(wavy, 2, 5000);

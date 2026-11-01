@@ -1,3 +1,10 @@
+# Market switching (the AI was stuck on one market)
+
+- **Cause:** when several markets had an entry at the same moment, the AI always took the one with the highest confidence. A market's bias changes slowly, so the same market (1HZ75V in your log) won every time.
+- **Fix:** among the entries present, the AI now ranks (1) confluence first (the 2-tick AND the 3-tick bias both favour the contract, flagged by the backend as `confluence`), (2) then the market it has traded LEAST recently, (3) then the strongest bias. An entry that shows up on another market is bought as soon as it appears, and the activity log says `Switching market: A -> B`.
+- **Also check:** "Let the AI use its self-review" can block or rank down single market/contract combinations from your journal (the log lists them: "Skipping ... 1HZ10V DIGITUNDER"). Untick it if you want every market tried regardless of past results.
+- Tests: `market-switch` (4), plus the earlier specs; `npm run check:runbias` in backend.
+
 # Fix: "Input validation failed: contract_id" / "lost track of an open contract"
 
 - Cause (introduced in the previous build): the new direct buy turned Deriv's numeric contract id into a string, and `proposal_open_contract` rejects a string `contract_id`, so every trade stopped the run at once. The id is now kept exactly as Deriv sends it, and `_watch` also converts a numeric-looking id back to a number.

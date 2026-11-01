@@ -618,6 +618,8 @@ export class AutoPilotEngine {
     private entry_tag: TAutoPilotEvent['tag']; // why the trade being placed is not a plain fresh pick
     private last_live_at = 0; // when the last live buy went out (pacing)
     private trade_count = 0; // settled trades in this run (capital protection counts these)
+    private last_market: string | null = null;
+    private last_traded = new Map<string, number>(); // symbol -> when the AI last bought on it (market switching)
     private used_runs = new Set<string>(); // symbol|type|run id of the backend signals already traded: one run is traded once
     private poll_timer: ReturnType<typeof setTimeout> | null = null;
     private waiting: { stake: number; tag?: TAutoPilotEvent['tag'] } | null = null; // set while the AI waits for a signal
@@ -656,6 +658,8 @@ export class AutoPilotEngine {
         this.trade_count = 0;
         this.last_live_at = 0;
         this.used_runs.clear();
+        this.last_traded.clear();
+        this.last_market = null;
         this.blocked.clear();
         this._emit({ phase: 'started' });
         this._findAndEnter(this.config.stake);
@@ -699,7 +703,7 @@ export class AutoPilotEngine {
         const gated = applyGate(this.getSnapshots(), this.hooks?.gate?.());
         const allowed = this._allowedTypes();
         const now = Date.now();
-        let best: TCandidate | null = null;
+        const found: { candidate: TCandidate; confluence: boolean; idle: number }[] = [];
         for (const [symbol, snap] of Object.entries(gated)) {
             for (const sig of snap.signals) {
                 if (sig.family !== 'run_bias' || !sig.entry) continue;
@@ -709,10 +713,19 @@ export class AutoPilotEngine {
                 if (sig.run_id !== undefined && this.used_runs.has(`${symbol}|${sig.contract_type}|${sig.run_id}`)) continue;
                 const ticks = tradeTicks(symbol, sig.contract_type);
                 if (ticks === null) continue;
-                if (!best || sig.confidence > best.confidence) best = { ...sig, symbol, duration_ticks: ticks } as TCandidate;
+                found.push({
+                    candidate: { ...sig, symbol, duration_ticks: ticks } as TCandidate,
+                    confluence: sig.confluence === true,
+                    idle: now - (this.last_traded.get(symbol) ?? 0), // how long this market has not been traded: a market never traded is the idlest
+                });
             }
         }
-        return best;
+        if (!found.length) return null;
+        // Market switching: when several markets have an entry at the same time, the one that agrees on every run length (confluence)
+        // goes first, then the market traded LEAST recently, and only then the strongest bias. The strongest bias alone kept picking the
+        // same market, because a market's bias changes slowly.
+        found.sort((a, b) => Number(b.confluence) - Number(a.confluence) || b.idle - a.idle || b.candidate.confidence - a.candidate.confidence);
+        return found[0].candidate;
     }
 
     /** The panel calls this the moment a new snapshot arrives from the backend: a waiting AI looks at it at once instead of at its next poll. */
@@ -758,6 +771,11 @@ export class AutoPilotEngine {
             if (this.used_runs.size > 500) this.used_runs.clear();
             this.used_runs.add(`${candidate.symbol}|${candidate.contract_type}|${run_id}`);
         }
+        if (this.last_market && this.last_market !== candidate.symbol) {
+            this.hooks?.onLog?.('info', `Switching market: ${this.last_market} -> ${candidate.symbol} (${candidate.label}, the entry came on ${candidate.symbol}).`);
+        }
+        this.last_market = candidate.symbol;
+        this.last_traded.set(candidate.symbol, Date.now());
         const need = TREND_NEEDED[candidate.contract_type];
         if (!need || (candidate as { trend?: string }).trend === need) {
             this._enterNow(candidate, wanted_stake, tag);

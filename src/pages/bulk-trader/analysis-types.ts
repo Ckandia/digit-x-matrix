@@ -80,6 +80,8 @@ export type TDigitSignal = {
     strategy?: string;
     /** run_bias family only: true when 3 or more ticks in a row favour this contract RIGHT NOW in a market whose bias favours it. The AI buys on it. */
     entry?: boolean;
+    /** run_bias family only: every analysed run length of this contract (2 AND 3 ticks for the digit contracts) favours it at once. */
+    confluence?: boolean;
     /** run_bias family only: which run of ticks this is (the tick count when it started), so one run is traded once. */
     run_id?: number | string;
     /** run_bias family only: the numbers behind the signal (`min_run` = the run length this signal was measured on). */

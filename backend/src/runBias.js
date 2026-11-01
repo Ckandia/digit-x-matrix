@@ -161,6 +161,8 @@ export function computeRunSignals(scan, symbol) {
     const extras = [];
     for (const row of scan.rows) {
         const def = RUN_CONTRACTS.find(c => c.key === row.key);
+        // Confluence: EVERY analysed run length of this contract (2 AND 3 ticks for Even/Odd and Over 4/Under 5) favours it at once.
+        const confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
         for (const level of row.levels) {
             if (level.bias <= 50) continue;
             const confidence = Math.round(clamp((level.bias - 50) * 2, 0, 100));
@@ -180,6 +182,7 @@ export function computeRunSignals(scan, symbol) {
                 label: row.label,
                 confidence,
                 entry,
+                confluence,
                 run_id: entry ? `${row.run_start}:${level.min_run}` : undefined,
                 run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run },
                 basis: `Run bias: ${row.label} had ${level.runs} runs of ${level.min_run}+ ticks on ${symbol} over the last ${scan.n} ticks (bias ${level.bias}%, run now ${row.current}).`,
