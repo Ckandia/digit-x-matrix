@@ -164,6 +164,10 @@ export class MarketFeed {
         // Run bias: how often 3+ ticks in a row favoured each contract, and whether such a run is happening right now (an ENTRY signal).
         if (cached.run_key !== cache_key) {
             cached.run_bias = computeRunBias(priceWindow.prices, this.getPipSize(symbol), priceWindow.total);
+            if (cached.run_bias.decimals !== undefined && cached.run_bias.decimals !== cached.run_bias.reported_decimals && !(this._dp_warned ??= new Set()).has(symbol)) {
+                this._dp_warned.add(symbol);
+                console.warn(`[marketFeed] ${symbol}: pip size says ${cached.run_bias.reported_decimals} decimals but its prices print ${cached.run_bias.decimals}; the prices are used for the digits.`);
+            }
             cached.run_signals = computeRunSignals(cached.run_bias, symbol);
             cached.run_key = cache_key;
         }

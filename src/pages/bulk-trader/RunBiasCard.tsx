@@ -40,7 +40,10 @@ export const RunBiasCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
                             <tr>
                                 <th>{localize('Contract')}</th>
                                 {symbols.map(s => (
-                                    <th key={s}>{shortName(s)}</th>
+                                    <th key={s} title={localize('Decimal places this market prints: the last digit is read at this place')}>
+                                        {shortName(s)}
+                                        {snapshots[s].run_bias?.decimals !== undefined ? ` · ${snapshots[s].run_bias?.decimals}dp` : ''}
+                                    </th>
                                 ))}
                             </tr>
                         </thead>
@@ -52,7 +55,7 @@ export const RunBiasCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
                                         const row = snapshots[s].run_bias?.rows.find(r => r.key === key);
                                         const entry = !!row && entryKeys(s).has(row.contract_type);
                                         return (
-                                            <td key={s} className={entry ? 'is-win' : ''} title={row ? `${row.runs} runs, ${row.ticks_in_runs} ticks in runs, longest ${row.longest}` : ''}>
+                                            <td key={s} className={entry ? 'is-win' : ''} title={row ? `${row.runs} runs, ${row.ticks_in_runs} ticks in runs, longest ${row.longest}. Replayed entry and exit ticks after the pattern: ${(row.levels ?? []).map(l => `${l.min_run}+ ticks: ${l.wins ?? 0}/${l.outcomes ?? 0} won${l.hit == null ? '' : ` (${l.hit}%)`}`).join(', ')}` : ''}>
                                                 {row ? `${(row.levels?.length ? row.levels.map(l => `${l.bias.toFixed(0)}%`).join(' / ') : `${row.bias.toFixed(0)}%`)}${row.current ? ` (${row.current})` : ''}` : '-'}
                                             </td>
                                         );

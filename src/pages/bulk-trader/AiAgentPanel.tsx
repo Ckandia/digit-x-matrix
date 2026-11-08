@@ -3,12 +3,13 @@ import { localize } from '@deriv-com/translations';
 import { useApiBase } from '@/hooks/useApiBase';
 import { getActiveToken } from './tokenStorage';
 import { DerivClientConnection } from './derivClient';
-import { getSignalSnapshots, useDigitSignals } from './useDigitSignals';
+import { getFeedLagMs, getSignalSnapshots, useDigitSignals } from './useDigitSignals';
 import { aiRuntime, aiSet, holdSignals, releaseRun, useAiRuntime, watchAccount } from './aiRuntime';
 import {
     AutoPilotEngine,
     buildConfigFromPreset,
     ALL_FAMILY_KEYS,
+    DEFAULT_MAX_LATENCY_MS,
     CONTRACT_FAMILIES,
     RISK_PRESETS,
     TAutoPilotConfig,
@@ -88,6 +89,16 @@ const AiAgentPanel = ({
         engineRef.current?.signalReceived();
     }, [snapshots, engineRef]);
     const is_running = status === 'running';
+    const [latency, setLatency] = useState<number | null>(null);
+    // The connection to Deriv, measured by the running AI: shown so a slow line is seen before it costs trades.
+    useEffect(() => {
+        if (!is_running) {
+            setLatency(null);
+            return;
+        }
+        const t = setInterval(() => setLatency(engineRef.current?.latencyMs() ?? null), 1500);
+        return () => clearInterval(t);
+    }, [is_running, engineRef]);
 
     const [connectError, setConnectError] = useState<string | null>(null);
     const [isConnecting, setIsConnecting] = useState(false);
@@ -388,6 +399,7 @@ const AiAgentPanel = ({
                         ),
                     // Before each pick the AI consults its own record: skip proven losers, rank lagging ones lower.
                     gate: () => journalStore.gate(journal_account),
+                    feedLagMs: getFeedLagMs,
                 }
             );
             run_panel.run_id = `ai-${Date.now()}`;
@@ -549,6 +561,13 @@ const AiAgentPanel = ({
                                 onChange={v => updateField('protect_trades', Math.max(0, Math.floor(v)))}
                             />
                             <FieldBox
+                                label={localize('Slow-internet limit, ms (0 = off): no buying while slower')}
+                                value={config.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS}
+                                step={50}
+                                disabled={status === 'connecting'}
+                                onChange={v => updateField('max_latency_ms', Math.max(0, Math.floor(v)))}
+                            />
+                            <FieldBox
                                 label={localize('Max live trades per hour (0 = no limit)')}
                                 value={config.max_trades_per_hour ?? 0}
                                 step={1}
@@ -586,6 +605,12 @@ const AiAgentPanel = ({
                     <div className='ai-agent-panel__hint'>
                         <InfoNote text={localize('Entries come from the backend: it reads the tick stream and flags a contract the moment consecutive ticks favour it in a market whose bias favours it: Even/Odd and Over 4/Under 5 on 2 AND on 3 ticks (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4), Only Ups/Only Downs from 2 ticks (both are bought together, and only when a winning side pays more than both stakes), Rise/Fall from 2 ticks (Rise and Only Ups only in a confirmed higher-high trend, Fall and Only Downs only in a lower-low trend, checked by the backend). The AI buys on the very next tick after the signal, across all markets. There is no recovery ladder and no paper test first.')} />
                     </div>
+                    {is_running && (
+                        <div className='ai-agent-panel__hint'>
+                            {localize('Connection to Deriv')}: <strong>{latency === null ? '...' : Number.isFinite(latency) ? `${Math.round(latency)} ms` : localize('no answer')}</strong>{' '}
+                            {latency !== null && latency > (config?.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS) && (config?.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS) > 0 ? localize('(slow: the AI is not buying until it recovers)') : ''}
+                        </div>
+                    )}
                     <div className='ai-agent-panel__hint'>
                         <strong>{localize('Contracts the AI may trade')}</strong>
                         {CONTRACT_FAMILIES.map(family => {

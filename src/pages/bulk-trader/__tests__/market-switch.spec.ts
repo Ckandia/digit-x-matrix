@@ -19,7 +19,7 @@ class Conn {
     onReconnect: any;
     async send(req: any) {
         this.sent.push(req);
-        this.log.push(Object.keys(req).find(k => ['proposal', 'buy', 'ticks_history'].includes(k)) ?? 'other');
+        if (!req.ping) this.log.push(Object.keys(req).find(k => ['proposal', 'buy', 'ticks_history'].includes(k)) ?? 'other');
         if (req.proposal) return { proposal: { ask_price: 1, payout: this.payout } };
         if (req.buy) return { buy: { contract_id: 100 + ++this.buys } };
         if (req.ticks_history) {

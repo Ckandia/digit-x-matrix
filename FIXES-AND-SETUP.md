@@ -1,3 +1,23 @@
+# Entry and exit ticks, digit 0, double digits, per-market decimals
+
+- **Digit 0:** counted on every market as an EVEN and UNDER 5 tick (never over 4, never odd). Deriv sends quotes as JSON numbers, so 100.50 arrives as 100.5 and its 0 is lost; the backend now reads each market's REAL number of decimals from its own prices (`inferDecimals`, largest number of decimals seen over 60+ ticks) and ignores a wrong or missing pip size. The AI tab's run-bias table shows each market's decimals in its header (e.g. `V10 (1s) · 2dp`) and the backend logs a warning when the reported pip size disagrees with what the prices print. Tested with 2dp, 3dp and 4dp markets and wrong reported pip sizes.
+- **Double digits (the same digit twice in a row):** each tick counts on its own, so 4,4 is two even ticks (a run of 2). For price contracts an unchanged price is neither a rise nor a fall: it ends a Rise / Fall / Only Ups / Only Downs run and loses both Rise and Fall.
+- **Entry and exit ticks (the 3-tick logic):** when a pattern completes on tick i, the AI buys right after it: the entry tick is the first tick after the purchase and the exit tick is `duration` ticks after the entry (1 tick for Even/Odd, Over/Under and Rise/Fall, 2 for Only Ups/Downs). The exit tick decides: last digit of the exit tick for the digit contracts, exit price vs entry price for Rise/Fall, every tick after the entry rising/falling for Only Ups/Downs. `backend/src/runBias.js` (`settleAt`, `replayOutcomes`) replays the last 300 ticks of every market with exactly that rule: each time a run of 2 (or 3) ticks completed, what happened on the entry and exit ticks and did the contract win. The result is on every signal (`run.outcomes`, `run.wins`, `run.hit`) and in the table's cell tooltips. A digit / Rise / Fall entry is VETOED when, with at least 10 replays on that market, the contract has won less than 52% after that pattern (it needs about 52.6% at a 1.9x payout). Only Ups/Downs are bought as a pair, so they are not judged alone.
+- **Check against reality:** every settled trade now logs the pattern that triggered it and Deriv's real entry and exit tick (`Lost 14.11 USD on 1HZ75V DIGITEVEN: signal 2, 4 -> entry tick 6 -> exit tick 3 (digit that decides the trade)`). If these show Deriv's exit tick is not where the replay assumes (`ENTRY_DELAY` in runBias.js), tell me and it is a one-line change.
+- Tests: `npm run check:runbias` (digit 0, doubles, 2/3/4 decimals, entry/exit settlement, veto) and `entry-exit-ticks`.
+- Honest limit: 300 ticks give a few dozen replays per pattern and market, so a hit rate is noisy; it can stop a pattern that keeps losing, it cannot prove one that wins.
+
+# Slow-internet protection (losses when the connection is slow)
+
+Why it loses: a signal is only good for the very next tick (1 second). On a slow line the signal reaches the AI late, or the buy is confirmed late, so the trade lands on a later tick than the pattern it was meant for. The AI cannot know that after the fact, so it now measures and refuses:
+
+- **Ping check:** every 2 s the AI pings Deriv and keeps the last 5 round trips. No buying while the middle value is over the limit (default 500 ms, field "Slow-internet limit, ms" on the AI tab; 0 = off), while the last ping is over twice the limit, or while Deriv is not answering. It also waits for the first ping before the first buy. The AI tab shows the live "Connection to Deriv" number.
+- **Late feed check:** the backend stamps every frame with its clock; the app measures how much later than its best recent frames they arrive (clock differences cancel out). No buying while the feed is later than the limit.
+- **Stale signals are dropped, never bought late:** a signal skipped because of a slow spell is gone for good (its run id is used up). A signal the AI has been looking at for over 1.5 s is also dropped.
+- **Late-buy pause:** if Deriv takes more than 3x the limit to confirm a buy, twice in the last ten buys, buying pauses for 60 s and the log says why.
+- Tests: `slow-internet` (6) plus every earlier spec; `npm run check:runbias` in backend. Not run: full jest, whole-app tsc, live Deriv. Deploy the backend too (the frame timestamp comes from it); without it the feed check simply reads 0.
+- Honest limit: this stops the AI trading on a bad line, it cannot make a slow line fast. A loss can still happen on a good line; the pattern is a description of recent ticks, not a prediction.
+
 # Market switching (the AI was stuck on one market)
 
 - **Cause:** when several markets had an entry at the same moment, the AI always took the one with the highest confidence. A market's bias changes slowly, so the same market (1HZ75V in your log) won every time.

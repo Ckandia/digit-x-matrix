@@ -85,7 +85,7 @@ export type TDigitSignal = {
     /** run_bias family only: which run of ticks this is (the tick count when it started), so one run is traded once. */
     run_id?: number | string;
     /** run_bias family only: the numbers behind the signal (`min_run` = the run length this signal was measured on). */
-    run?: { current: number; runs: number; ticks_in_runs: number; longest: number; bias: number; min_run?: number };
+    run?: { current: number; runs: number; ticks_in_runs: number; longest: number; bias: number; min_run?: number; outcomes?: number; wins?: number; hit?: number | null; pattern?: string[] };
 };
 
 /** One contract's row of the backend's two-tick pair scan (see backend/src/pairScan.js). */
@@ -123,10 +123,10 @@ export type TRunBiasRow = {
     /** Bias on the shortest run length this contract is analysed on. */
     bias: number;
     /** The same numbers per analysed run length: Even/Odd and Over 4/Under 5 on 2 AND 3 ticks, the others from 2. Bias = share (%) of all run ticks of the pair: 50 = balanced, higher = more favoured. */
-    levels?: { min_run: number; runs: number; ticks_in_runs: number; bias: number }[];
+    levels?: { min_run: number; runs: number; ticks_in_runs: number; bias: number; outcomes?: number; wins?: number; hit?: number | null }[];
     run_start?: number | null;
 };
-export type TRunBias = { n: number; min_run: number; rows: TRunBiasRow[] };
+export type TRunBias = { n: number; min_run: number; /** Decimal places this market really prints, read from its own prices. */ decimals?: number; reported_decimals?: number; rows: TRunBiasRow[] };
 
 export type TSnapshotMap = Record<string, TSymbolSnapshot>;
 

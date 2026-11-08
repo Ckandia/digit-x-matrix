@@ -71,6 +71,12 @@ export type TAutoPilotConfig = {
      * every contract here pays under 2x, so each trade loses a little on average and the loss grows with the NUMBER of trades.
      */
     max_trades_per_hour?: number;
+    /**
+     * Slow-internet protection (ms; 0 = off). A signal is only valid for the very next tick, so on a slow line a buy lands after the
+     * pattern has ended. The AI measures its round trip to Deriv and the lateness of the backend feed, and does not buy while the
+     * connection is slower than this (default 500 ms). Signals that arrive late are dropped, never bought late.
+     */
+    max_latency_ms?: number;
 };
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
@@ -287,6 +293,15 @@ const OPPOSITE_LABEL: Record<string, string> = {
 /** Contracts that wait for a confirmed trend on the 1-tick chart: Rise needs a higher high, Fall a lower low. */
 /** How often the AI asks for a backend entry signal while it has none. */
 export const SIGNAL_POLL_MS = 100;
+export const DEFAULT_MAX_LATENCY_MS = 500;
+/** A signal first seen longer ago than this is a run that has already ended: it is not bought. */
+export const MAX_SIGNAL_AGE_MS = 1500;
+/** A buy that takes this many times the allowed latency to be confirmed landed late (probably on a later tick than the signal). */
+const LATE_BUY_FACTOR = 3;
+/** This many late buys among the last 10 pause buying for LATE_PAUSE_MS. */
+const LATE_BUYS_TO_PAUSE = 2;
+const LATE_PAUSE_MS = 60_000;
+const PING_EVERY_MS = 2000;
 export const DEFAULT_FOLLOW_TICKS = 2;
 export const MAX_FOLLOW_TICKS = 5;
 export const DEFAULT_ENTRY_TICK = 3;
@@ -555,6 +570,27 @@ export type TAutoPilotHooks = {
     onSettled?: (trade: TSettledTrade) => void;
     /** The AI's self-review of its past results: contracts it must skip and ones it ranks lower. Undefined = no gate. */
     gate?: () => TReviewGate | undefined;
+    /** How late the backend's frames arrive right now, in ms (0 on a good line). Used to refuse signals that reached the AI too late. */
+    feedLagMs?: () => number;
+};
+
+/**
+ * The three ticks of a trade, for the log: the pattern that triggered it, the entry tick and the exit tick Deriv actually used.
+ * The exit tick decides win or lose. Digit contracts show the last digit (a trailing 0 is kept: Deriv prints 100.50).
+ */
+export const describeTicks = (candidate: TCandidate, contract: Record<string, unknown>): { signal: string; entry: string; exit: string; text: string } => {
+    const pattern = (candidate as { run?: { pattern?: string[] } }).run?.pattern ?? [];
+    const digits = candidate.contract_type.startsWith('DIGIT');
+    const shown = (v: unknown): string => {
+        const raw = String(v ?? '').trim();
+        if (!raw) return '?';
+        return digits ? raw.slice(-1) : raw;
+    };
+    const entry = shown(contract.entry_tick_display_value ?? contract.entry_tick ?? contract.entry_spot_display_value ?? contract.entry_spot);
+    const exit = shown(contract.exit_tick_display_value ?? contract.exit_tick ?? contract.exit_spot_display_value ?? contract.exit_spot);
+    const signal = pattern.join(', ');
+    const what = digits ? 'digit' : 'price';
+    return { signal, entry, exit, text: `${signal ? `signal ${signal} -> ` : ''}entry tick ${entry} -> exit tick ${exit} (${what} that decides the trade)` };
 };
 
 export type TSettledTrade = {
@@ -575,6 +611,10 @@ export type TSettledTrade = {
     confidence: number;
     strategy?: string;
     tag?: 'flipped' | 'switched' | 'streak';
+    /** The ticks of this trade as printed: the pattern that triggered it, then Deriv's entry and exit tick. */
+    signal_ticks?: string;
+    entry_tick?: string;
+    exit_tick?: string;
 };
 
 export type TAutoPilotEvent = {
@@ -618,6 +658,13 @@ export class AutoPilotEngine {
     private entry_tag: TAutoPilotEvent['tag']; // why the trade being placed is not a plain fresh pick
     private last_live_at = 0; // when the last live buy went out (pacing)
     private trade_count = 0; // settled trades in this run (capital protection counts these)
+    private rtts: number[] = []; // the last pings to Deriv, ms (Infinity = no answer)
+    private ping_timer: ReturnType<typeof setInterval> | null = null;
+    private seen_at = new Map<string, number>(); // signal key -> when the AI first saw it
+    private buy_log: boolean[] = []; // the last 10 buys: true = it landed late
+    private paused_until = 0;
+    private started_at = 0;
+    private last_slow_log = 0;
     private last_market: string | null = null;
     private last_traded = new Map<string, number>(); // symbol -> when the AI last bought on it (market switching)
     private used_runs = new Set<string>(); // symbol|type|run id of the backend signals already traded: one run is traded once
@@ -658,6 +705,13 @@ export class AutoPilotEngine {
         this.trade_count = 0;
         this.last_live_at = 0;
         this.used_runs.clear();
+        this.seen_at.clear();
+        this.rtts = [];
+        this.buy_log = [];
+        this.paused_until = 0;
+        this.started_at = Date.now();
+        this._startPing();
+        this.used_runs.clear();
         this.last_traded.clear();
         this.last_market = null;
         this.blocked.clear();
@@ -672,6 +726,8 @@ export class AutoPilotEngine {
 
     stop(reason = 'stopped by user') {
         this.running = false;
+        if (this.ping_timer) clearInterval(this.ping_timer);
+        this.ping_timer = null;
         if (this.poll_timer) clearTimeout(this.poll_timer);
         this.poll_timer = null;
         this._emit({ phase: 'stopped', reason });
@@ -713,6 +769,14 @@ export class AutoPilotEngine {
                 if (sig.run_id !== undefined && this.used_runs.has(`${symbol}|${sig.contract_type}|${sig.run_id}`)) continue;
                 const ticks = tradeTicks(symbol, sig.contract_type);
                 if (ticks === null) continue;
+                // A signal is for the very next tick: one the AI has been looking at for too long is a run that has already ended.
+                const key = `${symbol}|${sig.contract_type}|${sig.run_id}`;
+                const first = this.seen_at.get(key) ?? now;
+                if (!this.seen_at.has(key)) {
+                    if (this.seen_at.size > 500) this.seen_at.clear();
+                    this.seen_at.set(key, now);
+                }
+                if (now - first > MAX_SIGNAL_AGE_MS) continue;
                 found.push({
                     candidate: { ...sig, symbol, duration_ticks: ticks } as TCandidate,
                     confluence: sig.confluence === true,
@@ -728,6 +792,59 @@ export class AutoPilotEngine {
         return found[0].candidate;
     }
 
+    private _startPing() {
+        if (this.ping_timer) clearInterval(this.ping_timer);
+        const ping = () => {
+            const t0 = Date.now();
+            this.connection
+                .send({ ping: 1 })
+                .then(() => this.rtts.push(Date.now() - t0))
+                .catch(() => this.rtts.push(Infinity))
+                .finally(() => {
+                    if (this.rtts.length > 5) this.rtts.shift();
+                    this.signalReceived(); // a waiting AI looks again now that the connection has been measured
+                });
+        };
+        ping();
+        this.ping_timer = setInterval(ping, PING_EVERY_MS);
+    }
+
+    /** The middle of the last pings to Deriv, in ms (0 = nothing measured yet, Infinity = Deriv is not answering). */
+    latencyMs(): number {
+        if (!this.rtts.length) return 0;
+        const sorted = [...this.rtts].sort((a, b) => a - b);
+        return sorted[Math.floor(sorted.length / 2)];
+    }
+
+    /** Why the AI must not buy right now because of the connection (null = the connection is fine). */
+    private _connectionProblem(): string | null {
+        const limit = this.config.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS;
+        if (limit <= 0) return null;
+        const now = Date.now();
+        if (now < this.paused_until) return `trades have been landing late, paused for ${Math.ceil((this.paused_until - now) / 1000)}s`;
+        if (!this.rtts.length && now - this.started_at < 3000) return 'measuring the connection'; // never buy blind: wait for the first ping
+        const rtt = this.latencyMs();
+        if (rtt > limit) return Number.isFinite(rtt) ? `your connection to Deriv is slow (${Math.round(rtt)} ms, limit ${limit} ms)` : 'Deriv is not answering';
+        const last = this.rtts[this.rtts.length - 1];
+        if (last !== undefined && last > limit * 2) return `your connection just stalled (${Number.isFinite(last) ? Math.round(last) + ' ms' : 'no answer'})`;
+        const lag = this.hooks?.feedLagMs?.() ?? 0;
+        if (lag > limit) return `the signal feed is arriving ${Math.round(lag)} ms late`;
+        return null;
+    }
+
+    /** Called after every buy with how long Deriv took to confirm it: two late buys in the last ten pause buying for a minute. */
+    private _noteBuy(ms: number) {
+        const limit = this.config.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS;
+        if (limit <= 0) return;
+        this.buy_log.push(ms > limit * LATE_BUY_FACTOR);
+        if (this.buy_log.length > 10) this.buy_log.shift();
+        if (this.buy_log.filter(Boolean).length >= LATE_BUYS_TO_PAUSE) {
+            this.paused_until = Date.now() + LATE_PAUSE_MS;
+            this.buy_log = [];
+            this.hooks?.onLog?.('error', `Buys are being confirmed late (${Math.round(ms)} ms): signals last one tick, so these trades land on the wrong tick. Pausing for ${LATE_PAUSE_MS / 1000}s.`);
+        }
+    }
+
     /** The panel calls this the moment a new snapshot arrives from the backend: a waiting AI looks at it at once instead of at its next poll. */
     signalReceived() {
         if (!this.running || this.busy || !this.waiting) return;
@@ -740,6 +857,21 @@ export class AutoPilotEngine {
         if (this.poll_timer) clearTimeout(this.poll_timer);
         this.poll_timer = null;
         const candidate = this._pickSignal();
+        const problem = candidate ? this._connectionProblem() : null;
+        if (candidate && problem) {
+            // A signal is only good for the very next tick. With this connection it would land late, so it is dropped (never bought late).
+            const run_id = (candidate as { run_id?: number | string }).run_id;
+            const measuring = problem === 'measuring the connection'; // only the first moments of a run: wait, do not throw the signal away
+            if (run_id !== undefined && !measuring) this.used_runs.add(`${candidate.symbol}|${candidate.contract_type}|${run_id}`);
+            if (!measuring && Date.now() - this.last_slow_log > 15_000) {
+                this.last_slow_log = Date.now();
+                this.hooks?.onLog?.('info', `Signal on ${candidate.symbol} not bought: ${problem}. Waiting for the connection to recover.`);
+                this._emit({ phase: 'waiting', reason: `not buying: ${problem}` });
+            }
+            this.waiting = { stake, tag };
+            this.poll_timer = setTimeout(() => this._findAndEnter(stake, tag), problem === 'measuring the connection' ? 50 : 300);
+            return;
+        }
         this.waiting = candidate ? null : { stake, tag };
         if (!candidate) {
             if (Date.now() - this.last_wait_emit > 30_000) {
@@ -909,7 +1041,9 @@ export class AutoPilotEngine {
         // from the buy itself). Both sides: both legs are priced together first (a winning side must pay at least BOTH stakes), then both
         // legs are bought together, so the second leg lands on the same tick as the first.
         const buyLeg = async (params: Record<string, unknown>): Promise<string> => {
+            const t0 = Date.now();
             const res = await this.connection.send({ buy: '1', price: stake, parameters: params });
+            this._noteBuy(Date.now() - t0);
             const id = res?.buy?.contract_id;
             if (!id) throw new Error('Buy did not return a contract id');
             return id as string; // keep it exactly as Deriv sent it (a number): proposal_open_contract rejects a string contract_id
@@ -1015,7 +1149,8 @@ export class AutoPilotEngine {
             this.connection.unsubscribe(sub_id);
             const profit = Number(contract.profit ?? 0);
             const won = profit > 0;
-            this.hooks?.onLog?.(won ? 'success' : 'error', `${won ? 'Won' : 'Lost'} ${Math.abs(profit).toFixed(2)} ${this.currency} on ${candidate.symbol} ${candidate.contract_type}`);
+            const ticks = describeTicks(candidate, contract as Record<string, unknown>);
+            this.hooks?.onLog?.(won ? 'success' : 'error', `${won ? 'Won' : 'Lost'} ${Math.abs(profit).toFixed(2)} ${this.currency} on ${candidate.symbol} ${candidate.contract_type}: ${ticks.text}`);
             if (this.learner && this.learner.mode !== 'off') {
                 this.learner.record({
                     symbol: candidate.symbol,
@@ -1047,6 +1182,9 @@ export class AutoPilotEngine {
                 confidence: candidate.confidence,
                 strategy: (candidate as { strategy?: string }).strategy,
                 tag: entry_tag,
+                signal_ticks: ticks.signal,
+                entry_tick: ticks.entry,
+                exit_tick: ticks.exit,
             });
 
             this._emit({
