@@ -1,3 +1,11 @@
+# Overlap pairs (Even + Under 5, Odd + Over 4)
+
+- When Even AND Under 5 both have an entry signal on the same market at the same moment (digits 0, 2, 4 are both even and under 5), the AI buys both together, one stake each, on the same tick. The same for Odd + Over 4 (digits 5, 7, 9). Switch: "Pairs" on the AI tab (`overlap_pairs`, default on). Signals on different markets, Even + Odd, or Even + Over 4 are never paired.
+- Both legs go out straight away (no price check), count as ONE trade for the stake rules, and the next signal is bought only after both legs have closed. Their run ids are both used up.
+- **This is not a hedge.** Even + Under 5: both win on 0, 2, 4 (30%); one wins on 6, 8, 1, 3 (40%); none on 5, 7, 9 (30%). At about 1.95x per contract that is about +1.9 / -0.05 / -2.0 per two stakes: the same expected result per stake as two separate bets. It only fires two bets on one tick.
+- **Rise + Fall was not added:** exactly one of them wins (neither on a flat tick), and a win pays about 1.95x one stake against two stakes paid, so every pair loses about 0.05 or 2.0 and can never profit. The existing "payout must cover both stakes" rule would also refuse it every time. Only Ups + Only Downs keep their pair because they pay about 3.8x.
+- Tests: `overlap-pairs` (7) plus every earlier spec.
+
 # Entry and exit ticks, digit 0, double digits, per-market decimals
 
 - **Digit 0:** counted on every market as an EVEN and UNDER 5 tick (never over 4, never odd). Deriv sends quotes as JSON numbers, so 100.50 arrives as 100.5 and its 0 is lost; the backend now reads each market's REAL number of decimals from its own prices (`inferDecimals`, largest number of decimals seen over 60+ ticks) and ignores a wrong or missing pip size. The AI tab's run-bias table shows each market's decimals in its header (e.g. `V10 (1s) · 2dp`) and the backend logs a warning when the reported pip size disagrees with what the prices print. Tested with 2dp, 3dp and 4dp markets and wrong reported pip sizes.

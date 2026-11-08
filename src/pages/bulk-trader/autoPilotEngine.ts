@@ -77,6 +77,13 @@ export type TAutoPilotConfig = {
      * connection is slower than this (default 500 ms). Signals that arrive late are dropped, never bought late.
      */
     max_latency_ms?: number;
+    /**
+     * Overlap pairs (default on). When Even and Under 5 BOTH have an entry on the same market at the same time (digits 0, 2, 4 are
+     * even AND under 5), or Odd and Over 4 both do (digits 5, 7, 9 are odd AND over 4), both contracts are bought together. This is not
+     * a hedge: they win together on 3 digits, one of them wins on 4 digits and none on 3, so the cost and the odds stay the same as two
+     * separate bets. It only places the two bets on the same tick.
+     */
+    overlap_pairs?: boolean;
 };
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
@@ -174,7 +181,8 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
         protect_trades: 0,
         contract_families: ALL_FAMILY_KEYS,
-        both_sides: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
+        both_sides: true,
+        overlap_pairs: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
     };
 };
 
@@ -296,6 +304,8 @@ export const SIGNAL_POLL_MS = 100;
 export const DEFAULT_MAX_LATENCY_MS = 500;
 /** A signal first seen longer ago than this is a run that has already ended: it is not bought. */
 export const MAX_SIGNAL_AGE_MS = 1500;
+/** Digit contracts that share digits: Even / Under 5 win together on 0, 2, 4; Odd / Over 4 win together on 5, 7, 9. */
+export const OVERLAP_PARTNER: Record<string, string> = { DIGITEVEN: 'DIGITUNDER', DIGITUNDER: 'DIGITEVEN', DIGITODD: 'DIGITOVER', DIGITOVER: 'DIGITODD' };
 /** A buy that takes this many times the allowed latency to be confirmed landed late (probably on a later tick than the signal). */
 const LATE_BUY_FACTOR = 3;
 /** This many late buys among the last 10 pause buying for LATE_PAUSE_MS. */
@@ -785,10 +795,20 @@ export class AutoPilotEngine {
             }
         }
         if (!found.length) return null;
+        // Overlap pairs: Even + Under 5 (or Odd + Over 4) with an entry on the same market at the same time are bought together.
+        const pair_for = (f: (typeof found)[number]): TCandidate | null => {
+            if (this.config.overlap_pairs === false) return null;
+            const want = OVERLAP_PARTNER[f.candidate.contract_type];
+            if (!want) return null;
+            return found.find(o => o.candidate.symbol === f.candidate.symbol && o.candidate.contract_type === want)?.candidate ?? null;
+        };
+        const paired = new Map(found.map(f => [f, pair_for(f)] as const));
         // Market switching: when several markets have an entry at the same time, the one that agrees on every run length (confluence)
-        // goes first, then the market traded LEAST recently, and only then the strongest bias. The strongest bias alone kept picking the
-        // same market, because a market's bias changes slowly.
-        found.sort((a, b) => Number(b.confluence) - Number(a.confluence) || b.idle - a.idle || b.candidate.confidence - a.candidate.confidence);
+        // goes first, then a pair, then the market traded LEAST recently, and only then the strongest bias. The strongest bias alone kept
+        // picking the same market, because a market's bias changes slowly.
+        found.sort((a, b) => Number(b.confluence) - Number(a.confluence) || Number(!!paired.get(b)) - Number(!!paired.get(a)) || b.idle - a.idle || b.candidate.confidence - a.candidate.confidence);
+        const partner = paired.get(found[0]);
+        if (partner) return { ...found[0].candidate, pair_with: partner } as TCandidate;
         return found[0].candidate;
     }
 
@@ -903,6 +923,8 @@ export class AutoPilotEngine {
             if (this.used_runs.size > 500) this.used_runs.clear();
             this.used_runs.add(`${candidate.symbol}|${candidate.contract_type}|${run_id}`);
         }
+        const mate = (candidate as { pair_with?: TCandidate & { run_id?: number | string } }).pair_with;
+        if (mate?.run_id !== undefined) this.used_runs.add(`${mate.symbol}|${mate.contract_type}|${mate.run_id}`);
         if (this.last_market && this.last_market !== candidate.symbol) {
             this.hooks?.onLog?.('info', `Switching market: ${this.last_market} -> ${candidate.symbol} (${candidate.label}, the entry came on ${candidate.symbol}).`);
         }
@@ -1017,7 +1039,20 @@ export class AutoPilotEngine {
         // Both sides: the opposite contract is bought too, on the same market, same stake and same duration.
         let partner: TCandidate | null = null;
         let partner_parameters: Record<string, unknown> | null = null;
-        if (this.config.both_sides !== false && bothSidesType(candidate.contract_type)) {
+        const overlap = (candidate as { pair_with?: TCandidate }).pair_with ?? null;
+        if (overlap) {
+            const live = this.connection.accountInfo?.balance;
+            if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
+                this.hooks?.onLog?.('info', `Pair skipped: two stakes of ${stake} ${this.currency} are more than the balance (${live.toFixed(2)}); buying ${candidate.label} alone.`);
+            } else {
+                try {
+                    partner_parameters = { ...buildTradeParameters(overlap, stake, this.currency), duration: tried_duration };
+                    partner = overlap;
+                } catch (err) {
+                    this.hooks?.onLog?.('info', `Pair skipped: ${err instanceof Error ? err.message : 'the second contract could not be built'}`);
+                }
+            }
+        } else if (this.config.both_sides !== false && bothSidesType(candidate.contract_type)) {
             const opposite_type = FLIP_PARTNER[candidate.contract_type];
             const live = this.connection.accountInfo?.balance;
             if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
@@ -1049,7 +1084,7 @@ export class AutoPilotEngine {
             return id as string; // keep it exactly as Deriv sent it (a number): proposal_open_contract rejects a string contract_id
         };
         const priced: Promise<void> =
-            partner && partner_parameters
+            partner && partner_parameters && !overlap // an overlap pair is not about a payout covering both stakes: no price check, both legs go at once
                 ? Promise.all([this.connection.send({ proposal: 1, ...parameters }), this.connection.send({ proposal: 1, ...partner_parameters })]).then(([a, b]) => {
                       const need = Number((stake * 2).toFixed(2));
                       const pay_a = Number(a?.proposal?.payout);
@@ -1076,7 +1111,7 @@ export class AutoPilotEngine {
                     return;
                 }
                 this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
-                this.hooks?.onLog?.('info', `Both sides fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
+                this.hooks?.onLog?.('info', `${overlap ? 'Overlap pair' : 'Both sides'} fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
                 const pair: TPair = { pending: 2, profit: 0, stake: Number((stake * 2).toFixed(2)) };
                 this._watch(candidate, stake, first.value, tried_duration, pair);
                 this._watch(partner, stake, second.value, tried_duration, pair);

@@ -1,0 +1,129 @@
+import { AutoPilotEngine, TAutoPilotConfig } from '../autoPilotEngine';
+import type { TSnapshotMap } from '../analysis-types';
+
+jest.mock('uuid', () => ({ v4: () => 'test-id' }));
+
+const wait = (ms = 80) => new Promise(r => setTimeout(r, ms));
+
+class Conn {
+    sent: any[] = [];
+    subs = new Map<number, { req: any; cb: any }>();
+    history: Record<string, number[]> = {};
+    payout = 3.8;
+    log: string[] = []; // the order requests were sent in
+    private n = 1;
+    private buys = 0;
+    accountInfo = { balance: 100000, loginid: 'VRTC1', currency: 'USD' };
+    onFatalError: any;
+    onReconnecting: any;
+    onReconnect: any;
+    async send(req: any) {
+        this.sent.push(req);
+        if (!req.ping) this.log.push(Object.keys(req).find(k => ['proposal', 'buy', 'ticks_history'].includes(k)) ?? 'other');
+        if (req.proposal) return { proposal: { ask_price: 1, payout: this.payout } };
+        if (req.buy) return { buy: { contract_id: 100 + ++this.buys } };
+        if (req.ticks_history) {
+            const prices = this.history[req.ticks_history] ?? [];
+            return { history: { prices, times: prices.map((_, i) => i + 1) }, pip_size: 2 };
+        }
+        return {};
+    }
+    subscribe(req: any, cb: any) {
+        // Deriv validates contract_id as an integer: a string is rejected ("Input validation failed: contract_id").
+        if (req.proposal_open_contract && typeof req.contract_id !== 'number') throw new Error('Input validation failed: contract_id');
+        const id = this.n++;
+        this.subs.set(id, { req, cb });
+        return id;
+    }
+    unsubscribe(id: number) {
+        this.subs.delete(id);
+    }
+    settle(contract_id: number, profit: number) {
+        for (const { req, cb } of this.subs.values()) {
+            if (req.proposal_open_contract && req.contract_id === contract_id) cb({ proposal_open_contract: { contract_id, is_sold: 1, profit, buy_price: 1 } }, null);
+        }
+    }
+    buys_ = () => this.sent.filter(r => r.buy);
+}
+
+let rid = 0; // every read of a signal gets a fresh run id: each pick is a new run of ticks
+const sig = (o: { type: string; label: string; confidence?: number; confluence?: boolean }) =>
+    ({ family: 'run_bias', strategy: 'run_bias', entry: true, confluence: o.confluence ?? false, get run_id() { return `${++rid}:2`; }, contract_type: o.type, label: o.label, confidence: o.confidence ?? 70, basis: '' }) as never;
+const base: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 2, max_steps: 4, stop_loss: 1000, take_profit: 1000, protect_trades: 0 };
+const make = (signals: Record<string, unknown[]>, cfg: Partial<TAutoPilotConfig> = {}) => {
+    const conn = new Conn();
+    const logs: string[] = [];
+    const snapshots: TSnapshotMap = {};
+    for (const [symbol, list] of Object.entries(signals)) snapshots[symbol] = { stats: {} as never, signals: list as never };
+    const engine = new AutoPilotEngine(conn as never, 'USD', { ...base, ...cfg }, () => snapshots, () => undefined, undefined, { onLog: (_k: string, m: string) => logs.push(m) } as never);
+    return { conn, engine, snapshots, logs };
+};
+
+const buyTypes = (h: { conn: Conn }) => h.conn.buys_().map(b => b.parameters.contract_type).sort();
+
+describe('overlap pairs: Even + Under 5 and Odd + Over 4 are bought together', () => {
+    it('Even and Under 5 with an entry on the same market at the same time: both are bought, one stake each, at once', async () => {
+        const h = make({ R_P1: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITUNDER', label: 'Under 5' })] });
+        h.engine.start();
+        await wait(200);
+        expect(buyTypes(h)).toEqual(['DIGITEVEN', 'DIGITUNDER']);
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 1]);
+        expect(h.conn.log).not.toContain('proposal'); // no price check: both legs go straight away
+        expect(h.logs.some(l => /Overlap pair fired together: Even \+ Under 5/.test(l))).toBe(true);
+        h.engine.stop();
+    });
+
+    it('Odd and Over 4 are the other pair', async () => {
+        const h = make({ R_P2: [sig({ type: 'DIGITOVER', label: 'Over 4' }), sig({ type: 'DIGITODD', label: 'Odd' })] });
+        h.engine.start();
+        await wait(200);
+        expect(buyTypes(h)).toEqual(['DIGITODD', 'DIGITOVER']);
+        h.engine.stop();
+    });
+
+    it('with only one of the two signalling, only that one is bought', async () => {
+        const h = make({ R_P3: [sig({ type: 'DIGITEVEN', label: 'Even' })] });
+        h.engine.start();
+        await wait(200);
+        expect(buyTypes(h)).toEqual(['DIGITEVEN']);
+        h.engine.stop();
+    });
+
+    it('signals on DIFFERENT markets are not paired', async () => {
+        const h = make({ R_P4: [sig({ type: 'DIGITEVEN', label: 'Even' })], R_P5: [sig({ type: 'DIGITUNDER', label: 'Under 5' })] });
+        h.engine.start();
+        await wait(200);
+        expect(h.conn.buys_()).toHaveLength(1);
+        h.engine.stop();
+    });
+
+    it('Even + Odd and Even + Over 4 are never paired', async () => {
+        const h = make({ R_P6: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITODD', label: 'Odd' })] });
+        h.engine.start();
+        await wait(200);
+        expect(h.conn.buys_()).toHaveLength(1);
+        h.engine.stop();
+    });
+
+    it('can be switched off', async () => {
+        const h = make({ R_P7: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITUNDER', label: 'Under 5' })] }, { overlap_pairs: false });
+        h.engine.start();
+        await wait(200);
+        expect(h.conn.buys_()).toHaveLength(1);
+        h.engine.stop();
+    });
+
+    it('the pair settles as ONE trade: the next signal is only bought after both legs have closed', async () => {
+        const h = make({ R_P8: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITUNDER', label: 'Under 5' })] });
+        h.engine.start();
+        await wait(200);
+        h.conn.settle(101, 0.95);
+        await wait(200);
+        expect(h.conn.buys_()).toHaveLength(2); // one leg closed: still waiting for the other
+        h.conn.settle(102, -1);
+        await wait(300);
+        expect(h.logs.some(l => /Both sides closed: net -0.05/.test(l))).toBe(true);
+        expect(h.conn.buys_().length).toBeGreaterThan(2); // the next pair
+        h.engine.stop();
+    });
+});

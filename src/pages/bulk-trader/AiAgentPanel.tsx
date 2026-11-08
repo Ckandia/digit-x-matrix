@@ -642,6 +642,16 @@ const AiAgentPanel = ({
                             />{' '}
                             <InfoNote text={localize('Both sides: the AI buys Only Ups AND Only Downs together on the same market (same stake each). Every other contract is a single trade. The two results count as one trade. Careful: both can lose when the ticks neither only rise nor only fall, which is the usual case, so the doubled payout of the one that wins does not reliably cover the other.')} />
                         </label>
+                        <label style={{ display: 'block' }}>
+                            <input
+                                type='checkbox'
+                                checked={config?.overlap_pairs !== false}
+                                disabled={!config || status === 'connecting'}
+                                onChange={e => config && setConfig({ ...config, overlap_pairs: e.target.checked })}
+                            />{' '}
+                            {localize('Pairs')}{' '}
+                            <InfoNote text={localize('When Even and Under 5 both have an entry on the same market at the same time (digits 0, 2, 4 are both), the AI buys both together. The same for Odd and Over 4 (digits 5, 7, 9). This is not a hedge: both win on 3 digits, one wins on 4 digits and neither wins on 3, so you still pay two stakes and the odds do not change.')} />
+                        </label>
                     </div>
                     <label className='ai-agent-panel__hint'>
                         {localize('Stake method')}{' '}
