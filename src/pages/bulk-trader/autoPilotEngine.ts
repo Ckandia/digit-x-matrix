@@ -304,8 +304,6 @@ export const SIGNAL_POLL_MS = 100;
 export const DEFAULT_MAX_LATENCY_MS = 500;
 /** A signal first seen longer ago than this is a run that has already ended: it is not bought. */
 export const MAX_SIGNAL_AGE_MS = 1500;
-/** Digit contracts that share digits: Even / Under 5 win together on 0, 2, 4; Odd / Over 4 win together on 5, 7, 9. */
-export const OVERLAP_PARTNER: Record<string, string> = { DIGITEVEN: 'DIGITUNDER', DIGITUNDER: 'DIGITEVEN', DIGITODD: 'DIGITOVER', DIGITOVER: 'DIGITODD' };
 /** A buy that takes this many times the allowed latency to be confirmed landed late (probably on a later tick than the signal). */
 const LATE_BUY_FACTOR = 3;
 /** This many late buys among the last 10 pause buying for LATE_PAUSE_MS. */
@@ -769,12 +767,18 @@ export class AutoPilotEngine {
         const gated = applyGate(this.getSnapshots(), this.hooks?.gate?.());
         const allowed = this._allowedTypes();
         const now = Date.now();
-        const found: { candidate: TCandidate; confluence: boolean; idle: number }[] = [];
+        const found: { candidate: TCandidate; confluence: boolean; idle: number; pair: boolean }[] = [];
         for (const [symbol, snap] of Object.entries(gated)) {
             for (const sig of snap.signals) {
                 if (sig.family !== 'run_bias' || !sig.entry) continue;
                 if (sig.contract_type === 'ONETOUCH' || sig.contract_type === 'NOTOUCH') continue; // Touch / No Touch are not traded by the AI
+                // A PAIR signal: the digit sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4).
+                const pair_types = (sig as { pair_types?: string[] }).pair_types;
+                if (pair_types && (this.config.overlap_pairs === false || pair_types.length !== 2)) continue;
                 if (allowed && !allowed.has(sig.contract_type)) continue;
+                if (pair_types && allowed && !allowed.has(pair_types[1])) continue;
+                if (pair_types && (this.blocked.get(`${symbol}|${pair_types[1]}`) ?? 0) > now) continue;
+                if (pair_types && tradeTicks(symbol, pair_types[1]) === null) continue;
                 if ((this.blocked.get(`${symbol}|${sig.contract_type}`) ?? 0) > now) continue;
                 if (sig.run_id !== undefined && this.used_runs.has(`${symbol}|${sig.contract_type}|${sig.run_id}`)) continue;
                 const ticks = tradeTicks(symbol, sig.contract_type);
@@ -787,28 +791,38 @@ export class AutoPilotEngine {
                     this.seen_at.set(key, now);
                 }
                 if (now - first > MAX_SIGNAL_AGE_MS) continue;
+                const second = pair_types ? pair_types[1] : null;
+                const candidate = (
+                    second
+                        ? {
+                              ...sig,
+                              symbol,
+                              duration_ticks: ticks,
+                              label: OPPOSITE_LABEL[sig.contract_type] ?? sig.label,
+                              pair_with: {
+                                  ...sig,
+                                  symbol,
+                                  duration_ticks: ticks,
+                                  contract_type: second,
+                                  prediction: second === 'DIGITUNDER' ? 5 : second === 'DIGITOVER' ? 4 : undefined,
+                                  label: OPPOSITE_LABEL[second] ?? second,
+                              },
+                          }
+                        : { ...sig, symbol, duration_ticks: ticks }
+                ) as TCandidate;
                 found.push({
-                    candidate: { ...sig, symbol, duration_ticks: ticks } as TCandidate,
+                    candidate,
+                    pair: !!second,
                     confluence: sig.confluence === true,
                     idle: now - (this.last_traded.get(symbol) ?? 0), // how long this market has not been traded: a market never traded is the idlest
                 });
             }
         }
         if (!found.length) return null;
-        // Overlap pairs: Even + Under 5 (or Odd + Over 4) with an entry on the same market at the same time are bought together.
-        const pair_for = (f: (typeof found)[number]): TCandidate | null => {
-            if (this.config.overlap_pairs === false) return null;
-            const want = OVERLAP_PARTNER[f.candidate.contract_type];
-            if (!want) return null;
-            return found.find(o => o.candidate.symbol === f.candidate.symbol && o.candidate.contract_type === want)?.candidate ?? null;
-        };
-        const paired = new Map(found.map(f => [f, pair_for(f)] as const));
         // Market switching: when several markets have an entry at the same time, the one that agrees on every run length (confluence)
-        // goes first, then a pair, then the market traded LEAST recently, and only then the strongest bias. The strongest bias alone kept
-        // picking the same market, because a market's bias changes slowly.
-        found.sort((a, b) => Number(b.confluence) - Number(a.confluence) || Number(!!paired.get(b)) - Number(!!paired.get(a)) || b.idle - a.idle || b.candidate.confidence - a.candidate.confidence);
-        const partner = paired.get(found[0]);
-        if (partner) return { ...found[0].candidate, pair_with: partner } as TCandidate;
+        // goes first, then a PAIR (the digit sequence favours two contracts at once), then the market traded LEAST recently, and only then
+        // the strongest bias. The strongest bias alone kept picking the same market, because a market's bias changes slowly.
+        found.sort((a, b) => Number(b.confluence) - Number(a.confluence) || Number(b.pair) - Number(a.pair) || b.idle - a.idle || b.candidate.confidence - a.candidate.confidence);
         return found[0].candidate;
     }
 
@@ -924,7 +938,15 @@ export class AutoPilotEngine {
             this.used_runs.add(`${candidate.symbol}|${candidate.contract_type}|${run_id}`);
         }
         const mate = (candidate as { pair_with?: TCandidate & { run_id?: number | string } }).pair_with;
-        if (mate?.run_id !== undefined) this.used_runs.add(`${mate.symbol}|${mate.contract_type}|${mate.run_id}`);
+        if (mate) {
+            // The pair uses up the run, and also the single Even / Under 5 (or Odd / Over 4) entries of the same moment: no double buying.
+            if (run_id !== undefined) this.used_runs.add(`${mate.symbol}|${mate.contract_type}|${run_id}`);
+            for (const sg of this.getSnapshots()[candidate.symbol]?.signals ?? []) {
+                if (sg.family === 'run_bias' && sg.entry && sg.run_id !== undefined && (sg.contract_type === candidate.contract_type || sg.contract_type === mate.contract_type)) {
+                    this.used_runs.add(`${candidate.symbol}|${sg.contract_type}|${sg.run_id}`);
+                }
+            }
+        }
         if (this.last_market && this.last_market !== candidate.symbol) {
             this.hooks?.onLog?.('info', `Switching market: ${this.last_market} -> ${candidate.symbol} (${candidate.label}, the entry came on ${candidate.symbol}).`);
         }

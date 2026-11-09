@@ -1,6 +1,6 @@
 // Pure checks for the run-bias module: runs of 2 / 3+ ticks in a row in favour of a contract, analysed per level.
 import assert from 'node:assert/strict';
-import { computeRunBias, computeRunSignals, favourFlags, runStats, settleAt, replayOutcomes, lastDigit, inferDecimals, LEVELS, FRESH_SLACK, ENTRY_DELAY } from '../src/runBias.js';
+import { PAIR_PATTERNS, replayPair, computeRunBias, computeRunSignals, favourFlags, runStats, settleAt, replayOutcomes, lastDigit, inferDecimals, LEVELS, FRESH_SLACK, ENTRY_DELAY } from '../src/runBias.js';
 
 const px = digits => digits.map((d, i) => Number((100 + i * 0.1 + d / 100).toFixed(2)));
 const row = (prices, key) => computeRunBias(prices, 2).rows.find(r => r.key === key);
@@ -156,6 +156,31 @@ const badScan = computeRunBias(px(bad), 2);
 const badEven = badScan.rows.find(r => r.key === 'even').levels[0];
 assert.ok(badEven.outcomes >= 10 && badEven.hit === 0);
 assert.ok(!computeRunSignals(badScan, 'T').some(x => x.entry && x.contract_type === 'DIGITEVEN' && x.run.min_run === 2), 'Even is not an entry when its replays all lost');
+
+// ---- Pair patterns: the sequence favours TWO contracts at once
+assert.deepEqual(PAIR_PATTERNS[0].digits, [0, 2, 4]);
+assert.deepEqual(PAIR_PATTERNS[1].digits, [5, 7, 9]);
+// digits 2,4,0 are all even AND under 5; 5,7,9 are all odd AND over 4
+const pairRow = (digits, key) => computeRunBias(px(digits), 2).pairs.find(r => r.key === key);
+assert.equal(pairRow(pad(8, [2, 4, 0]), 'even_under5').current, 3);
+assert.equal(pairRow(pad(3, [5, 7, 9]), 'odd_over4').current, 3);
+assert.equal(pairRow(pad(8, [2, 4, 6]), 'even_under5').current, 0, '6 is even but not under 5: the pair run is broken'); // pad ends with 8; 6 not in the set
+assert.equal(pairRow(pad(8, [2, 4]), 'even_under5').current, 2);
+// the pair is judged on its net result: Even and Under 5 both win on digit 4 (net +1.9)
+const pairSeq = [];
+for (let k = 0; k < 30; k++) pairSeq.push(2, 4, 1, 4, 5, 8, 9); // run 2,4 -> entry 1 -> exit 4 (both win)
+const ps = computeRunBias(px(pairSeq), 2).pairs.find(r => r.key === 'even_under5').levels[0];
+assert.ok(ps.outcomes >= 10 && ps.avg_net > 1.5, 'both legs won after every replay');
+// a pair that keeps losing both legs is vetoed: exit digit 7 loses Even and Under 5
+const badPair = [];
+for (let k = 0; k < 30; k++) badPair.push(2, 4, 1, 7, 5, 8, 9);
+const bp = computeRunBias(px(badPair), 2);
+assert.ok(bp.pairs.find(r => r.key === 'even_under5').levels[0].avg_net < 0);
+assert.ok(!computeRunSignals(bp, 'T').some(x => x.entry && x.pair_types && x.pair_types[0] === 'DIGITEVEN' && x.run.min_run === 2), 'a losing pair is not an entry');
+// a pair signal carries both contract types and its own run id
+const pairSigs = computeRunSignals(computeRunBias(px([...pairSeq, 8, 2, 4]), 2), 'T').filter(x => x.pair_types);
+assert.ok(pairSigs.length > 0 && pairSigs.every(x => x.pair_types.length === 2 && x.family === 'run_bias'));
+for (const x of pairSigs.filter(y => y.entry)) assert.ok(String(x.run_id).endsWith(':pair'));
 
 // signals shape
 const scan = computeRunBias(rising, 2, 5000);

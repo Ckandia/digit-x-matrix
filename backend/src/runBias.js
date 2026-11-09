@@ -180,6 +180,36 @@ export function replayOutcomes(key, flag, prices, min_run, decimals = 2) {
 }
 
 /**
+ * PAIR PATTERNS. Some digits favour two contracts at once: 0, 2, 4 are both EVEN and UNDER 5; 5, 7, 9 are both ODD and OVER 4.
+ * When the last 2 (or 3) ticks all sit inside one of those sets, the sequence favours BOTH contracts and the AI buys both at once,
+ * the way Only Ups / Only Downs are bought. Bias = that set's share of the runs of the two sets; the entry and exit ticks are replayed
+ * exactly like single contracts, and the pair is judged on its NET result (win +0.95 per leg, loss -1 per leg).
+ */
+export const PAIR_PATTERNS = [
+    { key: 'even_under5', label: 'Even + Under 5', types: ['DIGITEVEN', 'DIGITUNDER'], keys: ['even', 'under5'], digits: [0, 2, 4], versus: 'odd_over4' },
+    { key: 'odd_over4', label: 'Odd + Over 4', types: ['DIGITODD', 'DIGITOVER'], keys: ['odd', 'over4'], digits: [5, 7, 9], versus: 'even_under5' },
+];
+export const PAIR_LEVELS = [2, 3];
+const PAIR_LEG_PROFIT = 0.95; // a winning leg pays about 0.95 of its stake, a losing leg loses 1
+
+/** Replays a pair: every time a run of `min_run` ticks inside the digit set first completes, buy both legs, settle on the exit tick. */
+export function replayPair(pair, flag, prices, min_run, decimals = 2) {
+    let len = 0;
+    let n = 0;
+    let net = 0;
+    for (let i = 0; i < flag.length; i++) {
+        len = flag[i] ? len + 1 : 0;
+        if (len !== min_run) continue;
+        const results = pair.keys.map(k => settleAt(k, prices, i, decimals));
+        if (results.some(r => r === null)) continue;
+        const wins = results.filter(Boolean).length;
+        net += wins * PAIR_LEG_PROFIT - (2 - wins);
+        n += 1;
+    }
+    return { n, avg_net: n ? round2(net / n) : null };
+}
+
+/**
  * @param {number[]} prices oldest first
  * @param {number} decimals the symbol's price precision (for last digits)
  * @param {number} [total_ticks] how many ticks this symbol has ever shown (so a run's id keeps counting as the window slides)
@@ -187,7 +217,7 @@ export function replayOutcomes(key, flag, prices, min_run, decimals = 2) {
 export function computeRunBias(prices, decimals = 2, total_ticks = prices.length) {
     const tail = prices.slice(-RUN_WINDOW);
     const n = tail.length;
-    if (n < MIN_RUN_SAMPLE) return { n, min_run: MIN_RUN, rows: [] };
+    if (n < MIN_RUN_SAMPLE) return { n, min_run: MIN_RUN, rows: [], pairs: [] };
     // This market's own precision, read from its prices (the reported pip size is only a fallback, see inferDecimals).
     const seen_dp = inferDecimals(tail);
     const reported_dp = decimals;
@@ -226,7 +256,32 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
             pattern: mine.current ? tail.slice(-Math.min(mine.current, 3)).map(pr => (['even', 'odd', 'over4', 'under5'].includes(c.key) ? String(lastDigit(pr, decimals)) : Number(pr).toFixed(decimals))) : [],
         };
     });
-    return { n, min_run: MIN_RUN, decimals, reported_decimals: reported_dp, trend: detectTrend(tail.slice(-TREND_WINDOW)), rows };
+    // Pair patterns: runs of ticks whose digit sits in the shared set (0,2,4 or 5,7,9)
+    const pair_flags = Object.fromEntries(PAIR_PATTERNS.map(pp => [pp.key, tail.map(price => pp.digits.includes(lastDigit(price, decimals)))]));
+    const pairs = PAIR_PATTERNS.map(pp => {
+        const mine = runStats(pair_flags[pp.key], MIN_RUN);
+        const levels = PAIR_LEVELS.map(min_run => {
+            const m = runStats(pair_flags[pp.key], min_run);
+            const t = runStats(pair_flags[pp.versus], min_run);
+            const both = m.ticks_in_runs + t.ticks_in_runs;
+            const rp = replayPair(pp, pair_flags[pp.key], tail, min_run, decimals);
+            return { min_run, runs: m.runs, ticks_in_runs: m.ticks_in_runs, bias: both ? round2((m.ticks_in_runs / both) * 100) : 50, outcomes: rp.n, avg_net: rp.avg_net };
+        });
+        return {
+            key: pp.key,
+            label: pp.label,
+            types: pp.types,
+            runs: levels[0].runs,
+            ticks_in_runs: levels[0].ticks_in_runs,
+            longest: mine.longest,
+            current: mine.current,
+            bias: levels[0].bias,
+            levels,
+            run_start: mine.current ? first_tick_of_window + mine.current_start : null,
+            pattern: mine.current ? tail.slice(-Math.min(mine.current, 3)).map(price => String(lastDigit(price, decimals))) : [],
+        };
+    });
+    return { n, min_run: MIN_RUN, decimals, reported_decimals: reported_dp, trend: detectTrend(tail.slice(-TREND_WINDOW)), rows, pairs };
 }
 
 /**
@@ -271,6 +326,33 @@ export function computeRunSignals(scan, symbol) {
                 basis: `Run bias: ${row.label} had ${level.runs} runs of ${level.min_run}+ ticks on ${symbol} over the last ${scan.n} ticks (bias ${level.bias}%, run now ${row.current}). Replayed entry and exit ticks after the same pattern: ${level.wins}/${level.outcomes} won${level.hit === null ? '' : ` (${level.hit}%)`}.`,
             };
             (entry ? entries : extras).push(signal);
+        }
+    }
+    // Pair signals: the sequence favours two contracts at once, so both are bought together.
+    for (const row of scan.pairs ?? []) {
+        const pp = PAIR_PATTERNS.find(x => x.key === row.key);
+        const confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
+        for (const level of row.levels) {
+            if (level.bias <= 50) continue;
+            const fresh = row.current >= level.min_run && row.current <= level.min_run + FRESH_SLACK;
+            const replayed = level.outcomes >= MIN_OUTCOME_SAMPLE && level.avg_net !== null;
+            const net_ok = !replayed || level.avg_net >= 0; // the pair must have at least broken even after this pattern
+            const entry = fresh && net_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
+            (entry ? entries : extras).push({
+                family: 'run_bias',
+                strategy: 'run_bias',
+                contract_type: pp.types[0], // the first leg; pair_types lists both
+                pair_types: pp.types,
+                duration_ticks: 1,
+                prediction: pp.types[0] === 'DIGITOVER' ? 4 : undefined,
+                label: pp.label,
+                confidence: Math.round(clamp((level.bias - 50) * 2, 0, 100)),
+                entry,
+                confluence,
+                run_id: entry ? `${row.run_start}:${level.min_run}:pair` : undefined,
+                run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run, outcomes: level.outcomes, avg_net: level.avg_net, pattern: row.pattern },
+                basis: `Pair: the last digits favour ${pp.label} at once (${pp.digits.join(', ')}) on ${symbol}: bias ${level.bias}%, run now ${row.current}, replayed net ${level.avg_net ?? 'n/a'} per pair over ${level.outcomes} entries.`,
+            });
         }
     }
     entries.sort((a, b) => b.confidence - a.confidence);

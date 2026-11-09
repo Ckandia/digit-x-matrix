@@ -47,6 +47,8 @@ class Conn {
 }
 
 let rid = 0; // every read of a signal gets a fresh run id: each pick is a new run of ticks
+const pairSig = (types: [string, string], o: { confluence?: boolean } = {}) =>
+    ({ family: 'run_bias', strategy: 'run_bias', entry: true, confluence: o.confluence ?? false, pair_types: types, get run_id() { return `${++rid}:2:pair`; }, contract_type: types[0], label: 'pair', confidence: 70, basis: '' }) as never;
 const sig = (o: { type: string; label: string; confidence?: number; confluence?: boolean }) =>
     ({ family: 'run_bias', strategy: 'run_bias', entry: true, confluence: o.confluence ?? false, get run_id() { return `${++rid}:2`; }, contract_type: o.type, label: o.label, confidence: o.confidence ?? 70, basis: '' }) as never;
 const base: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 2, max_steps: 4, stop_loss: 1000, take_profit: 1000, protect_trades: 0 };
@@ -61,69 +63,82 @@ const make = (signals: Record<string, unknown[]>, cfg: Partial<TAutoPilotConfig>
 
 const buyTypes = (h: { conn: Conn }) => h.conn.buys_().map(b => b.parameters.contract_type).sort();
 
-describe('overlap pairs: Even + Under 5 and Odd + Over 4 are bought together', () => {
-    it('Even and Under 5 with an entry on the same market at the same time: both are bought, one stake each, at once', async () => {
-        const h = make({ R_P1: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITUNDER', label: 'Under 5' })] });
+describe('when the digit sequence favours two contracts at once, both are bought together', () => {
+    it('Even + Under 5 (digits 0, 2, 4): both bought, one stake each, straight away', async () => {
+        const h = make({ R_P1: [pairSig(['DIGITEVEN', 'DIGITUNDER'])] });
         h.engine.start();
         await wait(200);
         expect(buyTypes(h)).toEqual(['DIGITEVEN', 'DIGITUNDER']);
         expect(h.conn.buys_().map(b => b.price)).toEqual([1, 1]);
-        expect(h.conn.log).not.toContain('proposal'); // no price check: both legs go straight away
+        expect(h.conn.log).not.toContain('proposal');
         expect(h.logs.some(l => /Overlap pair fired together: Even \+ Under 5/.test(l))).toBe(true);
         h.engine.stop();
     });
 
-    it('Odd and Over 4 are the other pair', async () => {
-        const h = make({ R_P2: [sig({ type: 'DIGITOVER', label: 'Over 4' }), sig({ type: 'DIGITODD', label: 'Odd' })] });
+    it('Odd + Over 4 (digits 5, 7, 9): both bought', async () => {
+        const h = make({ R_P2: [pairSig(['DIGITODD', 'DIGITOVER'])] });
         h.engine.start();
         await wait(200);
         expect(buyTypes(h)).toEqual(['DIGITODD', 'DIGITOVER']);
         h.engine.stop();
     });
 
-    it('with only one of the two signalling, only that one is bought', async () => {
-        const h = make({ R_P3: [sig({ type: 'DIGITEVEN', label: 'Even' })] });
+    it('the under 5 leg is built with its barrier 5 and the over 4 leg with barrier 4', async () => {
+        const h = make({ R_P3: [pairSig(['DIGITEVEN', 'DIGITUNDER'])], R_P4: [] });
         h.engine.start();
         await wait(200);
-        expect(buyTypes(h)).toEqual(['DIGITEVEN']);
+        const under = h.conn.buys_().find(b => b.parameters.contract_type === 'DIGITUNDER');
+        expect(String(under?.parameters.barrier)).toBe('5');
         h.engine.stop();
     });
 
-    it('signals on DIFFERENT markets are not paired', async () => {
-        const h = make({ R_P4: [sig({ type: 'DIGITEVEN', label: 'Even' })], R_P5: [sig({ type: 'DIGITUNDER', label: 'Under 5' })] });
+    it('single Even and Under 5 entries on their own are NOT paired (the sequence must favour both)', async () => {
+        const h = make({ R_P5: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITUNDER', label: 'Under 5' })] });
         h.engine.start();
         await wait(200);
         expect(h.conn.buys_()).toHaveLength(1);
         h.engine.stop();
     });
 
-    it('Even + Odd and Even + Over 4 are never paired', async () => {
-        const h = make({ R_P6: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITODD', label: 'Odd' })] });
+    it('the pair uses up the single entries of the same moment: nothing is bought twice', async () => {
+        const single = (t: string, l: string) => ({ ...(sig({ type: t, label: l }) as object), run_id: '9:2' }) as never;
+        const h = make({ R_P6: [{ ...(pairSig(['DIGITEVEN', 'DIGITUNDER']) as object), run_id: '9:2:pair' } as never, single('DIGITEVEN', 'Even'), single('DIGITUNDER', 'Under 5')] });
         h.engine.start();
         await wait(200);
-        expect(h.conn.buys_()).toHaveLength(1);
+        h.conn.settle(101, 0.95);
+        h.conn.settle(102, 0.95);
+        await wait(300);
+        expect(h.conn.buys_()).toHaveLength(2); // the pair only: the same run is not bought again as singles
         h.engine.stop();
     });
 
     it('can be switched off', async () => {
-        const h = make({ R_P7: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITUNDER', label: 'Under 5' })] }, { overlap_pairs: false });
+        const h = make({ R_P7: [pairSig(['DIGITEVEN', 'DIGITUNDER'])] }, { overlap_pairs: false });
         h.engine.start();
         await wait(200);
-        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
+    });
+
+    it('needs both contracts to be ticked', async () => {
+        const h = make({ R_P8: [pairSig(['DIGITEVEN', 'DIGITUNDER'])] }, { contract_families: ['even_odd'] });
+        h.engine.start();
+        await wait(200);
+        expect(h.conn.buys_()).toHaveLength(0);
         h.engine.stop();
     });
 
     it('the pair settles as ONE trade: the next signal is only bought after both legs have closed', async () => {
-        const h = make({ R_P8: [sig({ type: 'DIGITEVEN', label: 'Even' }), sig({ type: 'DIGITUNDER', label: 'Under 5' })] });
+        const h = make({ R_P9: [pairSig(['DIGITEVEN', 'DIGITUNDER'])] });
         h.engine.start();
         await wait(200);
         h.conn.settle(101, 0.95);
         await wait(200);
-        expect(h.conn.buys_()).toHaveLength(2); // one leg closed: still waiting for the other
+        expect(h.conn.buys_()).toHaveLength(2);
         h.conn.settle(102, -1);
         await wait(300);
         expect(h.logs.some(l => /Both sides closed: net -0.05/.test(l))).toBe(true);
-        expect(h.conn.buys_().length).toBeGreaterThan(2); // the next pair
+        expect(h.conn.buys_().length).toBeGreaterThan(2);
         h.engine.stop();
     });
 });

@@ -11,6 +11,8 @@ const ORDER: { key: string; label: string }[] = [
     { key: 'fall', label: 'Fall' },
     { key: 'only_up', label: 'Only Ups' },
     { key: 'only_down', label: 'Only Downs' },
+    { key: 'even_under5', label: 'Even + Under 5 together' },
+    { key: 'odd_over4', label: 'Odd + Over 4 together' },
 ];
 const shortName = (symbol: string) => symbol.replace(/^1HZ(\d+)V$/, 'V$1 (1s)');
 
@@ -52,8 +54,8 @@ export const RunBiasCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
                                 <tr key={key}>
                                     <td>{localize(label)}</td>
                                     {symbols.map(s => {
-                                        const row = snapshots[s].run_bias?.rows.find(r => r.key === key);
-                                        const entry = !!row && entryKeys(s).has(row.contract_type);
+                                        const row = snapshots[s].run_bias?.rows.find(r => r.key === key) ?? snapshots[s].run_bias?.pairs?.find(r => r.key === key);
+                                        const entry = !!row && ('types' in row ? entryKeys(s).has((row as { types: string[] }).types[0]) : entryKeys(s).has((row as { contract_type: string }).contract_type));
                                         return (
                                             <td key={s} className={entry ? 'is-win' : ''} title={row ? `${row.runs} runs, ${row.ticks_in_runs} ticks in runs, longest ${row.longest}. Replayed entry and exit ticks after the pattern: ${(row.levels ?? []).map(l => `${l.min_run}+ ticks: ${l.wins ?? 0}/${l.outcomes ?? 0} won${l.hit == null ? '' : ` (${l.hit}%)`}`).join(', ')}` : ''}>
                                                 {row ? `${(row.levels?.length ? row.levels.map(l => `${l.bias.toFixed(0)}%`).join(' / ') : `${row.bias.toFixed(0)}%`)}${row.current ? ` (${row.current})` : ''}` : '-'}
