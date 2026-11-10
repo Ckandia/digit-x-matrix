@@ -78,20 +78,19 @@ export type TAutoPilotConfig = {
      */
     max_latency_ms?: number;
     /**
-     * Pairs (default on): two contracts the SAME ticks favour are bought together, one stake each, on the same market and tick.
-     *   Even + Under 5 (digits 0, 2, 4)      Odd + Over 4 (digits 5, 7, 9)
-     *   Rise + Odd (price rose AND the last digit is odd; needs a higher-high trend)
-     *   Fall + Even (price fell AND the last digit is even; needs a lower-low trend)
-     * Only Ups + Only Downs are a pair too (see both_sides). The backend flags a pair when 2 or 3 ticks in a row favour BOTH legs. This is
-     * not a hedge: the legs can win together, one can win, or none can, so the cost and the odds are those of two separate bets. It only
-     * places the two bets on the same tick.
+     * Overlap pairs (default on). When Even and Under 5 BOTH have an entry on the same market at the same time (digits 0, 2, 4 are
+     * even AND under 5), or Odd and Over 4 both do (digits 5, 7, 9 are odd AND over 4), both contracts are bought together. This is not
+     * a hedge: they win together on 3 digits, one of them wins on 4 digits and none on 3, so the cost and the odds stay the same as two
+     * separate bets. It only places the two bets on the same tick.
      */
     overlap_pairs?: boolean;
     /**
-     * Pairs only (on in the risk presets; off when undefined): the AI trades ONLY pairs that fire together: Only Ups + Only Downs, Even + Under 5, Odd + Over 4,
-     * Rise + Odd and Fall + Even. A single-contract entry is never bought. Turn it off to get the single entries back as well.
+     * PAIR MODE (owner's logic test). Every live trade is a PAIR fired on the same tick, same market, same stake and duration:
+     *   Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even (see PAIR_PARTNER).
+     * The entry signal of the first contract of a pair (e.g. Rise) fires the pair; the two results count as one trade.
+     * Both contracts of a pair must be ticked, otherwise the signal is skipped. Off/undefined = the older behaviour (single contracts).
      */
-    pairs_only?: boolean;
+    pair_mode?: boolean;
 };
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
@@ -165,6 +164,22 @@ export const planRun = (stop_loss: number, hours = 24, trades_per_hour = DEFAULT
  * Every other contract (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch) is bought on one side only.
  */
 const bothSidesType = (type: string): boolean => type === 'RUNHIGH' || type === 'RUNLOW'; // ONLY Only Ups / Only Downs fire both sides
+/**
+ * Pair mode: the contract that is bought together with each signalled contract.
+ *   Only Ups + Only Downs | Even + Under 5 | Odd + Over 4 | Rise + Odd | Fall + Even
+ * Even / Odd also pair with Rise / Fall, but only when the Rise / Fall signal is the one that fires (Rise -> Odd, Fall -> Even);
+ * an Even or Odd signal on its own fires Even + Under 5 or Odd + Over 4.
+ */
+export const PAIR_PARTNER: Record<string, string> = {
+    RUNHIGH: 'RUNLOW',
+    RUNLOW: 'RUNHIGH',
+    DIGITEVEN: 'DIGITUNDER',
+    DIGITUNDER: 'DIGITEVEN',
+    DIGITODD: 'DIGITOVER',
+    DIGITOVER: 'DIGITODD',
+    CALL: 'DIGITODD',
+    PUT: 'DIGITEVEN',
+};
 /** Two live legs that settle together as ONE trade (the stake ladder, stop loss and hook see the combined result). */
 type TPair = { pending: number; profit: number; stake: number };
 
@@ -190,8 +205,8 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         protect_trades: 0,
         contract_families: ALL_FAMILY_KEYS,
         both_sides: true,
-        overlap_pairs: true, // Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even: both legs bought together
-        pairs_only: true, // the AI trades only pairs (these four plus Only Ups + Only Downs); no single-contract entries
+        pair_mode: true, // every trade is a pair fired together (see PAIR_PARTNER)
+        overlap_pairs: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
     };
 };
 
@@ -781,11 +796,10 @@ export class AutoPilotEngine {
             for (const sig of snap.signals) {
                 if (sig.family !== 'run_bias' || !sig.entry) continue;
                 if (sig.contract_type === 'ONETOUCH' || sig.contract_type === 'NOTOUCH') continue; // Touch / No Touch are not traded by the AI
-                // A PAIR signal: the ticks favour two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4; rose on an odd digit = Rise + Odd; fell on an even digit = Fall + Even).
+                // A PAIR signal: the digit sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4).
                 const pair_types = (sig as { pair_types?: string[] }).pair_types;
-                if (pair_types && (this.config.overlap_pairs === false || pair_types.length !== 2)) continue;
-                // Pairs only: a single-contract entry is not bought. Only Ups / Only Downs count as a pair (both_sides buys the two together).
-                if (this.config.pairs_only === true && !pair_types && !bothSidesType(sig.contract_type)) continue;
+                const pair_mode = this.config.pair_mode === true;
+                if (pair_types && (pair_types.length !== 2 || (!pair_mode && this.config.overlap_pairs === false))) continue;
                 if (allowed && !allowed.has(sig.contract_type)) continue;
                 if (pair_types && allowed && !allowed.has(pair_types[1])) continue;
                 if (pair_types && (this.blocked.get(`${symbol}|${pair_types[1]}`) ?? 0) > now) continue;
@@ -802,7 +816,17 @@ export class AutoPilotEngine {
                     this.seen_at.set(key, now);
                 }
                 if (now - first > MAX_SIGNAL_AGE_MS) continue;
-                const second = pair_types ? pair_types[1] : null;
+                // Pair mode: a single entry fires together with its partner (same market, same duration, both ticked).
+                let mode_partner: string | null = null;
+                if (!pair_types && pair_mode) {
+                    mode_partner = PAIR_PARTNER[sig.contract_type] ?? null;
+                    if (!mode_partner) continue;
+                    if (allowed && !allowed.has(mode_partner)) continue;
+                    if ((this.blocked.get(`${symbol}|${mode_partner}`) ?? 0) > now) continue;
+                    if (tradeTicks(symbol, mode_partner) !== ticks) continue;
+                }
+                // Only Ups / Only Downs keep their own both-sides buy (priced first so a winning side covers both stakes).
+                const second = pair_types ? pair_types[1] : mode_partner && !bothSidesType(sig.contract_type) ? mode_partner : null;
                 const candidate = (
                     second
                         ? {
@@ -817,13 +841,15 @@ export class AutoPilotEngine {
                                   contract_type: second,
                                   prediction: second === 'DIGITUNDER' ? 5 : second === 'DIGITOVER' ? 4 : undefined,
                                   label: OPPOSITE_LABEL[second] ?? second,
+                                  ...(pair_types ? {} : { run: undefined, trend: undefined }),
                               },
+                              pair_source: pair_types ? 'backend' : 'mode',
                           }
                         : { ...sig, symbol, duration_ticks: ticks }
                 ) as TCandidate;
                 found.push({
                     candidate,
-                    pair: !!second,
+                    pair: !!second || !!mode_partner,
                     confluence: sig.confluence === true,
                     idle: now - (this.last_traded.get(symbol) ?? 0), // how long this market has not been traded: a market never traded is the idlest
                 });
@@ -921,7 +947,7 @@ export class AutoPilotEngine {
         if (!candidate) {
             if (Date.now() - this.last_wait_emit > 30_000) {
                 this.last_wait_emit = Date.now();
-                this._emit({ phase: 'waiting', reason: 'waiting for the backend to signal a pair entry (2 or 3 ticks in a row in favour of both contracts of a pair)' });
+                this._emit({ phase: 'waiting', reason: 'waiting for the backend to signal an entry (3 or more ticks in a row in favour of a contract)' });
             }
             this.poll_timer = setTimeout(() => this._findAndEnter(stake, tag), SIGNAL_POLL_MS);
             return;
@@ -950,7 +976,7 @@ export class AutoPilotEngine {
         }
         const mate = (candidate as { pair_with?: TCandidate & { run_id?: number | string } }).pair_with;
         if (mate) {
-            // The pair uses up the run, and also the single entries of both its contracts at the same moment: no double buying.
+            // The pair uses up the run, and also the single Even / Under 5 (or Odd / Over 4) entries of the same moment: no double buying.
             if (run_id !== undefined) this.used_runs.add(`${mate.symbol}|${mate.contract_type}|${run_id}`);
             for (const sg of this.getSnapshots()[candidate.symbol]?.signals ?? []) {
                 if (sg.family === 'run_bias' && sg.entry && sg.run_id !== undefined && (sg.contract_type === candidate.contract_type || sg.contract_type === mate.contract_type)) {
@@ -1020,6 +1046,16 @@ export class AutoPilotEngine {
             setTimeout(() => this._findAndEnter(wanted_stake_in, tag), 4000);
             return;
         }
+        const gate_mate = (candidate as { pair_with?: TCandidate }).pair_with;
+        if (gate_mate && this.learner?.mode === 'edge_gate' && !this.learner.isTradable(gate_mate.symbol, gate_mate.contract_type, undefined, candidate.duration_ticks)) {
+            if (Date.now() - this.last_wait_emit > 30_000) {
+                this.last_wait_emit = Date.now();
+                this.hooks?.onLog?.('info', `Standing aside: ${gate_mate.label} (the other half of the pair) has no proven edge, so no real money is staked.`);
+                this._emit({ phase: 'waiting', reason: 'the pair has no proven edge yet: standing aside' });
+            }
+            setTimeout(() => this._findAndEnter(wanted_stake_in, tag), 4000);
+            return;
+        }
         // Capital protection: the first trades of a run never use more than the base stake.
         const protect = Math.max(0, Math.floor(this.config.protect_trades ?? 0));
         const wanted_stake = this.trade_count < protect ? Math.min(wanted_stake_in, this.config.stake) : wanted_stake_in;
@@ -1085,7 +1121,7 @@ export class AutoPilotEngine {
                     this.hooks?.onLog?.('info', `Pair skipped: ${err instanceof Error ? err.message : 'the second contract could not be built'}`);
                 }
             }
-        } else if (this.config.both_sides !== false && bothSidesType(candidate.contract_type)) {
+        } else if ((this.config.both_sides !== false || this.config.pair_mode === true) && bothSidesType(candidate.contract_type)) {
             const opposite_type = FLIP_PARTNER[candidate.contract_type];
             const live = this.connection.accountInfo?.balance;
             if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
@@ -1144,7 +1180,7 @@ export class AutoPilotEngine {
                     return;
                 }
                 this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
-                this.hooks?.onLog?.('info', `${overlap ? 'Overlap pair' : 'Both sides'} fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
+                this.hooks?.onLog?.('info', `${overlap ? ((candidate as { pair_source?: string }).pair_source === 'mode' ? 'Pair' : 'Overlap pair') : 'Both sides'} fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
                 const pair: TPair = { pending: 2, profit: 0, stake: Number((stake * 2).toFixed(2)) };
                 this._watch(candidate, stake, first.value, tried_duration, pair);
                 this._watch(partner, stake, second.value, tried_duration, pair);

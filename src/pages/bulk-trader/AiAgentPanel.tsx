@@ -603,7 +603,7 @@ const AiAgentPanel = ({
                     )}
 
                     <div className='ai-agent-panel__hint'>
-                        <InfoNote text={localize('Entries come from the backend: it reads the tick stream and flags a contract the moment consecutive ticks favour it in a market whose bias favours it: Even/Odd and Over 4/Under 5 on 2 AND on 3 ticks (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4), Only Ups/Only Downs from 2 ticks (both are bought together, and only when a winning side pays more than both stakes), Rise/Fall from 2 ticks (Rise and Only Ups only in a confirmed higher-high trend, Fall and Only Downs only in a lower-low trend, checked by the backend). With Pairs only on, only two-contract entries are bought: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd and Fall + Even. The AI buys on the very next tick after the signal, across all markets. There is no recovery ladder and no paper test first.')} />
+                        <InfoNote text={localize('Entries come from the backend: it reads the tick stream and flags a contract the moment consecutive ticks favour it in a market whose bias favours it: Even/Odd and Over 4/Under 5 on 2 AND on 3 ticks (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4), Only Ups/Only Downs from 2 ticks (both are bought together, and only when a winning side pays more than both stakes), Rise/Fall from 2 ticks (Rise and Only Ups only in a confirmed higher-high trend, Fall and Only Downs only in a lower-low trend, checked by the backend). The AI buys on the very next tick after the signal, across all markets. There is no recovery ladder and no paper test first.')} />
                     </div>
                     {is_running && (
                         <div className='ai-agent-panel__hint'>
@@ -636,6 +636,16 @@ const AiAgentPanel = ({
                         <label style={{ display: 'block' }}>
                             <input
                                 type='checkbox'
+                                checked={config?.pair_mode === true}
+                                disabled={!config || status === 'connecting'}
+                                onChange={e => config && setConfig({ ...config, pair_mode: e.target.checked })}
+                            />{' '}
+                            {localize('Fire in pairs')}{' '}
+                            <InfoNote text={localize('Every trade is a pair bought on the same tick, same market, same stake: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even. A signal for Rise fires Rise + Odd, Fall fires Fall + Even, Even fires Even + Under 5, Odd fires Odd + Over 4, and Only Ups or Only Downs fire both. Both contracts of a pair must be ticked. The two results count as one trade. This is a logic test: both legs pay under 2x, so each pair costs a little on average, and the opposite legs can both lose.')} />
+                        </label>
+                        <label style={{ display: 'block' }}>
+                            <input
+                                type='checkbox'
                                 checked={config?.both_sides !== false}
                                 disabled={!config || status === 'connecting'}
                                 onChange={e => config && setConfig({ ...config, both_sides: e.target.checked })}
@@ -650,17 +660,7 @@ const AiAgentPanel = ({
                                 onChange={e => config && setConfig({ ...config, overlap_pairs: e.target.checked })}
                             />{' '}
                             {localize('Pairs')}{' '}
-                            <InfoNote text={localize('Two contracts that the same ticks favour are bought together on the same tick, one stake each: Even + Under 5 (digits 0, 2, 4), Odd + Over 4 (digits 5, 7, 9), Rise + Odd (price rose and the last digit is odd, in a higher-high trend) and Fall + Even (price fell and the last digit is even, in a lower-low trend). This is not a hedge: the two legs can win together, one can win, or neither can, so you still pay two stakes and the odds do not change.')} />
-                        </label>
-                        <label style={{ display: 'block' }}>
-                            <input
-                                type='checkbox'
-                                checked={config?.pairs_only === true}
-                                disabled={!config || status === 'connecting'}
-                                onChange={e => config && setConfig({ ...config, pairs_only: e.target.checked })}
-                            />{' '}
-                            {localize('Pairs only')}{' '}
-                            <InfoNote text={localize('The AI trades only pairs that fire together: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd and Fall + Even. A single contract is never bought on its own. Both contracts of a pair must be ticked above.')} />
+                            <InfoNote text={localize('When the last 2 or 3 digits all favour two contracts at once (0, 2, 4 are both even and under 5; 5, 7, 9 are both odd and over 4), the backend flags it and the AI buys both together, the way Only Ups and Only Downs are bought. This is not a hedge: both win on 3 digits, one wins on 4 digits and neither wins on 3, so you still pay two stakes and the odds do not change.')} />
                         </label>
                     </div>
                     <label className='ai-agent-panel__hint'>

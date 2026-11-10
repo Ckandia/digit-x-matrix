@@ -2,10 +2,10 @@
 
 Where things stand (latest first). This file is the project's memory: Claude's own memory feature is off in Settings, so the progress is saved here and in FIXES-AND-SETUP.md.
 
-## Latest build (pairs only)
-- Owner's logic test: the AI trades ONLY pairs that fire together, one stake per leg, same market and tick: Only Ups + Only Downs, Even + Under 5 (digits 0,2,4), Odd + Over 4 (digits 5,7,9), Rise + Odd (price rose AND odd digit; needs a bullish 1-tick trend) and Fall + Even (price fell AND even digit; needs a bearish trend). Single-contract entries are not bought (config `pairs_only`, on in the presets, checkbox "Pairs only" in the AI tab; off = singles come back).
-- Backend: `backend/src/runBias.js` `PAIR_PATTERNS` has the two new pairs (a tick counts when it favours both legs); pair run ids are `<start>:<level>:<pair key>:pair`. Pairs still need bias >= 55 and a non-negative replayed net. Checks: `npm run check:runbias` passes (new cases added); `overlap-pairs.spec.ts` has new cases (ran in a small stand-in runner, 14/14); full jest/tsc NOT run here.
-- Evidence still stands: pairs cost two stakes at under 2x payout, so they lose the payout cost on average.
+## Latest build (pair mode: every trade is a pair fired together)
+- New AI Trader checkbox **Fire in pairs** (`pair_mode`, on by default in the presets). Pairs: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even (`PAIR_PARTNER` in `autoPilotEngine.ts`). The entry signal of one contract fires the pair on the same tick, market, stake and duration; the two results count as one trade (ladder, stop loss, take profit see the net). Rise fires Rise + Odd, Fall fires Fall + Even; Even / Odd signals fire Even + Under 5 / Odd + Over 4. Both contracts must be ticked or the signal is skipped. Only Ups / Downs keep the payout-covers-both-stakes check.
+- Tests added in `__tests__/overlap-pairs.spec.ts` (pair mode block). NOT run here (no node_modules): run `npx jest` and `tsc` before relying on it.
+- Logic test only: every contract pays under 2x, so pairs lose a little on average.
 
 ## Current state
 - Frontend: Deriv Bot app + our tabs (Bulk Trades, AI Trader, Journal). Engine: `src/pages/bulk-trader/autoPilotEngine.ts` (runs in the browser).

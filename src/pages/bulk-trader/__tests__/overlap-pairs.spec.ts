@@ -143,59 +143,48 @@ describe('when the digit sequence favours two contracts at once, both are bought
     });
 });
 
-describe('price + digit pairs and pairs-only mode', () => {
-    it('Rise + Odd: both bought together, Rise with no barrier and Odd', async () => {
-        const h = make({ R_Q1: [{ ...(pairSig(['CALL', 'DIGITODD']) as object), trend: 'bullish' } as never] });
+describe('pair mode (Rise + Odd, Fall + Even, Even + Under 5, Odd + Over 4)', () => {
+    const types = (h: ReturnType<typeof make>) => h.conn.buys_().map((b: any) => b.parameters.contract_type).sort();
+    const cases: [string, string, string[]][] = [
+        ['CALL', 'Rise', ['CALL', 'DIGITODD']],
+        ['PUT', 'Fall', ['DIGITEVEN', 'PUT']],
+        ['DIGITEVEN', 'Even', ['DIGITEVEN', 'DIGITUNDER']],
+        ['DIGITODD', 'Odd', ['DIGITODD', 'DIGITOVER']],
+    ];
+    for (const [type, label, expected] of cases) {
+        it(`a ${label} signal fires ${expected.join(' + ')} together`, async () => {
+            const h = make({ R_M1: [{ ...(sig({ type, label }) as object), trend: type === 'CALL' ? 'bullish' : type === 'PUT' ? 'bearish' : undefined } as never] }, { pair_mode: true });
+            h.engine.start();
+            await wait(200);
+            expect(types(h)).toEqual(expected);
+            h.engine.stop();
+        });
+    }
+
+    it('Only Ups fires Only Ups + Only Downs', async () => {
+        const h = make({ R_M2: [{ ...(sig({ type: 'RUNHIGH', label: 'Only Ups' }) as object), trend: 'bullish' } as never] }, { pair_mode: true, both_sides: false });
         h.engine.start();
         await wait(200);
-        expect(buyTypes(h)).toEqual(['CALL', 'DIGITODD']);
-        expect(h.logs.some(l => /Overlap pair fired together: Rise \+ Odd/.test(l))).toBe(true);
+        expect(types(h)).toEqual(['RUNHIGH', 'RUNLOW']);
         h.engine.stop();
     });
 
-    it('Fall + Even: both bought together', async () => {
-        const h = make({ R_Q2: [{ ...(pairSig(['PUT', 'DIGITEVEN']) as object), trend: 'bearish' } as never] });
-        h.engine.start();
-        await wait(200);
-        expect(buyTypes(h)).toEqual(['DIGITEVEN', 'PUT']);
-        expect(h.logs.some(l => /Overlap pair fired together: Fall \+ Even/.test(l))).toBe(true);
-        h.engine.stop();
-    });
-
-    it('Rise + Odd needs both Rise / Fall and Even / Odd to be ticked', async () => {
-        const h = make({ R_Q3: [{ ...(pairSig(['CALL', 'DIGITODD']) as object), trend: 'bullish' } as never] }, { contract_families: ['even_odd'] });
+    it('skips the signal when the partner contract is not ticked', async () => {
+        const h = make({ R_M3: [{ ...(sig({ type: 'CALL', label: 'Rise' }) as object), trend: 'bullish' } as never] }, { pair_mode: true, contract_families: ['rise_fall'] });
         h.engine.start();
         await wait(200);
         expect(h.conn.buys_()).toHaveLength(0);
         h.engine.stop();
     });
 
-    it('pairs only: a single Even entry is not bought, a pair is', async () => {
-        const single = make({ R_Q4: [sig({ type: 'DIGITEVEN', label: 'Even' })] }, { pairs_only: true });
-        single.engine.start();
-        await wait(200);
-        expect(single.conn.buys_()).toHaveLength(0);
-        single.engine.stop();
-        const pair = make({ R_Q5: [sig({ type: 'DIGITEVEN', label: 'Even' }), pairSig(['DIGITEVEN', 'DIGITUNDER'])] }, { pairs_only: true });
-        pair.engine.start();
-        await wait(200);
-        expect(buyTypes(pair)).toEqual(['DIGITEVEN', 'DIGITUNDER']);
-        pair.engine.stop();
-    });
-
-    it('pairs only: Only Ups still fires together with Only Downs', async () => {
-        const h = make({ R_Q6: [{ ...(sig({ type: 'RUNHIGH', label: 'Only Ups' }) as object), trend: 'bullish' } as never] }, { pairs_only: true });
+    it('the pair settles as one trade', async () => {
+        const h = make({ R_M4: [{ ...(sig({ type: 'PUT', label: 'Fall' }) as object), trend: 'bearish' } as never] }, { pair_mode: true });
         h.engine.start();
         await wait(200);
-        expect(buyTypes(h)).toEqual(['RUNHIGH', 'RUNLOW']);
-        h.engine.stop();
-    });
-
-    it('without pairs only, single entries are still bought', async () => {
-        const h = make({ R_Q7: [sig({ type: 'DIGITEVEN', label: 'Even' })] });
-        h.engine.start();
+        h.conn.settle(101, 0.95);
+        h.conn.settle(102, -1);
         await wait(200);
-        expect(h.conn.buys_()).toHaveLength(1);
+        expect(h.logs.some(l => /Both sides closed: net -0.05/.test(l))).toBe(true);
         h.engine.stop();
     });
 });

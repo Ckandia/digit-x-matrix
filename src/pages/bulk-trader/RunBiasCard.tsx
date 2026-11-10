@@ -13,8 +13,6 @@ const ORDER: { key: string; label: string }[] = [
     { key: 'only_down', label: 'Only Downs' },
     { key: 'even_under5', label: 'Even + Under 5 together' },
     { key: 'odd_over4', label: 'Odd + Over 4 together' },
-    { key: 'rise_odd', label: 'Rise + Odd together' },
-    { key: 'fall_even', label: 'Fall + Even together' },
 ];
 const shortName = (symbol: string) => symbol.replace(/^1HZ(\d+)V$/, 'V$1 (1s)');
 

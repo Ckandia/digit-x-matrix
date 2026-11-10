@@ -182,53 +182,6 @@ const pairSigs = computeRunSignals(computeRunBias(px([...pairSeq, 8, 2, 4]), 2),
 assert.ok(pairSigs.length > 0 && pairSigs.every(x => x.pair_types.length === 2 && x.family === 'run_bias'));
 for (const x of pairSigs.filter(y => y.entry)) assert.ok(String(x.run_id).endsWith(':pair'));
 
-// ---- Price + digit pairs: Rise + Odd (rose AND odd digit), Fall + Even (fell AND even digit)
-assert.deepEqual(PAIR_PATTERNS.map(x => x.key), ['even_under5', 'odd_over4', 'rise_odd', 'fall_even']);
-assert.deepEqual(PAIR_PATTERNS[2].types, ['CALL', 'DIGITODD']);
-assert.deepEqual(PAIR_PATTERNS[3].types, ['PUT', 'DIGITEVEN']);
-// a walk built from [direction, last digit] steps, in cents: every step really moves the price the way it says and ends on that digit
-const pwalk = steps => {
-    let cents = 10000;
-    const out = [];
-    for (const [dir, d] of steps) {
-        const want = ((d - (cents % 10)) + 10) % 10 || 10; // the smallest positive move that lands on digit d
-        cents += dir === 'up' ? want : -want;
-        out.push(cents / 100);
-    }
-    return out;
-};
-const mixed = Array.from({ length: 61 }, (_, i) => (i % 2 ? ['up', 3] : ['down', 8])); // ends on a fall on digit 8: breaks a Rise + Odd run
-const mixedFall = mixed.slice(0, 60); // ends on a rise on digit 3: breaks a Fall + Even run
-const pRow = (steps, key) => computeRunBias(pwalk(steps), 2).pairs.find(r => r.key === key);
-assert.equal(pRow([...mixed, ['up', 3], ['up', 7]], 'rise_odd').current, 2, 'up on 3, up on 7: rose AND odd twice');
-assert.equal(pRow([...mixed, ['up', 3], ['up', 4]], 'rise_odd').current, 0, 'up on an even digit breaks Rise + Odd');
-assert.equal(pRow([...mixed, ['down', 3], ['up', 7]], 'rise_odd').current, 1, 'a fall on an odd digit is not a Rise + Odd tick');
-assert.equal(pRow([...mixedFall, ['down', 2], ['down', 6], ['down', 0]], 'fall_even').current, 3, 'down on 2, 6, 0: fell AND even three times');
-assert.equal(pRow([...mixedFall, ['down', 2], ['up', 6]], 'fall_even').current, 0, 'a rise on an even digit is not a Fall + Even tick');
-// both legs win when the exit tick rose from the entry tick and lands on an odd digit (and the mirror for Fall + Even)
-const riseOddSeq = [];
-for (let k = 0; k < 30; k++) riseOddSeq.push(['up', 3], ['up', 7], ['down', 4], ['up', 9], ['down', 6], ['up', 8]); // run 3,7 -> entry 4 -> exit 9: up from entry, odd (no Fall + Even run in the mix)
-const ro = computeRunBias(pwalk(riseOddSeq), 2).pairs.find(r => r.key === 'rise_odd').levels[0];
-assert.ok(ro.outcomes >= 10 && ro.avg_net > 1.5, 'Rise + Odd won both legs after every replay');
-// the 1-tick trend gates the price + digit pairs: Rise + Odd needs bullish, Fall + Even needs bearish; the digit pairs need none
-const risingScan = computeRunBias(pwalk([...riseOddSeq, ['up', 3], ['up', 7]]), 2);
-const pairEntry = (scan, key) => computeRunSignals(scan, 'T').filter(x => x.entry && x.pair_types && x.pair_types[0] === PAIR_PATTERNS.find(pp => pp.key === key).types[0] && x.pair_types[1] === PAIR_PATTERNS.find(pp => pp.key === key).types[1]);
-for (const [trend, expected] of [['bullish', true], ['bearish', false], [null, false]]) {
-    const gated = { ...risingScan, trend };
-    assert.equal(pairEntry(gated, 'rise_odd').length > 0, expected, `Rise + Odd with trend ${trend}`);
-}
-const riseSig = pairEntry({ ...risingScan, trend: 'bullish' }, 'rise_odd')[0];
-assert.equal(riseSig.trend, 'bullish');
-assert.deepEqual(riseSig.pair_types, ['CALL', 'DIGITODD']);
-assert.ok(String(riseSig.run_id).endsWith(':rise_odd:pair'), 'every pair has its own run id, so two pairs on the same moment are never confused');
-const fallEvenSeq = [];
-for (let k = 0; k < 30; k++) fallEvenSeq.push(['down', 2], ['down', 6], ['up', 5], ['down', 0], ['up', 3], ['down', 7]); // run 2,6 -> entry up 5 -> exit down 0: fell from entry, even (no Rise + Odd run in the mix)
-const fallScan = computeRunBias(pwalk([...fallEvenSeq, ['down', 2], ['down', 6]]), 2);
-assert.equal(pairEntry({ ...fallScan, trend: 'bearish' }, 'fall_even').length > 0, true, 'Fall + Even fires in a bearish trend');
-assert.equal(pairEntry({ ...fallScan, trend: 'bullish' }, 'fall_even').length, 0, 'Fall + Even does not fire in a bullish trend');
-// the existing digit pairs do not look at the trend
-assert.ok(computeRunSignals({ ...computeRunBias(px([...pairSeq, 8, 2, 4]), 2), trend: null }, 'T').some(x => x.entry && x.pair_types && x.pair_types[0] === 'DIGITEVEN'), 'Even + Under 5 needs no trend');
-
 // signals shape
 const scan = computeRunBias(rising, 2, 5000);
 for (const s of computeRunSignals(scan, 'R_TEST')) {
