@@ -142,3 +142,60 @@ describe('when the digit sequence favours two contracts at once, both are bought
         h.engine.stop();
     });
 });
+
+describe('price + digit pairs and pairs-only mode', () => {
+    it('Rise + Odd: both bought together, Rise with no barrier and Odd', async () => {
+        const h = make({ R_Q1: [{ ...(pairSig(['CALL', 'DIGITODD']) as object), trend: 'bullish' } as never] });
+        h.engine.start();
+        await wait(200);
+        expect(buyTypes(h)).toEqual(['CALL', 'DIGITODD']);
+        expect(h.logs.some(l => /Overlap pair fired together: Rise \+ Odd/.test(l))).toBe(true);
+        h.engine.stop();
+    });
+
+    it('Fall + Even: both bought together', async () => {
+        const h = make({ R_Q2: [{ ...(pairSig(['PUT', 'DIGITEVEN']) as object), trend: 'bearish' } as never] });
+        h.engine.start();
+        await wait(200);
+        expect(buyTypes(h)).toEqual(['DIGITEVEN', 'PUT']);
+        expect(h.logs.some(l => /Overlap pair fired together: Fall \+ Even/.test(l))).toBe(true);
+        h.engine.stop();
+    });
+
+    it('Rise + Odd needs both Rise / Fall and Even / Odd to be ticked', async () => {
+        const h = make({ R_Q3: [{ ...(pairSig(['CALL', 'DIGITODD']) as object), trend: 'bullish' } as never] }, { contract_families: ['even_odd'] });
+        h.engine.start();
+        await wait(200);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
+    });
+
+    it('pairs only: a single Even entry is not bought, a pair is', async () => {
+        const single = make({ R_Q4: [sig({ type: 'DIGITEVEN', label: 'Even' })] }, { pairs_only: true });
+        single.engine.start();
+        await wait(200);
+        expect(single.conn.buys_()).toHaveLength(0);
+        single.engine.stop();
+        const pair = make({ R_Q5: [sig({ type: 'DIGITEVEN', label: 'Even' }), pairSig(['DIGITEVEN', 'DIGITUNDER'])] }, { pairs_only: true });
+        pair.engine.start();
+        await wait(200);
+        expect(buyTypes(pair)).toEqual(['DIGITEVEN', 'DIGITUNDER']);
+        pair.engine.stop();
+    });
+
+    it('pairs only: Only Ups still fires together with Only Downs', async () => {
+        const h = make({ R_Q6: [{ ...(sig({ type: 'RUNHIGH', label: 'Only Ups' }) as object), trend: 'bullish' } as never] }, { pairs_only: true });
+        h.engine.start();
+        await wait(200);
+        expect(buyTypes(h)).toEqual(['RUNHIGH', 'RUNLOW']);
+        h.engine.stop();
+    });
+
+    it('without pairs only, single entries are still bought', async () => {
+        const h = make({ R_Q7: [sig({ type: 'DIGITEVEN', label: 'Even' })] });
+        h.engine.start();
+        await wait(200);
+        expect(h.conn.buys_()).toHaveLength(1);
+        h.engine.stop();
+    });
+});

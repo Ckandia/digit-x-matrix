@@ -78,12 +78,20 @@ export type TAutoPilotConfig = {
      */
     max_latency_ms?: number;
     /**
-     * Overlap pairs (default on). When Even and Under 5 BOTH have an entry on the same market at the same time (digits 0, 2, 4 are
-     * even AND under 5), or Odd and Over 4 both do (digits 5, 7, 9 are odd AND over 4), both contracts are bought together. This is not
-     * a hedge: they win together on 3 digits, one of them wins on 4 digits and none on 3, so the cost and the odds stay the same as two
-     * separate bets. It only places the two bets on the same tick.
+     * Pairs (default on): two contracts the SAME ticks favour are bought together, one stake each, on the same market and tick.
+     *   Even + Under 5 (digits 0, 2, 4)      Odd + Over 4 (digits 5, 7, 9)
+     *   Rise + Odd (price rose AND the last digit is odd; needs a higher-high trend)
+     *   Fall + Even (price fell AND the last digit is even; needs a lower-low trend)
+     * Only Ups + Only Downs are a pair too (see both_sides). The backend flags a pair when 2 or 3 ticks in a row favour BOTH legs. This is
+     * not a hedge: the legs can win together, one can win, or none can, so the cost and the odds are those of two separate bets. It only
+     * places the two bets on the same tick.
      */
     overlap_pairs?: boolean;
+    /**
+     * Pairs only (on in the risk presets; off when undefined): the AI trades ONLY pairs that fire together: Only Ups + Only Downs, Even + Under 5, Odd + Over 4,
+     * Rise + Odd and Fall + Even. A single-contract entry is never bought. Turn it off to get the single entries back as well.
+     */
+    pairs_only?: boolean;
 };
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
@@ -182,7 +190,8 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         protect_trades: 0,
         contract_families: ALL_FAMILY_KEYS,
         both_sides: true,
-        overlap_pairs: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
+        overlap_pairs: true, // Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even: both legs bought together
+        pairs_only: true, // the AI trades only pairs (these four plus Only Ups + Only Downs); no single-contract entries
     };
 };
 
@@ -772,9 +781,11 @@ export class AutoPilotEngine {
             for (const sig of snap.signals) {
                 if (sig.family !== 'run_bias' || !sig.entry) continue;
                 if (sig.contract_type === 'ONETOUCH' || sig.contract_type === 'NOTOUCH') continue; // Touch / No Touch are not traded by the AI
-                // A PAIR signal: the digit sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4).
+                // A PAIR signal: the ticks favour two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4; rose on an odd digit = Rise + Odd; fell on an even digit = Fall + Even).
                 const pair_types = (sig as { pair_types?: string[] }).pair_types;
                 if (pair_types && (this.config.overlap_pairs === false || pair_types.length !== 2)) continue;
+                // Pairs only: a single-contract entry is not bought. Only Ups / Only Downs count as a pair (both_sides buys the two together).
+                if (this.config.pairs_only === true && !pair_types && !bothSidesType(sig.contract_type)) continue;
                 if (allowed && !allowed.has(sig.contract_type)) continue;
                 if (pair_types && allowed && !allowed.has(pair_types[1])) continue;
                 if (pair_types && (this.blocked.get(`${symbol}|${pair_types[1]}`) ?? 0) > now) continue;
@@ -910,7 +921,7 @@ export class AutoPilotEngine {
         if (!candidate) {
             if (Date.now() - this.last_wait_emit > 30_000) {
                 this.last_wait_emit = Date.now();
-                this._emit({ phase: 'waiting', reason: 'waiting for the backend to signal an entry (3 or more ticks in a row in favour of a contract)' });
+                this._emit({ phase: 'waiting', reason: 'waiting for the backend to signal a pair entry (2 or 3 ticks in a row in favour of both contracts of a pair)' });
             }
             this.poll_timer = setTimeout(() => this._findAndEnter(stake, tag), SIGNAL_POLL_MS);
             return;
@@ -939,7 +950,7 @@ export class AutoPilotEngine {
         }
         const mate = (candidate as { pair_with?: TCandidate & { run_id?: number | string } }).pair_with;
         if (mate) {
-            // The pair uses up the run, and also the single Even / Under 5 (or Odd / Over 4) entries of the same moment: no double buying.
+            // The pair uses up the run, and also the single entries of both its contracts at the same moment: no double buying.
             if (run_id !== undefined) this.used_runs.add(`${mate.symbol}|${mate.contract_type}|${run_id}`);
             for (const sg of this.getSnapshots()[candidate.symbol]?.signals ?? []) {
                 if (sg.family === 'run_bias' && sg.entry && sg.run_id !== undefined && (sg.contract_type === candidate.contract_type || sg.contract_type === mate.contract_type)) {

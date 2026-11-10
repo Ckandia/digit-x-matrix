@@ -2,6 +2,11 @@
 
 Where things stand (latest first). This file is the project's memory: Claude's own memory feature is off in Settings, so the progress is saved here and in FIXES-AND-SETUP.md.
 
+## Latest build (pairs only)
+- Owner's logic test: the AI trades ONLY pairs that fire together, one stake per leg, same market and tick: Only Ups + Only Downs, Even + Under 5 (digits 0,2,4), Odd + Over 4 (digits 5,7,9), Rise + Odd (price rose AND odd digit; needs a bullish 1-tick trend) and Fall + Even (price fell AND even digit; needs a bearish trend). Single-contract entries are not bought (config `pairs_only`, on in the presets, checkbox "Pairs only" in the AI tab; off = singles come back).
+- Backend: `backend/src/runBias.js` `PAIR_PATTERNS` has the two new pairs (a tick counts when it favours both legs); pair run ids are `<start>:<level>:<pair key>:pair`. Pairs still need bias >= 55 and a non-negative replayed net. Checks: `npm run check:runbias` passes (new cases added); `overlap-pairs.spec.ts` has new cases (ran in a small stand-in runner, 14/14); full jest/tsc NOT run here.
+- Evidence still stands: pairs cost two stakes at under 2x payout, so they lose the payout cost on average.
+
 ## Current state
 - Frontend: Deriv Bot app + our tabs (Bulk Trades, AI Trader, Journal). Engine: `src/pages/bulk-trader/autoPilotEngine.ts` (runs in the browser).
 - Backend (`backend/`, Render): market feed + 24/7 paper trader + signals + journal/learning endpoints.
