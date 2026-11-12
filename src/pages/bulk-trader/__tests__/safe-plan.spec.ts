@@ -70,9 +70,9 @@ describe('24-hour run plan', () => {
 });
 
 describe('24-hour defaults (no recovery ladder)', () => {
-    it('presets use the reverse martingale (a loss never raises the stake), the run-plan base stake, no pacing and every contract family', () => {
+    it('presets use the loss-only martingale (x1.5), the run-plan base stake, no pacing and every contract family', () => {
         const c = buildConfigFromPreset('moderate', 10000);
-        expect(c.recovery_mode).toBe('reverse');
+        expect(c.recovery_mode).toBe('martingale');
         expect(c.stake).toBe(planRun(c.stop_loss).stake);
         expect(c.max_trades_per_hour).toBe(0); // a signal is bought the next tick, not when a timer allows
         expect(c.contract_families).toEqual(ALL_FAMILY_KEYS);

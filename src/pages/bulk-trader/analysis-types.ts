@@ -82,6 +82,9 @@ export type TDigitSignal = {
     entry?: boolean;
     /** run_bias family only: the digit sequence favours TWO contracts at once (Even + Under 5, Odd + Over 4); the AI buys both together. */
     pair_types?: string[];
+    /** run_bias pair signals: which of the five pairs this is (even_under5, odd_over4, rise_odd, fall_even). */
+    pair_key?: string;
+    trend?: string;
     /** run_bias family only: every analysed run length of this contract (2 AND 3 ticks for the digit contracts) favours it at once. */
     confluence?: boolean;
     /** run_bias family only: which run of ticks this is (the tick count when it started), so one run is traded once. */

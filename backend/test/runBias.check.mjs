@@ -182,6 +182,42 @@ const pairSigs = computeRunSignals(computeRunBias(px([...pairSeq, 8, 2, 4]), 2),
 assert.ok(pairSigs.length > 0 && pairSigs.every(x => x.pair_types.length === 2 && x.family === 'run_bias'));
 for (const x of pairSigs.filter(y => y.entry)) assert.ok(String(x.run_id).endsWith(':pair'));
 
+// ---- Cross pairs: Rise + Odd (price up AND odd digit) and Fall + Even (price down AND even digit)
+assert.deepEqual(PAIR_PATTERNS.map(x => x.key), ['even_under5', 'odd_over4', 'rise_odd', 'fall_even']);
+assert.deepEqual(PAIR_PATTERNS[2].types, ['CALL', 'DIGITODD']);
+assert.deepEqual(PAIR_PATTERNS[3].types, ['PUT', 'DIGITEVEN']);
+// a steady climb of +0.02 from x.01: every tick is a rise AND ends in an odd digit
+const climb = Array.from({ length: 80 }, (_, i) => Number((100.01 + i * 0.02).toFixed(2)));
+const climbScan = computeRunBias(climb, 2);
+const ro = climbScan.pairs.find(r => r.key === 'rise_odd');
+assert.ok(ro.current >= 3, 'rising ticks with odd digits form a Rise + Odd run');
+assert.equal(climbScan.pairs.find(r => r.key === 'fall_even').current, 0);
+// a steady fall of -0.02 from x.00: every tick is a fall AND ends in an even digit
+const drop = Array.from({ length: 80 }, (_, i) => Number((120 - i * 0.02).toFixed(2)));
+const dropScan = computeRunBias(drop, 2);
+assert.ok(dropScan.pairs.find(r => r.key === 'fall_even').current >= 3, 'falling ticks with even digits form a Fall + Even run');
+// a rise that ends on an EVEN digit does not count for Rise + Odd
+const evenClimb = Array.from({ length: 80 }, (_, i) => Number((100 + i * 0.02).toFixed(2)));
+assert.equal(computeRunBias(evenClimb, 2).pairs.find(r => r.key === 'rise_odd').current, 0);
+// cross pair signals carry both types, the pair key and the trend; they are only entries in the matching trend
+// a zig-zag with higher highs (bullish), ending on a run of rising ticks that all end in an odd digit
+const nextWith = (last, odd) => { let v = Math.round(last * 100) + 1; while ((v % 10 % 2 === 1) !== odd) v += 1; return v / 100; };
+const zig = [];
+let zp = 100;
+for (let k = 0; k < 17; k++) { for (let j = 0; j < 3; j++) { zp = Number((zp + 0.04).toFixed(2)); zig.push(zp); } zp = Number((zp - 0.09).toFixed(2)); zig.push(zp); }
+for (let j = 0; j < 3; j++) { zp = nextWith(zp, true); zig.push(zp); }
+const zigScan = computeRunBias(zig, 2);
+assert.equal(zigScan.trend, 'bullish');
+assert.ok(zigScan.pairs.find(r => r.key === 'rise_odd').current >= 3);
+const crossSigs = computeRunSignals(zigScan, 'T').filter(x => x.pair_key === 'rise_odd');
+assert.ok(crossSigs.length > 0 && crossSigs.every(x => x.pair_types[0] === 'CALL' && x.pair_types[1] === 'DIGITODD' && x.trend === 'bullish'));
+assert.ok(computeRunSignals(zigScan, 'T').filter(x => x.pair_key === 'fall_even').every(x => !x.entry), 'no Fall + Even entry in a bullish market');
+// without the bullish trend (a straight climb has no swing highs) Rise + Odd is never an entry
+assert.equal(climbScan.trend, 'none');
+assert.ok(computeRunSignals(climbScan, 'T').filter(x => x.pair_key === 'rise_odd').every(x => !x.entry), 'no trend, no Rise + Odd entry');
+// every pair signal carries its key
+for (const x of computeRunSignals(zigScan, 'T').filter(y => y.pair_types)) assert.ok(typeof x.pair_key === 'string');
+
 // signals shape
 const scan = computeRunBias(rising, 2, 5000);
 for (const s of computeRunSignals(scan, 'R_TEST')) {

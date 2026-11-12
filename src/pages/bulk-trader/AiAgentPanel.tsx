@@ -11,6 +11,8 @@ import {
     ALL_FAMILY_KEYS,
     DEFAULT_MAX_LATENCY_MS,
     CONTRACT_FAMILIES,
+    TRADE_PAIRS,
+    ALL_PAIR_KEYS,
     RISK_PRESETS,
     TAutoPilotConfig,
     TAutoPilotEvent,
@@ -542,6 +544,13 @@ const AiAgentPanel = ({
                                 </>
                             )}
                             <FieldBox
+                                label={localize('Minimum signal strength (0-100, 20 = 60% measured)')}
+                                value={config.min_confidence ?? 0}
+                                step={5}
+                                disabled={status === 'connecting'}
+                                onChange={v => updateField('min_confidence', v)}
+                            />
+                            <FieldBox
                                 label={localize('Stop loss ({{pct}}%)', { pct: RISK_PRESETS[riskLevel].stop_loss_pct })}
                                 value={config.stop_loss}
                                 disabled={status === 'connecting'}
@@ -612,7 +621,36 @@ const AiAgentPanel = ({
                         </div>
                     )}
                     <div className='ai-agent-panel__hint'>
-                        <strong>{localize('Contracts the AI may trade')}</strong>
+                        <label style={{ display: 'block' }}>
+                            <input
+                                type='checkbox'
+                                checked={config?.pairs_only === true}
+                                disabled={!config || status === 'connecting'}
+                                onChange={e => config && setConfig({ ...config, pairs_only: e.target.checked, pair_keys: config.pair_keys ?? ALL_PAIR_KEYS })}
+                            />{' '}
+                            <strong>{localize('Pairs only: fire both contracts at the same time')}</strong>{' '}
+                            <InfoNote text={localize('The AI trades only the ticked pairs and buys both legs of a pair on the same tick, same market, same stake each; the two results count as one trade. A single contract is never bought in this mode. Not a hedge: you pay two stakes and each leg still pays under 2x, so a pair can lose both legs.')} />
+                        </label>
+                        {config?.pairs_only === true &&
+                            TRADE_PAIRS.map(pair => (
+                                <label key={pair.key} style={{ display: 'block', marginLeft: 18 }}>
+                                    <input
+                                        type='checkbox'
+                                        checked={(config.pair_keys ?? ALL_PAIR_KEYS).includes(pair.key)}
+                                        disabled={status === 'connecting'}
+                                        onChange={e => {
+                                            const current = config.pair_keys ?? ALL_PAIR_KEYS;
+                                            const next = e.target.checked ? [...current, pair.key] : current.filter(k => k !== pair.key);
+                                            if (next.length === 0) return; // at least one pair must stay ticked
+                                            setConfig({ ...config, pair_keys: Array.from(new Set(next)) });
+                                        }}
+                                    />{' '}
+                                    {localize(pair.label)}
+                                </label>
+                            ))}
+                    </div>
+                    <div className='ai-agent-panel__hint'>
+                        <strong>{localize('Contracts the AI may trade')}</strong>{config?.pairs_only === true ? ` (${localize('not used while Pairs only is on')})` : ''}
                         {CONTRACT_FAMILIES.map(family => {
                             const ticked = (config?.contract_families ?? ALL_FAMILY_KEYS).includes(family.key);
                             return (
@@ -636,16 +674,6 @@ const AiAgentPanel = ({
                         <label style={{ display: 'block' }}>
                             <input
                                 type='checkbox'
-                                checked={config?.pair_mode === true}
-                                disabled={!config || status === 'connecting'}
-                                onChange={e => config && setConfig({ ...config, pair_mode: e.target.checked })}
-                            />{' '}
-                            {localize('Fire in pairs')}{' '}
-                            <InfoNote text={localize('Every trade is a pair bought on the same tick, same market, same stake: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even. A signal for Rise fires Rise + Odd, Fall fires Fall + Even, Even fires Even + Under 5, Odd fires Odd + Over 4, and Only Ups or Only Downs fire both. Both contracts of a pair must be ticked. The two results count as one trade. This is a logic test: both legs pay under 2x, so each pair costs a little on average, and the opposite legs can both lose.')} />
-                        </label>
-                        <label style={{ display: 'block' }}>
-                            <input
-                                type='checkbox'
                                 checked={config?.both_sides !== false}
                                 disabled={!config || status === 'connecting'}
                                 onChange={e => config && setConfig({ ...config, both_sides: e.target.checked })}
@@ -666,10 +694,11 @@ const AiAgentPanel = ({
                     <label className='ai-agent-panel__hint'>
                         {localize('Stake method')}{' '}
                         <select
-                            value={config?.recovery_mode ?? 'reverse'}
+                            value={config?.recovery_mode ?? 'martingale'}
                             disabled={!config}
                             onChange={e => config && setConfig({ ...config, recovery_mode: e.target.value as TRecoveryMode })}
                         >
+                            <option value='martingale'>{localize('Martingale: bigger stake only after a loss (x multiplier), base stake after a win')}</option>
                             <option value='reverse'>{localize('Reverse martingale: bigger stake after wins, base stake after a loss')}</option>
                             <option value='flat'>{localize('Flat: same stake, no recovery')}</option>
                         </select>
@@ -840,6 +869,7 @@ const AiAgentPanel = ({
                                         {row.tag === 'flipped' && <span className='ai-agent-panel__ladder-flip'>{'\u21ba flipped'}</span>}
                                         {row.tag === 'switched' && <span className='ai-agent-panel__ladder-flip'>{'\u21c4 switched contract'}</span>}
                                         {row.tag === 'streak' && <span className='ai-agent-panel__ladder-flip'>{'\u25b2 win streak'}</span>}
+                                        {row.tag === 'recovery' && <span className='ai-agent-panel__ladder-flip'>{'\u25b2 loss recovery'}</span>}
                                     </span>
                                     <span>
                                         {row.result === undefined

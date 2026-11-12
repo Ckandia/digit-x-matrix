@@ -2,11 +2,6 @@
 
 Where things stand (latest first). This file is the project's memory: Claude's own memory feature is off in Settings, so the progress is saved here and in FIXES-AND-SETUP.md.
 
-## Latest build (pair mode: every trade is a pair fired together)
-- New AI Trader checkbox **Fire in pairs** (`pair_mode`, on by default in the presets). Pairs: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even (`PAIR_PARTNER` in `autoPilotEngine.ts`). The entry signal of one contract fires the pair on the same tick, market, stake and duration; the two results count as one trade (ladder, stop loss, take profit see the net). Rise fires Rise + Odd, Fall fires Fall + Even; Even / Odd signals fire Even + Under 5 / Odd + Over 4. Both contracts must be ticked or the signal is skipped. Only Ups / Downs keep the payout-covers-both-stakes check.
-- Tests added in `__tests__/overlap-pairs.spec.ts` (pair mode block). NOT run here (no node_modules): run `npx jest` and `tsc` before relying on it.
-- Logic test only: every contract pays under 2x, so pairs lose a little on average.
-
 ## Current state
 - Frontend: Deriv Bot app + our tabs (Bulk Trades, AI Trader, Journal). Engine: `src/pages/bulk-trader/autoPilotEngine.ts` (runs in the browser).
 - Backend (`backend/`, Render): market feed + 24/7 paper trader + signals + journal/learning endpoints.
@@ -44,3 +39,11 @@ Where things stand (latest first). This file is the project's memory: Claude's o
 ## Open items
 - Trading while the laptop/phone is closed needs a server-side runner with a Deriv trading token (design + security decision pending; cannot be tested without node_modules/Deriv).
 - Layout on a real phone has not been seen by Claude (no browser available): check Journal / AI Trader / Bulk Trades on Android and iOS and report anything off.
+
+
+## Pairs only, loss-only martingale, entry quality gate (latest)
+- **Pairs only (default on, AI tab checkbox):** the AI buys nothing but five pairs, both legs on the same tick, same stake each, counted as ONE trade: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even. Each pair can be ticked off. A single contract is never bought in this mode; if the second leg cannot be built nothing is bought, and a balance under two stakes stops the run. In this mode Only Ups + Only Downs fires without the old payout-cover check (your request). Off = the older single-contract behaviour.
+- **New backend pairs:** `rise_odd` (price up AND odd digit on the same tick, needs a bullish 1-tick trend) and `fall_even` (price down AND even digit, needs bearish), added in `backend/src/runBias.js` with the same replay/bias/freshness rules as Even + Under 5. Pair signals now carry `pair_key`.
+- **Martingale on loss only (default, 1.5x):** after a loss the next stake (per leg for a pair) = last stake x `martingale_multiplier` (1.5), up to `max_steps` losses, then back to base; a win ALWAYS goes back to the base stake and never raises it. A stake the stop loss no longer allows resets to base. Modes: martingale (default), reverse, flat.
+- **Entry quality gate:** `min_confidence` (default 20 = measured hit rate >= 60%, UI field "Minimum signal strength"). Weaker signals are skipped and the strongest signal across markets goes first. This picks the best measured moment; it cannot make a tick predictable. A martingale and two-leg pairs do not create an edge, they change how fast a bad run loses.
+- Tests: `pairs-only.spec.ts`, `loss-martingale.spec.ts`, `npm run check:runbias` (cross pairs). Passed under a jest shim; full `npx jest`, `tsc` and a live Deriv run were not possible here. Run `npm install && npx jest && npm run build` first, and test on a demo account.

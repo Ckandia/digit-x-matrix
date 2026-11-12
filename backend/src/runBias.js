@@ -188,7 +188,13 @@ export function replayOutcomes(key, flag, prices, min_run, decimals = 2) {
 export const PAIR_PATTERNS = [
     { key: 'even_under5', label: 'Even + Under 5', types: ['DIGITEVEN', 'DIGITUNDER'], keys: ['even', 'under5'], digits: [0, 2, 4], versus: 'odd_over4' },
     { key: 'odd_over4', label: 'Odd + Over 4', types: ['DIGITODD', 'DIGITOVER'], keys: ['odd', 'over4'], digits: [5, 7, 9], versus: 'even_under5' },
+    // CROSS pairs (a price move AND a digit): a tick is in favour when the price moved that way AND the last digit has that parity.
+    { key: 'rise_odd', label: 'Rise + Odd', types: ['CALL', 'DIGITODD'], keys: ['rise', 'odd'], cross: true, trend: 'bullish', versus: 'fall_even' },
+    { key: 'fall_even', label: 'Fall + Even', types: ['PUT', 'DIGITEVEN'], keys: ['fall', 'even'], cross: true, trend: 'bearish', versus: 'rise_odd' },
 ];
+/** Which ticks favour a pair: its digit set (0,2,4 / 5,7,9), or for a cross pair a price move AND a digit parity on the same tick. */
+export const pairFlag = (pp, prices, flags, decimals = 2) =>
+    pp.cross ? prices.map((_, i) => flags[pp.keys[0]][i] && flags[pp.keys[1]][i]) : prices.map(price => pp.digits.includes(lastDigit(price, decimals)));
 export const PAIR_LEVELS = [2, 3];
 const PAIR_LEG_PROFIT = 0.95; // a winning leg pays about 0.95 of its stake, a losing leg loses 1
 
@@ -257,7 +263,7 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
         };
     });
     // Pair patterns: runs of ticks whose digit sits in the shared set (0,2,4 or 5,7,9)
-    const pair_flags = Object.fromEntries(PAIR_PATTERNS.map(pp => [pp.key, tail.map(price => pp.digits.includes(lastDigit(price, decimals)))]));
+    const pair_flags = Object.fromEntries(PAIR_PATTERNS.map(pp => [pp.key, pairFlag(pp, tail, flags, decimals)]));
     const pairs = PAIR_PATTERNS.map(pp => {
         const mine = runStats(pair_flags[pp.key], MIN_RUN);
         const levels = PAIR_LEVELS.map(min_run => {
@@ -337,12 +343,15 @@ export function computeRunSignals(scan, symbol) {
             const fresh = row.current >= level.min_run && row.current <= level.min_run + FRESH_SLACK;
             const replayed = level.outcomes >= MIN_OUTCOME_SAMPLE && level.avg_net !== null;
             const net_ok = !replayed || level.avg_net >= 0; // the pair must have at least broken even after this pattern
-            const entry = fresh && net_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
+            const trend_ok = !pp.trend || scan.trend === pp.trend; // Rise + Odd needs higher highs, Fall + Even lower lows on the 1-tick chart
+            const entry = fresh && net_ok && trend_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
             (entry ? entries : extras).push({
                 family: 'run_bias',
                 strategy: 'run_bias',
                 contract_type: pp.types[0], // the first leg; pair_types lists both
                 pair_types: pp.types,
+                pair_key: pp.key,
+                trend: pp.trend ? scan.trend : undefined,
                 duration_ticks: 1,
                 prediction: pp.types[0] === 'DIGITOVER' ? 4 : undefined,
                 label: pp.label,
@@ -351,7 +360,7 @@ export function computeRunSignals(scan, symbol) {
                 confluence,
                 run_id: entry ? `${row.run_start}:${level.min_run}:pair` : undefined,
                 run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run, outcomes: level.outcomes, avg_net: level.avg_net, pattern: row.pattern },
-                basis: `Pair: the last digits favour ${pp.label} at once (${pp.digits.join(', ')}) on ${symbol}: bias ${level.bias}%, run now ${row.current}, replayed net ${level.avg_net ?? 'n/a'} per pair over ${level.outcomes} entries.`,
+                basis: `Pair: the last ${pp.cross ? 'ticks' : 'digits'} favour ${pp.label} at once (${pp.cross ? 'price move and digit together' : pp.digits.join(', ')}) on ${symbol}: bias ${level.bias}%, run now ${row.current}, replayed net ${level.avg_net ?? 'n/a'} per pair over ${level.outcomes} entries.`,
             });
         }
     }

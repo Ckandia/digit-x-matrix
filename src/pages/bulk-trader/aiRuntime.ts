@@ -19,7 +19,7 @@ export type TLadderRow = {
     symbol: string;
     label: string;
     stake: number;
-    tag?: 'flipped' | 'switched' | 'streak';
+    tag?: 'flipped' | 'switched' | 'streak' | 'recovery';
     result?: 'win' | 'loss';
     profit?: number;
 };

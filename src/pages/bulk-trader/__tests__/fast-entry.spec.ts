@@ -164,9 +164,9 @@ describe('Touch / No Touch are not traded by the AI', () => {
     });
 });
 
-describe('no recovery ladder', () => {
-    it('after a loss the stake is the base stake again, even for the old martingale settings', async () => {
-        const h = make({ R_F9: [sig({ type: 'DIGITEVEN', label: 'Even', run_id: 1 })] }, { recovery_mode: 'martingale' });
+describe('flat and reverse stakes: no recovery ladder', () => {
+    it('after a loss the stake is the base stake again for the reverse martingale (the loss-martingale is covered in loss-martingale.spec)', async () => {
+        const h = make({ R_F9: [sig({ type: 'DIGITEVEN', label: 'Even', run_id: 1 })] }, { recovery_mode: 'reverse' });
         h.engine.start();
         await wait(100);
         h.snapshots.R_F9.signals = [sig({ type: 'DIGITEVEN', label: 'Even', run_id: 2 })] as never;

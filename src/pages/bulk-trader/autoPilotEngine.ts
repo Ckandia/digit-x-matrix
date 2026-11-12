@@ -35,17 +35,18 @@ export type TRiskPreset = {
 
 export const RISK_PRESETS: Record<TRiskLevel, TRiskPreset> = {
     // Growth stays at or below a typical ~1.9x payout, so a streak stake is funded by what the streak has won.
-    conservative: { stake_pct: 1, streak_multiplier: 1.5, max_streak: 3, martingale_multiplier: 1.8, max_steps: 4, stop_loss_pct: 10, take_profit_pct: 15 },
-    moderate: { stake_pct: 2, streak_multiplier: 1.8, max_streak: 3, martingale_multiplier: 2.1, max_steps: 5, stop_loss_pct: 15, take_profit_pct: 20 },
-    aggressive: { stake_pct: 3, streak_multiplier: 1.9, max_streak: 4, martingale_multiplier: 2.5, max_steps: 6, stop_loss_pct: 25, take_profit_pct: 30 },
+    conservative: { stake_pct: 1, streak_multiplier: 1.5, max_streak: 3, martingale_multiplier: 1.5, max_steps: 4, stop_loss_pct: 10, take_profit_pct: 15 },
+    moderate: { stake_pct: 2, streak_multiplier: 1.8, max_streak: 3, martingale_multiplier: 1.5, max_steps: 5, stop_loss_pct: 15, take_profit_pct: 20 },
+    aggressive: { stake_pct: 3, streak_multiplier: 1.9, max_streak: 4, martingale_multiplier: 1.5, max_steps: 6, stop_loss_pct: 25, take_profit_pct: 30 },
 };
 
-/** How the stake behaves. 'reverse' (default) = reverse martingale: bigger stake after wins, base stake after a loss.
- *  Classic modes, which raise the stake after a LOSS: 'martingale' = same contract again, 'flip' = the opposite side.
- *  'flat' = same base stake always. */
+/** How the stake behaves. 'martingale' (default) = the stake grows ONLY after a loss (x martingale_multiplier, default 1.5, up to max_steps
+ *  losses) and goes back to the base stake after a win; a win never raises it. 'reverse' = reverse martingale: bigger stake after wins, base
+ *  stake after a loss. 'flat' = same base stake always. A saved 'flip' (the old opposite-side ladder) runs as 'martingale'. */
 export type TRecoveryMode = 'reverse' | 'martingale' | 'flip' | 'flat';
-/** Only two stake methods exist now: the reverse martingale (default) and a flat stake. A saved 'martingale' / 'flip' (the old recovery ladders) runs as 'reverse'. */
-export const stakeMode = (m?: TRecoveryMode): 'reverse' | 'flat' => (m === 'flat' ? 'flat' : 'reverse');
+export const stakeMode = (m?: TRecoveryMode): 'reverse' | 'martingale' | 'flat' => (m === 'flat' ? 'flat' : m === 'martingale' || m === 'flip' ? 'martingale' : 'reverse');
+export const DEFAULT_LOSS_MULTIPLIER = 1.5;
+export const DEFAULT_MIN_CONFIDENCE = 20;
 
 /** After this many losses in a row the AI switches to a different contract (does not wait for the market). */
 export const SWITCH_AFTER_LOSSES = 2;
@@ -85,13 +86,33 @@ export type TAutoPilotConfig = {
      */
     overlap_pairs?: boolean;
     /**
-     * PAIR MODE (owner's logic test). Every live trade is a PAIR fired on the same tick, same market, same stake and duration:
-     *   Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even (see PAIR_PARTNER).
-     * The entry signal of the first contract of a pair (e.g. Rise) fires the pair; the two results count as one trade.
-     * Both contracts of a pair must be ticked, otherwise the signal is skipped. Off/undefined = the older behaviour (single contracts).
+     * PAIRS ONLY (default on). The AI trades nothing but the ticked pairs, and the two legs of a pair are bought at the same moment, on
+     * the same market, same stake each, counted as one trade: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even.
+     * A single contract is never bought in this mode. Off = the older behaviour (single contracts by family, pairs only as an extra).
      */
-    pair_mode?: boolean;
+    pairs_only?: boolean;
+    /** Which pairs may fire in pairs-only mode (keys of TRADE_PAIRS). Undefined = all five. */
+    pair_keys?: string[];
+    /**
+     * Entry quality gate (0-100, same scale as a signal's confidence = (measured bias - 50) x 2). A signal below it is never bought, and the
+     * highest-confidence signal across all markets goes first. 20 = the contract's measured hit rate on that market is at least 60%.
+     * It picks the best moment the data shows, it cannot make a tick predictable. 0 / undefined = off.
+     */
+    min_confidence?: number;
 };
+
+/** The five pairs the AI fires at the same time in pairs-only mode. `signal` = which backend signal triggers it. */
+export const TRADE_PAIRS: { key: string; label: string; types: [string, string] }[] = [
+    { key: 'only_ups_downs', label: 'Only Ups + Only Downs', types: ['RUNHIGH', 'RUNLOW'] },
+    { key: 'even_under5', label: 'Even + Under 5', types: ['DIGITEVEN', 'DIGITUNDER'] },
+    { key: 'odd_over4', label: 'Odd + Over 4', types: ['DIGITODD', 'DIGITOVER'] },
+    { key: 'rise_odd', label: 'Rise + Odd', types: ['CALL', 'DIGITODD'] },
+    { key: 'fall_even', label: 'Fall + Even', types: ['PUT', 'DIGITEVEN'] },
+];
+export const ALL_PAIR_KEYS = TRADE_PAIRS.map(p => p.key);
+/** The pair a backend signal belongs to: a pair signal carries `pair_key`; an Only Ups / Only Downs signal is the Only Ups + Only Downs pair. */
+const pairKeyOf = (sig: { pair_key?: string; contract_type: string }): string | null =>
+    sig.pair_key ?? (sig.contract_type === 'RUNHIGH' || sig.contract_type === 'RUNLOW' ? 'only_ups_downs' : null);
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
 export const CONTRACT_FAMILIES: { key: string; label: string; types: [string, string]; trend?: boolean }[] = [
@@ -164,22 +185,6 @@ export const planRun = (stop_loss: number, hours = 24, trades_per_hour = DEFAULT
  * Every other contract (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch) is bought on one side only.
  */
 const bothSidesType = (type: string): boolean => type === 'RUNHIGH' || type === 'RUNLOW'; // ONLY Only Ups / Only Downs fire both sides
-/**
- * Pair mode: the contract that is bought together with each signalled contract.
- *   Only Ups + Only Downs | Even + Under 5 | Odd + Over 4 | Rise + Odd | Fall + Even
- * Even / Odd also pair with Rise / Fall, but only when the Rise / Fall signal is the one that fires (Rise -> Odd, Fall -> Even);
- * an Even or Odd signal on its own fires Even + Under 5 or Odd + Over 4.
- */
-export const PAIR_PARTNER: Record<string, string> = {
-    RUNHIGH: 'RUNLOW',
-    RUNLOW: 'RUNHIGH',
-    DIGITEVEN: 'DIGITUNDER',
-    DIGITUNDER: 'DIGITEVEN',
-    DIGITODD: 'DIGITOVER',
-    DIGITOVER: 'DIGITODD',
-    CALL: 'DIGITODD',
-    PUT: 'DIGITEVEN',
-};
 /** Two live legs that settle together as ONE trade (the stake ladder, stop loss and hook see the combined result). */
 type TPair = { pending: number; profit: number; stake: number };
 
@@ -193,7 +198,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
     // part of the stop loss; the reverse martingale (stake grows only after wins) is the default stake method.
     const plan = planRun(stop_loss);
     return {
-        recovery_mode: 'reverse',
+        recovery_mode: 'martingale', // the stake grows only after a LOSS (x1.5); a win goes back to the base stake
         stake: plan.stake,
         max_trades_per_hour: 0, // no pacing: a signal is bought the next tick, not when a trades-per-hour timer allows
         streak_multiplier: preset.streak_multiplier,
@@ -205,7 +210,9 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         protect_trades: 0,
         contract_families: ALL_FAMILY_KEYS,
         both_sides: true,
-        pair_mode: true, // every trade is a pair fired together (see PAIR_PARTNER)
+        min_confidence: DEFAULT_MIN_CONFIDENCE, // enter only on the strongest measured signals, best first
+        pairs_only: true, // the AI trades only the five pairs, both legs at the same moment
+        pair_keys: ALL_PAIR_KEYS,
         overlap_pairs: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
     };
 };
@@ -642,7 +649,7 @@ export type TSettledTrade = {
     mode: TRecoveryMode;
     confidence: number;
     strategy?: string;
-    tag?: 'flipped' | 'switched' | 'streak';
+    tag?: 'flipped' | 'switched' | 'streak' | 'recovery';
     /** The ticks of this trade as printed: the pattern that triggered it, then Deriv's entry and exit tick. */
     signal_ticks?: string;
     entry_tick?: string;
@@ -660,7 +667,7 @@ export type TAutoPilotEvent = {
     stake?: number;
     result?: 'win' | 'loss';
     /** Why this entry is not a plain fresh pick: opposite side (flip), a different contract after 2 losses, or a growing win streak. */
-    tag?: 'flipped' | 'switched' | 'streak';
+    tag?: 'flipped' | 'switched' | 'streak' | 'recovery';
     profit?: number;
     total_profit?: number;
     reason?: string;
@@ -792,16 +799,25 @@ export class AutoPilotEngine {
         const allowed = this._allowedTypes();
         const now = Date.now();
         const found: { candidate: TCandidate; confluence: boolean; idle: number; pair: boolean }[] = [];
+        const pairs_only = this.config.pairs_only === true;
+        const pair_keys = new Set(this.config.pair_keys ?? ALL_PAIR_KEYS);
         for (const [symbol, snap] of Object.entries(gated)) {
             for (const sig of snap.signals) {
                 if (sig.family !== 'run_bias' || !sig.entry) continue;
                 if (sig.contract_type === 'ONETOUCH' || sig.contract_type === 'NOTOUCH') continue; // Touch / No Touch are not traded by the AI
-                // A PAIR signal: the digit sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4).
+                if ((this.config.min_confidence ?? 0) > 0 && (sig.confidence ?? 0) < (this.config.min_confidence ?? 0)) continue; // not strong enough
+                // A PAIR signal: the sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4; rising + odd = Rise + Odd; falling + even = Fall + Even).
                 const pair_types = (sig as { pair_types?: string[] }).pair_types;
-                const pair_mode = this.config.pair_mode === true;
-                if (pair_types && (pair_types.length !== 2 || (!pair_mode && this.config.overlap_pairs === false))) continue;
-                if (allowed && !allowed.has(sig.contract_type)) continue;
-                if (pair_types && allowed && !allowed.has(pair_types[1])) continue;
+                if (pairs_only) {
+                    // Pairs only: nothing but a ticked pair is traded, never a single contract.
+                    const pk = pairKeyOf(sig as { pair_key?: string; contract_type: string });
+                    if (!pk || !pair_keys.has(pk)) continue;
+                    if (pair_types && pair_types.length !== 2) continue;
+                } else {
+                    if (pair_types && (this.config.overlap_pairs === false || pair_types.length !== 2)) continue;
+                    if (allowed && !allowed.has(sig.contract_type)) continue;
+                    if (pair_types && allowed && !allowed.has(pair_types[1])) continue;
+                }
                 if (pair_types && (this.blocked.get(`${symbol}|${pair_types[1]}`) ?? 0) > now) continue;
                 if (pair_types && tradeTicks(symbol, pair_types[1]) === null) continue;
                 if ((this.blocked.get(`${symbol}|${sig.contract_type}`) ?? 0) > now) continue;
@@ -816,17 +832,7 @@ export class AutoPilotEngine {
                     this.seen_at.set(key, now);
                 }
                 if (now - first > MAX_SIGNAL_AGE_MS) continue;
-                // Pair mode: a single entry fires together with its partner (same market, same duration, both ticked).
-                let mode_partner: string | null = null;
-                if (!pair_types && pair_mode) {
-                    mode_partner = PAIR_PARTNER[sig.contract_type] ?? null;
-                    if (!mode_partner) continue;
-                    if (allowed && !allowed.has(mode_partner)) continue;
-                    if ((this.blocked.get(`${symbol}|${mode_partner}`) ?? 0) > now) continue;
-                    if (tradeTicks(symbol, mode_partner) !== ticks) continue;
-                }
-                // Only Ups / Only Downs keep their own both-sides buy (priced first so a winning side covers both stakes).
-                const second = pair_types ? pair_types[1] : mode_partner && !bothSidesType(sig.contract_type) ? mode_partner : null;
+                const second = pair_types ? pair_types[1] : null;
                 const candidate = (
                     second
                         ? {
@@ -841,15 +847,13 @@ export class AutoPilotEngine {
                                   contract_type: second,
                                   prediction: second === 'DIGITUNDER' ? 5 : second === 'DIGITOVER' ? 4 : undefined,
                                   label: OPPOSITE_LABEL[second] ?? second,
-                                  ...(pair_types ? {} : { run: undefined, trend: undefined }),
                               },
-                              pair_source: pair_types ? 'backend' : 'mode',
                           }
                         : { ...sig, symbol, duration_ticks: ticks }
                 ) as TCandidate;
                 found.push({
                     candidate,
-                    pair: !!second || !!mode_partner,
+                    pair: !!second,
                     confluence: sig.confluence === true,
                     idle: now - (this.last_traded.get(symbol) ?? 0), // how long this market has not been traded: a market never traded is the idlest
                 });
@@ -859,7 +863,8 @@ export class AutoPilotEngine {
         // Market switching: when several markets have an entry at the same time, the one that agrees on every run length (confluence)
         // goes first, then a PAIR (the digit sequence favours two contracts at once), then the market traded LEAST recently, and only then
         // the strongest bias. The strongest bias alone kept picking the same market, because a market's bias changes slowly.
-        found.sort((a, b) => Number(b.confluence) - Number(a.confluence) || Number(b.pair) - Number(a.pair) || b.idle - a.idle || b.candidate.confidence - a.candidate.confidence);
+        const best_first = (this.config.min_confidence ?? 0) > 0; // quality gate on: the strongest measured signal goes first
+        found.sort((a, b) => (best_first ? b.candidate.confidence - a.candidate.confidence : 0) || Number(b.confluence) - Number(a.confluence) || Number(b.pair) - Number(a.pair) || b.idle - a.idle || b.candidate.confidence - a.candidate.confidence);
         return found[0].candidate;
     }
 
@@ -1046,16 +1051,6 @@ export class AutoPilotEngine {
             setTimeout(() => this._findAndEnter(wanted_stake_in, tag), 4000);
             return;
         }
-        const gate_mate = (candidate as { pair_with?: TCandidate }).pair_with;
-        if (gate_mate && this.learner?.mode === 'edge_gate' && !this.learner.isTradable(gate_mate.symbol, gate_mate.contract_type, undefined, candidate.duration_ticks)) {
-            if (Date.now() - this.last_wait_emit > 30_000) {
-                this.last_wait_emit = Date.now();
-                this.hooks?.onLog?.('info', `Standing aside: ${gate_mate.label} (the other half of the pair) has no proven edge, so no real money is staked.`);
-                this._emit({ phase: 'waiting', reason: 'the pair has no proven edge yet: standing aside' });
-            }
-            setTimeout(() => this._findAndEnter(wanted_stake_in, tag), 4000);
-            return;
-        }
         // Capital protection: the first trades of a run never use more than the base stake.
         const protect = Math.max(0, Math.floor(this.config.protect_trades ?? 0));
         const wanted_stake = this.trade_count < protect ? Math.min(wanted_stake_in, this.config.stake) : wanted_stake_in;
@@ -1105,6 +1100,7 @@ export class AutoPilotEngine {
             return;
         }
         const tried_duration = Number(parameters.duration);
+        const pairs_only = this.config.pairs_only === true;
         // Both sides: the opposite contract is bought too, on the same market, same stake and same duration.
         let partner: TCandidate | null = null;
         let partner_parameters: Record<string, unknown> | null = null;
@@ -1121,7 +1117,7 @@ export class AutoPilotEngine {
                     this.hooks?.onLog?.('info', `Pair skipped: ${err instanceof Error ? err.message : 'the second contract could not be built'}`);
                 }
             }
-        } else if ((this.config.both_sides !== false || this.config.pair_mode === true) && bothSidesType(candidate.contract_type)) {
+        } else if ((pairs_only || this.config.both_sides !== false) && bothSidesType(candidate.contract_type)) {
             const opposite_type = FLIP_PARTNER[candidate.contract_type];
             const live = this.connection.accountInfo?.balance;
             if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
@@ -1135,6 +1131,21 @@ export class AutoPilotEngine {
                     this.hooks?.onLog?.('info', `Both sides skipped: ${err instanceof Error ? err.message : 'the opposite contract could not be built'}`);
                 }
             }
+        }
+        if (pairs_only && !partner) {
+            // Pairs only: one leg alone is not the logic being tested. Nothing was sent to Deriv, so drop this signal.
+            this.busy = false;
+            if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+            const live = this.connection.accountInfo?.balance;
+            if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
+                this.hooks?.onLog?.('error', `A pair needs two stakes of ${stake} ${this.currency}, the balance is ${live.toFixed(2)}. Stopping.`);
+                this.stop('balance is too low for a pair of stakes');
+                return;
+            }
+            this.hooks?.onLog?.('info', `Pair on ${candidate.symbol} not bought: the second leg could not be built. Waiting for the next signal.`);
+            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
+            setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
+            return;
         }
         this.hooks?.onLog?.(
             'info',
@@ -1153,7 +1164,7 @@ export class AutoPilotEngine {
             return id as string; // keep it exactly as Deriv sent it (a number): proposal_open_contract rejects a string contract_id
         };
         const priced: Promise<void> =
-            partner && partner_parameters && !overlap // an overlap pair is not about a payout covering both stakes: no price check, both legs go at once
+            partner && partner_parameters && !overlap && !pairs_only // in pairs-only mode both legs always go at once (no payout cover check); an overlap pair is not about a payout covering both stakes: no price check, both legs go at once
                 ? Promise.all([this.connection.send({ proposal: 1, ...parameters }), this.connection.send({ proposal: 1, ...partner_parameters })]).then(([a, b]) => {
                       const need = Number((stake * 2).toFixed(2));
                       const pay_a = Number(a?.proposal?.payout);
@@ -1180,7 +1191,7 @@ export class AutoPilotEngine {
                     return;
                 }
                 this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
-                this.hooks?.onLog?.('info', `${overlap ? ((candidate as { pair_source?: string }).pair_source === 'mode' ? 'Pair' : 'Overlap pair') : 'Both sides'} fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
+                this.hooks?.onLog?.('info', `${overlap ? 'Overlap pair' : 'Both sides'} fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
                 const pair: TPair = { pending: 2, profit: 0, stake: Number((stake * 2).toFixed(2)) };
                 this._watch(candidate, stake, first.value, tried_duration, pair);
                 this._watch(partner, stake, second.value, tried_duration, pair);
@@ -1337,6 +1348,8 @@ export class AutoPilotEngine {
                 this.consecutive_losses = 0;
                 const next = (next_stake: number, tag?: TAutoPilotEvent['tag']) => this._findAndEnter(next_stake, tag);
                 if (mode !== 'reverse') {
+                    // Martingale and flat: a win NEVER raises the stake. After a loss ladder the stake goes back to the base stake.
+                    if (mode === 'martingale' && this.step > 1) this.hooks?.onLog?.('success', `Win: stake goes back to the base stake ${base_stake}.`);
                     this.step = 1;
                     next(base_stake);
                     return;
@@ -1366,7 +1379,28 @@ export class AutoPilotEngine {
             this.streak_profit = 0;
             this.consecutive_losses += 1;
 
-            // The stake does NOT go up after a loss: back to the base stake, and the next signal is bought as it arrives.
+            if (mode === 'martingale') {
+                // Martingale on loss only: next stake = the stake that just lost x the multiplier (default 1.5), at most max_steps in a row.
+                const per = pair ? 2 : 1;
+                const mult = Math.max(1, this.config.martingale_multiplier ?? DEFAULT_LOSS_MULTIPLIER);
+                const max_steps = Math.max(1, Math.floor(this.config.max_steps ?? 4));
+                const next_stake = Number(Math.max(base_stake, (net_stake / per) * mult).toFixed(2));
+                const room = Math.abs(this.config.stop_loss) + this.total_profit; // what the stop loss still allows
+                if (this.step >= max_steps) {
+                    this.hooks?.onLog?.('info', `${this.step} losses in a row: the ladder is full, stake goes back to the base stake ${base_stake}.`);
+                } else if (next_stake * per > room) {
+                    this.hooks?.onLog?.('info', `Next stake ${next_stake} x${per} is more than the stop loss still allows (${room.toFixed(2)}): back to the base stake ${base_stake}.`);
+                } else {
+                    this.step += 1;
+                    this.hooks?.onLog?.('info', `Loss: stake x${mult} -> ${next_stake} (step ${this.step} of ${max_steps}).`);
+                    this._findAndEnter(next_stake, 'recovery');
+                    return;
+                }
+                this.step = 1;
+                this._findAndEnter(base_stake);
+                return;
+            }
+            // Reverse martingale / flat: the stake does NOT go up after a loss: back to the base stake, and the next signal is bought as it arrives.
             this.step = 1;
             this._findAndEnter(base_stake);
         });
