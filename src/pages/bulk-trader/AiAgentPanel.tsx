@@ -544,6 +544,20 @@ const AiAgentPanel = ({
                                 </>
                             )}
                             <FieldBox
+                                label={localize('Switch market after this many losses in a row')}
+                                value={config.switch_after_losses ?? 2}
+                                step={1}
+                                disabled={status === 'connecting' || config.stay_on_market !== true}
+                                onChange={v => updateField('switch_after_losses', v)}
+                            />
+                            <FieldBox
+                                label={localize('Switch market after this many seconds without an entry')}
+                                value={config.switch_wait_seconds ?? 45}
+                                step={5}
+                                disabled={status === 'connecting' || config.stay_on_market !== true}
+                                onChange={v => updateField('switch_wait_seconds', v)}
+                            />
+                            <FieldBox
                                 label={localize('Minimum signal strength (0-100, 20 = 60% measured)')}
                                 value={config.min_confidence ?? 0}
                                 step={5}
@@ -648,6 +662,18 @@ const AiAgentPanel = ({
                                     {localize(pair.label)}
                                 </label>
                             ))}
+                    </div>
+                    <div className='ai-agent-panel__hint'>
+                        <label style={{ display: 'block' }}>
+                            <input
+                                type='checkbox'
+                                checked={config?.stay_on_market === true}
+                                disabled={!config || status === 'connecting'}
+                                onChange={e => config && setConfig({ ...config, stay_on_market: e.target.checked })}
+                            />{' '}
+                            <strong>{localize('After a loss, recover on the same market and pair')}</strong>{' '}
+                            <InfoNote text={localize('Off: the AI prefers the market traded least recently, so after a loss it moves to another market and contract. On: it stays on the same market and pair and switches only after the number of losses in a row, or the seconds without an entry, set below. A win frees it to pick any market again.')} />
+                        </label>
                     </div>
                     <div className='ai-agent-panel__hint'>
                         <strong>{localize('Contracts the AI may trade')}</strong>{config?.pairs_only === true ? ` (${localize('not used while Pairs only is on')})` : ''}

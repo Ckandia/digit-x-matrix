@@ -47,6 +47,8 @@ export type TRecoveryMode = 'reverse' | 'martingale' | 'flip' | 'flat';
 export const stakeMode = (m?: TRecoveryMode): 'reverse' | 'martingale' | 'flat' => (m === 'flat' ? 'flat' : m === 'martingale' || m === 'flip' ? 'martingale' : 'reverse');
 export const DEFAULT_LOSS_MULTIPLIER = 1.5;
 export const DEFAULT_MIN_CONFIDENCE = 20;
+export const DEFAULT_SWITCH_AFTER_LOSSES = 2;
+export const DEFAULT_SWITCH_WAIT_SECONDS = 45;
 
 /** After this many losses in a row the AI switches to a different contract (does not wait for the market). */
 export const SWITCH_AFTER_LOSSES = 2;
@@ -99,6 +101,16 @@ export type TAutoPilotConfig = {
      * It picks the best moment the data shows, it cannot make a tick predictable. 0 / undefined = off.
      */
     min_confidence?: number;
+    /**
+     * Recover on the SAME market and the SAME pair/contract after a loss (default on in the presets). Without it the AI prefers the market
+     * traded least recently, so after a loss it moved to another market and another contract. It may switch only when one of the two
+     * conditions below is met; a win always frees it to pick the best entry anywhere again.
+     */
+    stay_on_market?: boolean;
+    /** Switch market after this many losses in a row on the same market (default 2): that market is not working. */
+    switch_after_losses?: number;
+    /** Switch market when the same market and pair gave no new entry for this many seconds after a loss (default 45). */
+    switch_wait_seconds?: number;
 };
 
 /** The five pairs the AI fires at the same time in pairs-only mode. `signal` = which backend signal triggers it. */
@@ -113,6 +125,8 @@ export const ALL_PAIR_KEYS = TRADE_PAIRS.map(p => p.key);
 /** The pair a backend signal belongs to: a pair signal carries `pair_key`; an Only Ups / Only Downs signal is the Only Ups + Only Downs pair. */
 const pairKeyOf = (sig: { pair_key?: string; contract_type: string }): string | null =>
     sig.pair_key ?? (sig.contract_type === 'RUNHIGH' || sig.contract_type === 'RUNLOW' ? 'only_ups_downs' : null);
+/** What the recovery lock matches on: the pair a signal belongs to, or its contract type when it is a single contract. */
+const recoveryKey = (c: { pair_key?: string; contract_type: string }): string => pairKeyOf(c) ?? c.contract_type;
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
 export const CONTRACT_FAMILIES: { key: string; label: string; types: [string, string]; trend?: boolean }[] = [
@@ -210,6 +224,9 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         protect_trades: 0,
         contract_families: ALL_FAMILY_KEYS,
         both_sides: true,
+        stay_on_market: true, // recover a loss on the same market and pair; switch only after switch_after_losses losses or switch_wait_seconds without an entry
+        switch_after_losses: DEFAULT_SWITCH_AFTER_LOSSES,
+        switch_wait_seconds: DEFAULT_SWITCH_WAIT_SECONDS,
         min_confidence: DEFAULT_MIN_CONFIDENCE, // enter only on the strongest measured signals, best first
         pairs_only: true, // the AI trades only the five pairs, both legs at the same moment
         pair_keys: ALL_PAIR_KEYS,
@@ -705,6 +722,7 @@ export class AutoPilotEngine {
     private started_at = 0;
     private last_slow_log = 0;
     private last_market: string | null = null;
+    private lock: { symbol: string; key: string; since: number; losses: number } | null = null; // recovery: stay on this market and pair until released
     private last_traded = new Map<string, number>(); // symbol -> when the AI last bought on it (market switching)
     private used_runs = new Set<string>(); // symbol|type|run id of the backend signals already traded: one run is traded once
     private poll_timer: ReturnType<typeof setTimeout> | null = null;
@@ -753,6 +771,7 @@ export class AutoPilotEngine {
         this.used_runs.clear();
         this.last_traded.clear();
         this.last_market = null;
+        this.lock = null;
         this.blocked.clear();
         this._emit({ phase: 'started' });
         this._findAndEnter(this.config.stake);
@@ -801,11 +820,22 @@ export class AutoPilotEngine {
         const found: { candidate: TCandidate; confluence: boolean; idle: number; pair: boolean }[] = [];
         const pairs_only = this.config.pairs_only === true;
         const pair_keys = new Set(this.config.pair_keys ?? ALL_PAIR_KEYS);
+        // Recovery lock: after a loss only the same market and the same pair/contract may be bought, until a switch condition is met.
+        if (this.lock) {
+            const wait_ms = Math.max(0, this.config.switch_wait_seconds ?? DEFAULT_SWITCH_WAIT_SECONDS) * 1000;
+            if (wait_ms > 0 && now - this.lock.since > wait_ms) {
+                this.hooks?.onLog?.('info', `No new entry on ${this.lock.symbol} for ${Math.round(wait_ms / 1000)}s: switching market.`);
+                this.lock = null;
+            }
+        }
+        const lock = this.lock;
         for (const [symbol, snap] of Object.entries(gated)) {
+            if (lock && symbol !== lock.symbol) continue;
             for (const sig of snap.signals) {
                 if (sig.family !== 'run_bias' || !sig.entry) continue;
                 if (sig.contract_type === 'ONETOUCH' || sig.contract_type === 'NOTOUCH') continue; // Touch / No Touch are not traded by the AI
                 if ((this.config.min_confidence ?? 0) > 0 && (sig.confidence ?? 0) < (this.config.min_confidence ?? 0)) continue; // not strong enough
+                if (lock && recoveryKey(sig as { pair_key?: string; contract_type: string }) !== lock.key) continue; // recover with the same pair/contract
                 // A PAIR signal: the sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4; rising + odd = Rise + Odd; falling + even = Fall + Even).
                 const pair_types = (sig as { pair_types?: string[] }).pair_types;
                 if (pairs_only) {
@@ -925,6 +955,20 @@ export class AutoPilotEngine {
     signalReceived() {
         if (!this.running || this.busy || !this.waiting) return;
         this._findAndEnter(this.waiting.stake, this.waiting.tag);
+    }
+
+    /** After a loss: keep the AI on this market and pair, or release it once this market has lost switch_after_losses times in a row. */
+    private _holdMarket(candidate: TCandidate) {
+        if (this.config.stay_on_market !== true) return;
+        const losses = this.lock && this.lock.symbol === candidate.symbol ? this.lock.losses + 1 : 1;
+        const limit = Math.max(1, Math.floor(this.config.switch_after_losses ?? DEFAULT_SWITCH_AFTER_LOSSES));
+        if (losses >= limit) {
+            this.lock = null;
+            this.hooks?.onLog?.('info', `${losses} loss${losses > 1 ? 'es' : ''} in a row on ${candidate.symbol}: ${candidate.symbol} is not working, the AI may switch market now.`);
+            return;
+        }
+        this.lock = { symbol: candidate.symbol, key: recoveryKey(candidate as unknown as { pair_key?: string; contract_type: string }), since: Date.now(), losses };
+        this.hooks?.onLog?.('info', `Loss on ${candidate.symbol}: recovering on the same market and pair (switch after ${limit} losses in a row or ${this.config.switch_wait_seconds ?? DEFAULT_SWITCH_WAIT_SECONDS}s without an entry).`);
     }
 
     /** Looks for a backend entry signal; with none yet it asks again shortly (signals come and go with every tick). */
@@ -1346,6 +1390,7 @@ export class AutoPilotEngine {
 
             if (net_won) {
                 this.consecutive_losses = 0;
+                this.lock = null; // a win frees the AI to take the best entry on any market
                 const next = (next_stake: number, tag?: TAutoPilotEvent['tag']) => this._findAndEnter(next_stake, tag);
                 if (mode !== 'reverse') {
                     // Martingale and flat: a win NEVER raises the stake. After a loss ladder the stake goes back to the base stake.
@@ -1378,6 +1423,7 @@ export class AutoPilotEngine {
             this.win_streak = 0;
             this.streak_profit = 0;
             this.consecutive_losses += 1;
+            this._holdMarket(candidate);
 
             if (mode === 'martingale') {
                 // Martingale on loss only: next stake = the stake that just lost x the multiplier (default 1.5), at most max_steps in a row.
@@ -1388,6 +1434,7 @@ export class AutoPilotEngine {
                 const room = Math.abs(this.config.stop_loss) + this.total_profit; // what the stop loss still allows
                 if (this.step >= max_steps) {
                     this.hooks?.onLog?.('info', `${this.step} losses in a row: the ladder is full, stake goes back to the base stake ${base_stake}.`);
+                    this.lock = null;
                 } else if (next_stake * per > room) {
                     this.hooks?.onLog?.('info', `Next stake ${next_stake} x${per} is more than the stop loss still allows (${room.toFixed(2)}): back to the base stake ${base_stake}.`);
                 } else {
