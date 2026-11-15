@@ -102,6 +102,15 @@ export type TAutoPilotConfig = {
      */
     min_confidence?: number;
     /**
+     * 3-CONTRACT BASKET (default on). Every backend digit-pair signal buys THREE contracts in the same tick (Promise.all): the pair's two digit
+     * contracts + Only Ups/Downs (momentum) or Rise/Fall (drift), see basketSetup. The stake is split 40/40/20 or 35/35/30 of the TOTAL stake
+     * (`stake` = the total of the 3). Martingale: all 3 lose = total x martingale_multiplier (1.5); some win but the net is negative = the same
+     * total; net >= 0 = back to the base total. Takes over from pairs_only and the single-contract families while on.
+     */
+    basket_mode?: boolean;
+    /** Which bases the basket may fire on (keys of BASKET_BASES). Undefined = all four. */
+    basket_keys?: string[];
+    /**
      * Recover on the SAME market and the SAME pair/contract after a loss (default on in the presets). Without it the AI prefers the market
      * traded least recently, so after a loss it moved to another market and another contract. It may switch only when one of the two
      * conditions below is met; a win always frees it to pick the best entry anywhere again.
@@ -125,6 +134,60 @@ export const ALL_PAIR_KEYS = TRADE_PAIRS.map(p => p.key);
 /** The pair a backend signal belongs to: a pair signal carries `pair_key`; an Only Ups / Only Downs signal is the Only Ups + Only Downs pair. */
 const pairKeyOf = (sig: { pair_key?: string; contract_type: string }): string | null =>
     sig.pair_key ?? (sig.contract_type === 'RUNHIGH' || sig.contract_type === 'RUNLOW' ? 'only_ups_downs' : null);
+// ---------------------------------------------------------------------------------------------------------------------
+// The 3-contract basket: one backend pair signal (a digit base) + a directional third contract, all three bought in the same tick.
+//   Bases (blind spot = the digits where both digit legs lose):
+//     A Even + Under 5 (5,7,9)   B Odd + Over 4 (0,2,4)   C Even + Over 4 (1,3)   D Odd + Under 5 (6,8)
+//   Third contract: momentum (the last 3 ticks went the trend's way) = Only Ups / Only Downs (2 ticks), stakes 40/40/20;
+//                   drift (otherwise) = Rise / Fall (1 tick), stakes 35/35/30. Bullish = Ups / Rise, bearish = Downs / Fall.
+//   Setups 1-4 = A, 5-8 = B, 9-12 = C, 13-16 = D, each in the order: bullish momentum, bearish momentum, bullish drift, bearish drift.
+// ---------------------------------------------------------------------------------------------------------------------
+export const BASKET_BASES: { key: string; label: string; types: [string, string]; blind: string; first: number }[] = [
+    { key: 'even_under5', label: 'Even + Under 5', types: ['DIGITEVEN', 'DIGITUNDER'], blind: '5, 7, 9', first: 1 },
+    { key: 'odd_over4', label: 'Odd + Over 4', types: ['DIGITODD', 'DIGITOVER'], blind: '0, 2, 4', first: 5 },
+    { key: 'even_over4', label: 'Even + Over 4', types: ['DIGITEVEN', 'DIGITOVER'], blind: '1, 3', first: 9 },
+    { key: 'odd_under5', label: 'Odd + Under 5', types: ['DIGITODD', 'DIGITUNDER'], blind: '6, 8', first: 13 },
+];
+export const ALL_BASKET_KEYS = BASKET_BASES.map(b => b.key);
+export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.2];
+export const BASKET_DRIFT_SHARES = [0.35, 0.35, 0.3];
+export const MIN_LEG_STAKE = 0.35; // Deriv's smallest stake per contract
+export type TBasketLeg = { type: string; label: string; ticks: number; share: number };
+export type TBasketSetup = { number: number; base: string; regime: 'momentum' | 'drift'; direction: 'bullish' | 'bearish'; legs: TBasketLeg[]; blind: string };
+const BASKET_CONFLICTS: [string, string][] = [
+    ['DIGITEVEN', 'DIGITODD'],
+    ['DIGITOVER', 'DIGITUNDER'],
+    ['CALL', 'PUT'],
+    ['RUNHIGH', 'RUNLOW'],
+    ['CALL', 'RUNLOW'],
+    ['PUT', 'RUNHIGH'],
+];
+/** A basket never holds two contracts that cannot both win (Even + Odd, Rise + Fall ...). */
+export const basketHasConflict = (types: string[]): boolean => BASKET_CONFLICTS.some(([a, b]) => types.includes(a) && types.includes(b));
+export const basketSetup = (pair_key: string | undefined, direction: string | undefined, momentum: boolean): TBasketSetup | null => {
+    const base = BASKET_BASES.find(b => b.key === pair_key);
+    if (!base || (direction !== 'bullish' && direction !== 'bearish')) return null;
+    const bull = direction === 'bullish';
+    const shares = momentum ? BASKET_MOMENTUM_SHARES : BASKET_DRIFT_SHARES;
+    const third: TBasketLeg = momentum
+        ? { type: bull ? 'RUNHIGH' : 'RUNLOW', label: bull ? 'Only Ups' : 'Only Downs', ticks: 2, share: shares[2] }
+        : { type: bull ? 'CALL' : 'PUT', label: bull ? 'Rise' : 'Fall', ticks: 1, share: shares[2] };
+    const legs: TBasketLeg[] = [
+        { type: base.types[0], label: OPPOSITE_LABEL[base.types[0]] ?? base.types[0], ticks: 1, share: shares[0] },
+        { type: base.types[1], label: OPPOSITE_LABEL[base.types[1]] ?? base.types[1], ticks: 1, share: shares[1] },
+        third,
+    ];
+    if (basketHasConflict(legs.map(l => l.type))) throw new Error(`Basket ${base.label} + ${third.label} holds contracts that cancel each other`);
+    return { number: base.first + (momentum ? 0 : 2) + (bull ? 0 : 1), base: base.label, regime: momentum ? 'momentum' : 'drift', direction: bull ? 'bullish' : 'bearish', legs, blind: base.blind };
+};
+/** The smallest total stake that still gives every contract at least MIN_LEG_STAKE. */
+export const basketMinTotal = (legs: TBasketLeg[]): number => Math.ceil((MIN_LEG_STAKE / Math.min(...legs.map(l => l.share))) * 100) / 100;
+/** Splits a total stake by the legs' shares, to the cent; the last leg takes the rounding remainder so the legs add up to the total. */
+export const basketStakes = (total: number, legs: TBasketLeg[]): number[] => {
+    const parts = legs.slice(0, -1).map(l => Number((total * l.share).toFixed(2)));
+    return [...parts, Number((total - parts.reduce((a, b) => a + b, 0)).toFixed(2))];
+};
+
 /** What the recovery lock matches on: the pair a signal belongs to, or its contract type when it is a single contract. */
 const recoveryKey = (c: { pair_key?: string; contract_type: string }): string => pairKeyOf(c) ?? c.contract_type;
 
@@ -200,7 +263,7 @@ export const planRun = (stop_loss: number, hours = 24, trades_per_hour = DEFAULT
  */
 const bothSidesType = (type: string): boolean => type === 'RUNHIGH' || type === 'RUNLOW'; // ONLY Only Ups / Only Downs fire both sides
 /** Two live legs that settle together as ONE trade (the stake ladder, stop loss and hook see the combined result). */
-type TPair = { pending: number; profit: number; stake: number };
+type TPair = { pending: number; profit: number; stake: number; basket?: boolean; returned?: number; legs?: number; intended?: number };
 
 /** Turns a risk preset + live balance into the absolute numbers shown/edited
  *  in the UI. Editing a field in the UI just overwrites one of these — the
@@ -224,6 +287,8 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         protect_trades: 0,
         contract_families: ALL_FAMILY_KEYS,
         both_sides: true,
+        basket_mode: true, // every digit-pair signal buys the 3-contract basket at once; martingale x1.5 only after a full sweep
+        basket_keys: ALL_BASKET_KEYS,
         stay_on_market: true, // recover a loss on the same market and pair; switch only after switch_after_losses losses or switch_wait_seconds without an entry
         switch_after_losses: DEFAULT_SWITCH_AFTER_LOSSES,
         switch_wait_seconds: DEFAULT_SWITCH_WAIT_SECONDS,
@@ -820,6 +885,8 @@ export class AutoPilotEngine {
         const found: { candidate: TCandidate; confluence: boolean; idle: number; pair: boolean }[] = [];
         const pairs_only = this.config.pairs_only === true;
         const pair_keys = new Set(this.config.pair_keys ?? ALL_PAIR_KEYS);
+        const basket = this.config.basket_mode === true;
+        const basket_keys = new Set(this.config.basket_keys ?? ALL_BASKET_KEYS);
         // Recovery lock: after a loss only the same market and the same pair/contract may be bought, until a switch condition is met.
         if (this.lock) {
             const wait_ms = Math.max(0, this.config.switch_wait_seconds ?? DEFAULT_SWITCH_WAIT_SECONDS) * 1000;
@@ -838,7 +905,12 @@ export class AutoPilotEngine {
                 if (lock && recoveryKey(sig as { pair_key?: string; contract_type: string }) !== lock.key) continue; // recover with the same pair/contract
                 // A PAIR signal: the sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4; rising + odd = Rise + Odd; falling + even = Fall + Even).
                 const pair_types = (sig as { pair_types?: string[] }).pair_types;
-                if (pairs_only) {
+                if (basket) {
+                    // 3-contract basket: only a digit-pair signal of a ticked base, with a chart direction (bullish / bearish) for the third contract.
+                    const bk = (sig as { pair_key?: string }).pair_key;
+                    const dir = (sig as { trend?: string }).trend;
+                    if (!pair_types || !bk || !basket_keys.has(bk) || (dir !== 'bullish' && dir !== 'bearish')) continue;
+                } else if (pairs_only) {
                     // Pairs only: nothing but a ticked pair is traded, never a single contract.
                     const pk = pairKeyOf(sig as { pair_key?: string; contract_type: string });
                     if (!pk || !pair_keys.has(pk)) continue;
@@ -1085,6 +1157,10 @@ export class AutoPilotEngine {
                 return;
             }
         }
+        if (this.config.basket_mode === true && BASKET_BASES.some(b => b.key === (candidate as { pair_key?: string }).pair_key)) {
+            this._enterBasket(candidate, wanted_stake_in, tag);
+            return;
+        }
         // Quality gate: in 'Only trade a proven edge' mode NO live buy happens for a contract without a proven edge.
         if (this.learner?.mode === 'edge_gate' && !this.learner.isTradable(candidate.symbol, candidate.contract_type, (candidate as { bucket?: string }).bucket, candidate.duration_ticks)) {
             if (Date.now() - this.last_wait_emit > 30_000) {
@@ -1288,6 +1364,133 @@ export class AutoPilotEngine {
             });
     }
 
+    /**
+     * The 3-contract basket. All three `buy` requests are sent in the same event-loop tick with Promise.all. Each buy is wrapped so a refusal
+     * of one comes back as a value instead of rejecting the whole Promise.all: a contract that DID get bought is never left unwatched.
+     */
+    private _enterBasket(candidate: TCandidate, wanted_total: number, tag?: TAutoPilotEvent['tag']) {
+        const meta = candidate as { pair_key?: string; trend?: string; momentum?: boolean };
+        const setup = basketSetup(meta.pair_key, meta.trend, meta.momentum === true);
+        const retry = (ms: number) => setTimeout(() => this._findAndEnter(wanted_total, tag), ms);
+        if (!setup) {
+            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
+            retry(500);
+            return;
+        }
+        const min_total = basketMinTotal(setup.legs);
+        const total = Number(Math.max(wanted_total, min_total).toFixed(2));
+        if (total > wanted_total && this.step === 1) this.hooks?.onLog?.('info', `Basket total ${wanted_total} is too small for a ${Math.round(Math.min(...setup.legs.map(l => l.share)) * 100)}% contract (Deriv's minimum stake is ${MIN_LEG_STAKE}): using ${total} ${this.currency}.`);
+        const live_balance = this.connection.accountInfo?.balance;
+        if (typeof live_balance === 'number' && Number.isFinite(live_balance) && total > live_balance) {
+            this.hooks?.onLog?.('error', `The basket total (${total} ${this.currency}) is more than the account balance (${live_balance.toFixed(2)}). Stopping.`);
+            this.stop('balance is too low for the basket');
+            return;
+        }
+        const stakes = basketStakes(total, setup.legs);
+        let built: { leg: TBasketLeg; stake: number; cand: TCandidate; params: Record<string, unknown> }[];
+        try {
+            built = setup.legs.map((leg, i) => {
+                const cand = {
+                    ...candidate,
+                    contract_type: leg.type,
+                    label: leg.label,
+                    duration_ticks: leg.ticks,
+                    prediction: leg.type === 'DIGITOVER' ? 4 : leg.type === 'DIGITUNDER' ? 5 : undefined,
+                    pair_with: undefined,
+                    basis: `Basket setup ${setup.number}: ${setup.base} + ${setup.legs[2].label} (${setup.direction} ${setup.regime}).`,
+                } as unknown as TCandidate;
+                return { leg, stake: stakes[i], cand, params: buildTradeParameters(cand, stakes[i], this.currency) };
+            });
+        } catch (err) {
+            // Not all three contracts can be built on this market (one is not offered): nothing was sent, no partial basket.
+            const detail = err instanceof Error ? err.message : 'Could not build the basket';
+            this.hooks?.onLog?.('info', `Basket skipped on ${candidate.symbol}: ${detail}`);
+            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
+            retry(500);
+            return;
+        }
+        this.busy = true;
+        this.lastCandidate = candidate;
+        this.last_live_at = Date.now();
+        this.entry_tag = tag;
+        this._emit({ phase: 'entering', symbol: candidate.symbol, contract_type: candidate.contract_type, label: `Setup ${setup.number}: ${setup.base} + ${setup.legs[2].label}`, confidence: candidate.confidence, stake: total, tag });
+        this.hooks?.onLog?.('info', `Basket setup ${setup.number} on ${candidate.symbol}: ${built.map(b => `${b.leg.label} ${b.stake}`).join(' + ')} = ${total} ${this.currency} (${setup.direction} ${setup.regime}, blind spot ${setup.blind}).`);
+        const buyLeg = async (b: (typeof built)[number]) => {
+            const t0 = Date.now();
+            try {
+                const res = await this.connection.send({ buy: '1', price: b.stake, parameters: b.params });
+                this._noteBuy(Date.now() - t0);
+                const id = res?.buy?.contract_id;
+                if (!id) throw new Error('Buy did not return a contract id');
+                return { ok: true as const, b, id: id as string };
+            } catch (err) {
+                return { ok: false as const, b, err };
+            }
+        };
+        // The three sends start synchronously inside this one call: same event-loop tick.
+        Promise.all(built.map(buyLeg)).then(results => {
+            const bought = results.filter((r): r is Extract<(typeof results)[number], { ok: true }> => r.ok);
+            const failed = results.filter(r => !r.ok);
+            if (!bought.length) {
+                const raw = String((failed[0] as { err?: { message?: string } })?.err?.message || 'Failed to place the basket');
+                this.busy = false;
+                this.hooks?.onLog?.('error', `Basket on ${candidate.symbol} not bought: ${raw}`);
+                if (REFUSAL_PATTERN.test(raw) && this.refused < 8) {
+                    this.refused += 1;
+                    this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
+                    retry(500);
+                    return;
+                }
+                this._emit({ phase: 'error', symbol: candidate.symbol, error: raw });
+                this.stop('trade placement failed');
+                return;
+            }
+            for (const f of failed) this.hooks?.onLog?.('error', `${f.b.leg.label} could not be bought (${String((f as { err?: { message?: string } }).err?.message ?? 'refused')}): the basket runs with ${bought.length} of 3 contracts.`);
+            const pair: TPair = { pending: bought.length, profit: 0, stake: Number(bought.reduce((a, r) => a + r.b.stake, 0).toFixed(2)), basket: true, returned: 0, legs: bought.length, intended: wanted_total };
+            this.ladder_spent = Number((this.ladder_spent + pair.stake).toFixed(2));
+            for (const r of bought) this._watch(r.b.cand, r.b.stake, r.id, r.b.leg.ticks, pair);
+        });
+    }
+
+    /** The basket's stake machine, run when the last of its contracts has settled. */
+    private _basketNext(pair: TPair, candidate: TCandidate, net_profit: number, tag?: TAutoPilotEvent['tag']) {
+        const base = this.config.stake;
+        const intended = pair.intended ?? base;
+        if (net_profit >= 0) {
+            // Net profit (or break-even): back to the baseline total stake.
+            this.lock = null;
+            if (this.step > 1 || intended !== base) this.hooks?.onLog?.('success', `Basket net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)}: total stake back to the base ${base}.`);
+            this.step = 1;
+            this._findAndEnter(base);
+            return;
+        }
+        this._holdMarket(candidate); // a net loss is recovered on the same market and pair (if enabled)
+        if ((pair.returned ?? 0) > 0) {
+            // Partial loss: some contracts paid but the net is negative. The total stake stays flat.
+            this.hooks?.onLog?.('info', `Partial loss (${pair.returned} of ${pair.legs} contracts paid, net ${net_profit.toFixed(2)}): total stake stays at ${intended}.`);
+            this._findAndEnter(intended);
+            return;
+        }
+        // Full sweep: every contract returned nothing. Total stake x multiplier for the next signal.
+        const mult = Math.max(1, this.config.martingale_multiplier ?? DEFAULT_LOSS_MULTIPLIER);
+        const max_steps = Math.max(1, Math.floor(this.config.max_steps ?? 4));
+        const next = Number((intended * mult).toFixed(2));
+        const room = Math.abs(this.config.stop_loss) + this.total_profit;
+        if (this.step >= max_steps) {
+            this.hooks?.onLog?.('info', `${this.step} full-sweep losses in a row: the ladder is full, total stake goes back to the base ${base}.`);
+            this.lock = null;
+        } else if (next > room) {
+            this.hooks?.onLog?.('info', `Next total stake ${next} is more than the stop loss still allows (${room.toFixed(2)}): back to the base ${base}.`);
+        } else {
+            this.step += 1;
+            this.hooks?.onLog?.('info', `Full sweep (all ${pair.legs} contracts returned 0): total stake x${mult} -> ${next} (step ${this.step} of ${max_steps}).`);
+            this._findAndEnter(next, 'recovery');
+            return;
+        }
+        this.step = 1;
+        this._findAndEnter(base);
+    }
+
     private _watch(candidate: TCandidate, stake: number, contract_id: string, duration: number, pair?: TPair) {
         const entry_step = this.step;
         const entry_tag = this.entry_tag;
@@ -1359,11 +1562,13 @@ export class AutoPilotEngine {
             let net_stake = stake;
             if (pair) {
                 pair.profit = Number((pair.profit + profit).toFixed(2));
+                if (pair.basket && Number(contract.sell_price ?? bought + profit) > 0) pair.returned = (pair.returned ?? 0) + 1; // this contract paid something back
                 pair.pending -= 1;
                 if (pair.pending > 0) return; // still waiting for the other side (busy stays on)
                 net_profit = pair.profit;
                 net_stake = pair.stake;
-                this.hooks?.onLog?.(net_profit > 0 ? 'success' : 'error', `Both sides closed: net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)} ${this.currency} on ${candidate.symbol}.`);
+                if (pair.basket) this.hooks?.onLog?.(net_profit >= 0 ? 'success' : 'error', `Basket closed: net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)} ${this.currency} on ${candidate.symbol} (${pair.returned} of ${pair.legs} contracts paid).`);
+                else this.hooks?.onLog?.(net_profit > 0 ? 'success' : 'error', `Both sides closed: net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)} ${this.currency} on ${candidate.symbol}.`);
             }
             const net_won = net_profit > 0;
 
@@ -1385,6 +1590,10 @@ export class AutoPilotEngine {
                 return;
             }
 
+            if (pair?.basket) {
+                this._basketNext(pair, candidate, net_profit, entry_tag);
+                return;
+            }
             const mode = stakeMode(this.config.recovery_mode);
             const base_stake = this.config.stake;
 

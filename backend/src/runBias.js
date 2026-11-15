@@ -22,6 +22,7 @@ export const MIN_RUN = 2; // the shortest run any contract is analysed on
 export const RUN_WINDOW = 300; // ticks the bias is measured on (the freshest, so it follows the market)
 export const MIN_RUN_SAMPLE = 60; // ticks needed before anything is reported
 export const MIN_ENTRY_BIAS_EDGE = 5; // bias must be at least 55 for an entry signal
+export const MOMENTUM_TICKS = 3; // the last 3 ticks all moved the trend's way = momentum (Only Ups / Only Downs); otherwise drift (Rise / Fall)
 export const FRESH_SLACK = 1; // a level still fires when the run is at most this many ticks past it (a late poll), never on an old run
 const MAX_EXTRA_SIGNALS = 3; // per symbol, besides the entry signals
 
@@ -188,6 +189,9 @@ export function replayOutcomes(key, flag, prices, min_run, decimals = 2) {
 export const PAIR_PATTERNS = [
     { key: 'even_under5', label: 'Even + Under 5', types: ['DIGITEVEN', 'DIGITUNDER'], keys: ['even', 'under5'], digits: [0, 2, 4], versus: 'odd_over4' },
     { key: 'odd_over4', label: 'Odd + Over 4', types: ['DIGITODD', 'DIGITOVER'], keys: ['odd', 'over4'], digits: [5, 7, 9], versus: 'even_under5' },
+    // The two mixed bases of the 3-contract basket: both legs win on the shared digits (6, 8 / 1, 3); the blind spot is the other base's set.
+    { key: 'even_over4', label: 'Even + Over 4', types: ['DIGITEVEN', 'DIGITOVER'], keys: ['even', 'over4'], digits: [6, 8], versus: 'odd_under5' },
+    { key: 'odd_under5', label: 'Odd + Under 5', types: ['DIGITODD', 'DIGITUNDER'], keys: ['odd', 'under5'], digits: [1, 3], versus: 'even_over4' },
     // CROSS pairs (a price move AND a digit): a tick is in favour when the price moved that way AND the last digit has that parity.
     { key: 'rise_odd', label: 'Rise + Odd', types: ['CALL', 'DIGITODD'], keys: ['rise', 'odd'], cross: true, trend: 'bullish', versus: 'fall_even' },
     { key: 'fall_even', label: 'Fall + Even', types: ['PUT', 'DIGITEVEN'], keys: ['fall', 'even'], cross: true, trend: 'bearish', versus: 'rise_odd' },
@@ -220,6 +224,13 @@ export function replayPair(pair, flag, prices, min_run, decimals = 2) {
  * @param {number} decimals the symbol's price precision (for last digits)
  * @param {number} [total_ticks] how many ticks this symbol has ever shown (so a run's id keeps counting as the window slides)
  */
+/** How many of the last entries of a boolean array are true in a row. */
+const trailingRun = arr => {
+    let k = 0;
+    for (let i = arr.length - 1; i >= 0 && arr[i]; i--) k++;
+    return k;
+};
+
 export function computeRunBias(prices, decimals = 2, total_ticks = prices.length) {
     const tail = prices.slice(-RUN_WINDOW);
     const n = tail.length;
@@ -287,7 +298,7 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
             pattern: mine.current ? tail.slice(-Math.min(mine.current, 3)).map(price => String(lastDigit(price, decimals))) : [],
         };
     });
-    return { n, min_run: MIN_RUN, decimals, reported_decimals: reported_dp, trend: detectTrend(tail.slice(-TREND_WINDOW)), rows, pairs };
+    return { n, min_run: MIN_RUN, decimals, reported_decimals: reported_dp, trend: detectTrend(tail.slice(-TREND_WINDOW)), rise_run: trailingRun(flags.rise), fall_run: trailingRun(flags.fall), rows, pairs };
 }
 
 /**
@@ -351,7 +362,8 @@ export function computeRunSignals(scan, symbol) {
                 contract_type: pp.types[0], // the first leg; pair_types lists both
                 pair_types: pp.types,
                 pair_key: pp.key,
-                trend: pp.trend ? scan.trend : undefined,
+                trend: scan.trend, // the 1-tick chart direction (bullish / bearish / none): the basket's third contract follows it
+                momentum: (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS),
                 duration_ticks: 1,
                 prediction: pp.types[0] === 'DIGITOVER' ? 4 : undefined,
                 label: pp.label,

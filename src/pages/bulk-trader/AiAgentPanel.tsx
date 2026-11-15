@@ -13,6 +13,8 @@ import {
     CONTRACT_FAMILIES,
     TRADE_PAIRS,
     ALL_PAIR_KEYS,
+    BASKET_BASES,
+    ALL_BASKET_KEYS,
     RISK_PRESETS,
     TAutoPilotConfig,
     TAutoPilotEvent,
@@ -634,6 +636,35 @@ const AiAgentPanel = ({
                             {latency !== null && latency > (config?.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS) && (config?.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS) > 0 ? localize('(slow: the AI is not buying until it recovers)') : ''}
                         </div>
                     )}
+                    <div className='ai-agent-panel__hint'>
+                        <label style={{ display: 'block' }}>
+                            <input
+                                type='checkbox'
+                                checked={config?.basket_mode === true}
+                                disabled={!config || status === 'connecting'}
+                                onChange={e => config && setConfig({ ...config, basket_mode: e.target.checked, basket_keys: config.basket_keys ?? ALL_BASKET_KEYS })}
+                            />{' '}
+                            <strong>{localize('3-contract basket: buy three contracts at the same time')}</strong>{' '}
+                            <InfoNote text={localize('Each digit-pair signal buys 3 contracts in the same tick: the pair\'s two digit contracts plus Only Ups / Only Downs (momentum: the last 3 ticks went the trend\'s way, stakes 40/40/20) or Rise / Fall (drift, stakes 35/35/30). The stake is the TOTAL of the three. All three lose: total x1.5 next time. Some win but the net is a loss: same total. Net profit: back to the base total. Overrides Pairs only and the contract families while on.')} />
+                        </label>
+                        {config?.basket_mode === true &&
+                            BASKET_BASES.map(base => (
+                                <label key={base.key} style={{ display: 'block', marginLeft: 18 }}>
+                                    <input
+                                        type='checkbox'
+                                        checked={(config.basket_keys ?? ALL_BASKET_KEYS).includes(base.key)}
+                                        disabled={status === 'connecting'}
+                                        onChange={e => {
+                                            const current = config.basket_keys ?? ALL_BASKET_KEYS;
+                                            const next = e.target.checked ? [...current, base.key] : current.filter(k => k !== base.key);
+                                            if (next.length === 0) return; // at least one base must stay ticked
+                                            setConfig({ ...config, basket_keys: Array.from(new Set(next)) });
+                                        }}
+                                    />{' '}
+                                    {localize(base.label)} ({localize('blind spot')} {base.blind})
+                                </label>
+                            ))}
+                    </div>
                     <div className='ai-agent-panel__hint'>
                         <label style={{ display: 'block' }}>
                             <input

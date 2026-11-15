@@ -183,9 +183,14 @@ assert.ok(pairSigs.length > 0 && pairSigs.every(x => x.pair_types.length === 2 &
 for (const x of pairSigs.filter(y => y.entry)) assert.ok(String(x.run_id).endsWith(':pair'));
 
 // ---- Cross pairs: Rise + Odd (price up AND odd digit) and Fall + Even (price down AND even digit)
-assert.deepEqual(PAIR_PATTERNS.map(x => x.key), ['even_under5', 'odd_over4', 'rise_odd', 'fall_even']);
-assert.deepEqual(PAIR_PATTERNS[2].types, ['CALL', 'DIGITODD']);
-assert.deepEqual(PAIR_PATTERNS[3].types, ['PUT', 'DIGITEVEN']);
+assert.deepEqual(PAIR_PATTERNS.map(x => x.key), ['even_under5', 'odd_over4', 'even_over4', 'odd_under5', 'rise_odd', 'fall_even']);
+assert.deepEqual(PAIR_PATTERNS.find(x => x.key === 'rise_odd').types, ['CALL', 'DIGITODD']);
+assert.deepEqual(PAIR_PATTERNS.find(x => x.key === 'fall_even').types, ['PUT', 'DIGITEVEN']);
+// the basket bases: both legs win on the shared digits, blind spot = the other base's shared digits
+assert.deepEqual(PAIR_PATTERNS.find(x => x.key === 'even_over4').digits, [6, 8]);
+assert.deepEqual(PAIR_PATTERNS.find(x => x.key === 'odd_under5').digits, [1, 3]);
+assert.deepEqual(PAIR_PATTERNS.find(x => x.key === 'even_under5').digits, [0, 2, 4]);
+assert.deepEqual(PAIR_PATTERNS.find(x => x.key === 'odd_over4').digits, [5, 7, 9]);
 // a steady climb of +0.02 from x.01: every tick is a rise AND ends in an odd digit
 const climb = Array.from({ length: 80 }, (_, i) => Number((100.01 + i * 0.02).toFixed(2)));
 const climbScan = computeRunBias(climb, 2);
@@ -215,6 +220,10 @@ assert.ok(computeRunSignals(zigScan, 'T').filter(x => x.pair_key === 'fall_even'
 // without the bullish trend (a straight climb has no swing highs) Rise + Odd is never an entry
 assert.equal(climbScan.trend, 'none');
 assert.ok(computeRunSignals(climbScan, 'T').filter(x => x.pair_key === 'rise_odd').every(x => !x.entry), 'no trend, no Rise + Odd entry');
+// every pair signal carries the chart direction and whether it is momentum (3 ticks in the trend's way) or drift
+for (const x of computeRunSignals(zigScan, 'T').filter(y => y.pair_types)) assert.ok(['bullish', 'bearish', 'none'].includes(x.trend) && typeof x.momentum === 'boolean');
+assert.ok(zigScan.rise_run >= 3 && zigScan.fall_run === 0);
+assert.ok(computeRunSignals(zigScan, 'T').filter(y => y.pair_key === 'rise_odd').every(y => y.momentum === true), 'a bullish chart with 3 rising ticks is momentum');
 // every pair signal carries its key
 for (const x of computeRunSignals(zigScan, 'T').filter(y => y.pair_types)) assert.ok(typeof x.pair_key === 'string');
 
