@@ -62,8 +62,8 @@ const make = (signals: Record<string, unknown[]>, cfg: Partial<TAutoPilotConfig>
 };
 
 // a basket signal: a digit-pair signal with the chart direction and the momentum flag (a fresh run id on every read)
-const basketSig = (key: string, types: [string, string], trend: string, momentum: boolean) =>
-    ({ family: 'run_bias', strategy: 'run_bias', entry: true, confluence: false, pair_types: types, pair_key: key, trend, momentum, get run_id() { return `${++rid}:2:pair`; }, contract_type: types[0], label: 'pair', confidence: 70, basis: '' }) as never;
+const basketSig = (key: string, types: [string, string], trend: string, momentum: boolean, extra: object = {}) =>
+    ({ family: 'run_bias', strategy: 'run_bias', entry: true, basket_entry: true, confluence: false, pair_types: types, pair_key: key, trend, momentum, get run_id() { return `${++rid}:2:pair`; }, contract_type: types[0], label: 'pair', confidence: 70, basis: '', ...extra }) as never;
 const bk: Partial<TAutoPilotConfig> = { basket_mode: true, stake: 2, martingale_multiplier: 1.5, max_steps: 5, stop_loss: 1000, take_profit: 1000, recovery_mode: 'flat' };
 const EU = ['even_under5', ['DIGITEVEN', 'DIGITUNDER']] as const;
 const buyTypes = (h: { conn: Conn }, from = 0, n = 3) => h.conn.buys_().slice(from, from + n).map(b => b.parameters.contract_type);
@@ -165,6 +165,28 @@ describe('the basket is bought in one go', () => {
         await wait(150);
         expect(h.conn.buys_()).toHaveLength(0);
         h.engine.stop();
+    });
+
+    it('a digit-pair entry the backend did NOT judge a basket entry is not bought', async () => {
+        const h = make({ R_B7: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true, { basket_entry: false })] }, bk);
+        h.engine.start();
+        await wait(150);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
+    });
+
+    it('the setup number the backend judged must match the one the AI builds, otherwise nothing is bought', async () => {
+        const wrong = make({ R_B8: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true, { basket_setup: 3 })] }, bk); // bullish momentum is setup 1
+        wrong.engine.start();
+        await wait(150);
+        expect(wrong.conn.buys_()).toHaveLength(0);
+        expect(wrong.logs.some(l => /judged setup 3 but this signal builds setup 1/.test(l))).toBe(true);
+        wrong.engine.stop();
+        const right = make({ R_B9: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true, { basket_setup: 1 })] }, bk);
+        right.engine.start();
+        await wait(150);
+        expect(buyTypes(right)).toEqual(['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH']);
+        right.engine.stop();
     });
 
     it('a basket on an unticked base does not fire', async () => {

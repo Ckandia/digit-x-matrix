@@ -907,9 +907,11 @@ export class AutoPilotEngine {
                 const pair_types = (sig as { pair_types?: string[] }).pair_types;
                 if (basket) {
                     // 3-contract basket: only a digit-pair signal of a ticked base, with a chart direction (bullish / bearish) for the third contract.
+                    // The backend judges the entry on the whole basket (digit pair + third contract + replayed basket result): `basket_entry`.
                     const bk = (sig as { pair_key?: string }).pair_key;
                     const dir = (sig as { trend?: string }).trend;
                     if (!pair_types || !bk || !basket_keys.has(bk) || (dir !== 'bullish' && dir !== 'bearish')) continue;
+                    if ((sig as { basket_entry?: boolean }).basket_entry !== true) continue;
                 } else if (pairs_only) {
                     // Pairs only: nothing but a ticked pair is traded, never a single contract.
                     const pk = pairKeyOf(sig as { pair_key?: string; contract_type: string });
@@ -1374,6 +1376,14 @@ export class AutoPilotEngine {
         const retry = (ms: number) => setTimeout(() => this._findAndEnter(wanted_total, tag), ms);
         if (!setup) {
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
+            retry(500);
+            return;
+        }
+        // The backend names the setup (1-16) it judged. If the AI would build a different one, the signal and the basket do not match: do not buy.
+        const announced = (candidate as { basket_setup?: number | null }).basket_setup;
+        if (announced !== undefined && announced !== setup.number) {
+            this.hooks?.onLog?.('error', `Basket skipped on ${candidate.symbol}: the backend judged setup ${announced} but this signal builds setup ${setup.number}.`);
+            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
             retry(500);
             return;
         }

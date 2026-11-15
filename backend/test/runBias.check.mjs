@@ -1,6 +1,6 @@
 // Pure checks for the run-bias module: runs of 2 / 3+ ticks in a row in favour of a contract, analysed per level.
 import assert from 'node:assert/strict';
-import { PAIR_PATTERNS, replayPair, computeRunBias, computeRunSignals, favourFlags, runStats, settleAt, replayOutcomes, lastDigit, inferDecimals, LEVELS, FRESH_SLACK, ENTRY_DELAY } from '../src/runBias.js';
+import { PAIR_PATTERNS, BASKET_BASE_KEYS, ONLY_RUN_PROFIT, MOMENTUM_TICKS, basketFor, replayBasket, replayPair, computeRunBias, computeRunSignals, favourFlags, runStats, settleAt, replayOutcomes, lastDigit, inferDecimals, LEVELS, FRESH_SLACK, ENTRY_DELAY } from '../src/runBias.js';
 
 const px = digits => digits.map((d, i) => Number((100 + i * 0.1 + d / 100).toFixed(2)));
 const row = (prices, key) => computeRunBias(prices, 2).rows.find(r => r.key === key);
@@ -234,4 +234,107 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
     if (s.entry) assert.ok(s.run_id !== undefined && s.run.bias >= 55);
     else assert.equal(s.run_id, undefined);
 }
+
+// ---- THE BASKET ENTRY: judged on the three contracts the AI buys -----------------------------------------------------------------------------
+{
+    // setup numbers 1-16: base x (bullish momentum, bearish momentum, bullish drift, bearish drift)
+    const expect = [
+        ['even_under5', 'bullish', true, 1, ['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH']],
+        ['even_under5', 'bearish', true, 2, ['DIGITEVEN', 'DIGITUNDER', 'RUNLOW']],
+        ['even_under5', 'bullish', false, 3, ['DIGITEVEN', 'DIGITUNDER', 'CALL']],
+        ['even_under5', 'bearish', false, 4, ['DIGITEVEN', 'DIGITUNDER', 'PUT']],
+        ['odd_over4', 'bullish', true, 5, ['DIGITODD', 'DIGITOVER', 'RUNHIGH']],
+        ['odd_over4', 'bearish', false, 8, ['DIGITODD', 'DIGITOVER', 'PUT']],
+        ['even_over4', 'bearish', true, 10, ['DIGITEVEN', 'DIGITOVER', 'RUNLOW']],
+        ['even_over4', 'bullish', false, 11, ['DIGITEVEN', 'DIGITOVER', 'CALL']],
+        ['odd_under5', 'bullish', true, 13, ['DIGITODD', 'DIGITUNDER', 'RUNHIGH']],
+        ['odd_under5', 'bearish', false, 16, ['DIGITODD', 'DIGITUNDER', 'PUT']],
+    ];
+    for (const [key, dir, mom, number, types] of expect) {
+        const b = basketFor(key, dir, mom);
+        assert.equal(b.number, number, `${key} ${dir} ${mom}`);
+        assert.deepEqual(b.types, types);
+        assert.deepEqual(b.shares, mom ? [0.4, 0.4, 0.2] : [0.35, 0.35, 0.3]);
+    }
+    const all = BASKET_BASE_KEYS.flatMap(k => [true, false].flatMap(m => ['bullish', 'bearish'].map(d => basketFor(k, d, m).number)));
+    assert.deepEqual([...all].sort((a, b) => a - b), Array.from({ length: 16 }, (_, i) => i + 1), 'all 16 setups exist exactly once');
+    assert.equal(basketFor('even_under5', 'none', true), null);
+    assert.equal(basketFor('rise_odd', 'bullish', true), null);
+
+    // replay, DRIFT: digits 0,2 (pattern of 2 ends at tick 1), entry tick 2, exit tick 3 = 100.18: Even wins, Under 5 loses, Rise wins
+    const drift = [100.1, 100.12, 100.15, 100.18, 100.19, 100.17];
+    const pp = PAIR_PATTERNS.find(x => x.key === 'even_under5');
+    const flags = favourFlags(drift, 2);
+    const flag = drift.map(p => pp.digits.includes(lastDigit(p, 2)));
+    const rd = replayBasket(pp, flag, drift, flags, 2, 2, () => 'bullish');
+    assert.equal(rd.n, 1);
+    assert.ok(Math.abs(rd.avg_net - (0.35 * 0.95 - 0.35 + 0.3 * 0.95)) < 0.002, `drift basket net ${rd.avg_net}`);
+    assert.equal(rd.sweeps, 0);
+    assert.equal(replayBasket(pp, flag, drift, flags, 2, 2, () => 'none').n, 0, 'no chart direction = no basket replayed');
+    // a pattern too close to the end of the history has no exit tick yet: not counted
+    assert.equal(replayBasket(pp, flag, drift.slice(0, 3), favourFlags(drift.slice(0, 3), 2), 2, 2, () => 'bullish').n, 0);
+
+    // replay, MOMENTUM: Even + Over 4 on 6,8,6,8 (all rising), the pattern of 4 ends at tick 3 after 3 rises in a row -> Only Ups on 2 ticks
+    const mom = [100.06, 100.08, 100.16, 100.18, 100.2, 100.22, 100.24];
+    const pp2 = PAIR_PATTERNS.find(x => x.key === 'even_over4');
+    const flags2 = favourFlags(mom, 2);
+    const flag2 = mom.map(p => pp2.digits.includes(lastDigit(p, 2)));
+    const rm = replayBasket(pp2, flag2, mom, flags2, 4, 2, () => 'bullish');
+    assert.equal(rm.n, 1);
+    // exit tick = entry (4) + 2 = 6 -> digit 4: Even wins, Over 4 loses; Only Ups: 100.22 > 100.20 and 100.24 > 100.22 -> wins
+    assert.ok(Math.abs(rm.avg_net - (0.4 * 0.95 - 0.4 + 0.2 * ONLY_RUN_PROFIT)) < 0.002, `momentum basket net ${rm.avg_net}`);
+    // the same pattern in a bearish chart builds a different basket: no 3-tick fall run, so drift = Even + Over 4 + FALL (35/35/30), exit tick 5 = 100.22:
+    // Even wins (digit 2), Over 4 loses, Fall loses (100.22 is not below 100.20)
+    const rb = replayBasket(pp2, flag2, mom, flags2, 4, 2, () => 'bearish');
+    assert.equal(rb.n, 1);
+    assert.ok(Math.abs(rb.avg_net - (0.35 * 0.95 - 0.35 - 0.3)) < 0.002, `bearish drift basket net ${rb.avg_net}`);
+    assert.equal(rb.sweeps, 0);
+    // a full sweep is counted: all three lose
+    const sweep = [100.1, 100.12, 100.15, 100.19, 100.18, 100.19];
+    const sw = replayBasket(pp, sweep.map(p => pp.digits.includes(lastDigit(p, 2))), sweep, favourFlags(sweep, 2), 2, 2, () => 'bearish');
+    assert.equal(sw.n, 1);
+    assert.equal(sw.sweeps, 1, 'exit digit 9: Even loses, Under 5 loses, and Fall loses (100.19 is above 100.15) = a full sweep');
+    assert.ok(Math.abs(sw.avg_net - -1) < 0.002, 'a full sweep loses the whole total stake');
+}
+
+// Property check over many random markets: a basket entry is always a digit-pair entry with a chart direction, a setup that matches the AI's table,
+// third-contract support and a basket replay that is not losing; and the path is reachable (some market does produce one).
+{
+    let seed = 12345;
+    const rnd = () => {
+        seed = (seed * 1664525 + 1013904223) % 4294967296;
+        return seed / 4294967296;
+    };
+    let fired = 0;
+    let looked = 0;
+    for (let m = 0; m < 400; m++) {
+        let price = 1000;
+        const drift = (rnd() - 0.5) * 0.4;
+        const prices = [];
+        for (let i = 0; i < 150; i++) {
+            price = Number((price + (rnd() - 0.5 + drift) * 2).toFixed(2));
+            prices.push(price);
+        }
+        const scan = computeRunBias(prices, 2);
+        for (const sg of computeRunSignals(scan, 'X').filter(x => x.pair_types)) {
+            if (!BASKET_BASE_KEYS.includes(sg.pair_key)) {
+                assert.equal(sg.basket_entry, undefined, 'only the four digit bases carry a basket');
+                continue;
+            }
+            looked += 1;
+            const b = basketFor(sg.pair_key, scan.trend, sg.momentum);
+            assert.equal(sg.basket_setup, b ? b.number : null, 'the signal names the same setup the AI will build');
+            if (!sg.basket_entry) continue;
+            fired += 1;
+            assert.ok(sg.entry, 'a basket entry is also a digit-pair entry');
+            assert.ok(scan.trend === 'bullish' || scan.trend === 'bearish');
+            assert.equal(sg.basket.third, b.types[2]);
+            assert.ok(sg.basket.third_bias >= 55, 'the third contract has its own support');
+            assert.ok(sg.basket.outcomes < 10 || sg.basket.avg_net >= 0, 'a basket that was losing after this pattern is not an entry');
+            assert.equal(sg.momentum, sg.basket.regime === 'momentum');
+        }
+    }
+    assert.ok(looked > 0 && fired > 0, `basket entries must be reachable (looked ${looked}, fired ${fired})`);
+}
+
 console.log('runBias checks passed');

@@ -219,6 +219,84 @@ export function replayPair(pair, flag, prices, min_run, decimals = 2) {
     return { n, avg_net: n ? round2(net / n) : null };
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------
+// THE 3-CONTRACT BASKET, judged as the basket the AI really buys. One digit-pair pattern + a third contract chosen by the chart:
+//   direction = the 1-tick chart trend (bullish / bearish; 'none' = no basket)
+//   momentum  = the last MOMENTUM_TICKS ticks all moved that way  -> Only Ups / Only Downs (2 ticks), stakes 40/40/20
+//   otherwise = drift                                             -> Rise / Fall (1 tick),            stakes 35/35/30
+// The setup number (1-16) is fixed here and the AI checks it against its own table, so backend and AI can never disagree on what a signal buys.
+// ---------------------------------------------------------------------------------------------------------------------------------
+export const BASKET_BASE_KEYS = ['even_under5', 'odd_over4', 'even_over4', 'odd_under5']; // setups 1-4, 5-8, 9-12, 13-16
+export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.2];
+export const BASKET_DRIFT_SHARES = [0.35, 0.35, 0.3];
+// Profit per unit staked on a winning leg. Digit and Rise/Fall legs pay about 0.95. Only Ups / Only Downs over 2 ticks win about a quarter of the
+// time on a random walk, so at the same ~5% margin they pay about 0.95 / 0.25 - 1 = 2.8. It is an ESTIMATE (the real payout comes from Deriv's
+// proposal): it only decides whether the replayed basket was above or below break-even, it never moves a stake.
+export const ONLY_RUN_PROFIT = 2.8;
+const LEG_PROFIT = { even: PAIR_LEG_PROFIT, odd: PAIR_LEG_PROFIT, over4: PAIR_LEG_PROFIT, under5: PAIR_LEG_PROFIT, rise: PAIR_LEG_PROFIT, fall: PAIR_LEG_PROFIT, only_up: ONLY_RUN_PROFIT, only_down: ONLY_RUN_PROFIT };
+const THIRD = {
+    momentum: { bullish: { key: 'only_up', type: 'RUNHIGH', label: 'Only Ups' }, bearish: { key: 'only_down', type: 'RUNLOW', label: 'Only Downs' } },
+    drift: { bullish: { key: 'rise', type: 'CALL', label: 'Rise' }, bearish: { key: 'fall', type: 'PUT', label: 'Fall' } },
+};
+
+/** The basket for a base + chart direction + regime: its three contracts (keys and types), their stake shares and the setup number. null = no basket. */
+export function basketFor(pair_key, direction, momentum) {
+    const index = BASKET_BASE_KEYS.indexOf(pair_key);
+    if (index < 0 || (direction !== 'bullish' && direction !== 'bearish')) return null;
+    const pp = PAIR_PATTERNS.find(x => x.key === pair_key);
+    const regime = momentum ? 'momentum' : 'drift';
+    const third = THIRD[regime][direction];
+    const shares = momentum ? BASKET_MOMENTUM_SHARES : BASKET_DRIFT_SHARES;
+    const keys = [...pp.keys, third.key];
+    return {
+        number: index * 4 + 1 + (momentum ? 0 : 2) + (direction === 'bullish' ? 0 : 1),
+        direction,
+        regime,
+        keys,
+        types: [...pp.types, third.type],
+        third,
+        shares,
+        profits: keys.map(k => LEG_PROFIT[k]),
+    };
+}
+
+/** How many ticks in a row, ending at each tick, are true: out[i] is the run that ends at tick i. */
+const runEndingAt = flag => {
+    const out = new Array(flag.length).fill(0);
+    for (let i = 0; i < flag.length; i++) out[i] = flag[i] ? (i ? out[i - 1] : 0) + 1 : 0;
+    return out;
+};
+
+/**
+ * Replays the basket the way the AI buys it: every time the pair pattern first reaches `min_run` ticks (tick i), look at what the chart said AT THAT
+ * TICK (trend from the prices up to i only, momentum from the rise / fall run ending at i), build that tick's basket, settle all three contracts on
+ * their own exit ticks and add up the net result per 1.00 staked in total (stakes split by the basket's shares: a win pays share x profit, a loss
+ * costs the share). Ticks with no chart direction are skipped, the AI does not trade them either. `trendAt(i)` can be replaced (tests).
+ */
+export function replayBasket(pp, flag, prices, flags, min_run, decimals = 2, trendAt = null) {
+    const trend_of = trendAt ?? (i => detectTrend(prices.slice(Math.max(0, i + 1 - TREND_WINDOW), i + 1)));
+    const rises = runEndingAt(flags.rise);
+    const falls = runEndingAt(flags.fall);
+    let len = 0;
+    let n = 0;
+    let net = 0;
+    let sweeps = 0;
+    for (let i = 0; i < flag.length; i++) {
+        len = flag[i] ? len + 1 : 0;
+        if (len !== min_run) continue;
+        const direction = trend_of(i);
+        if (direction !== 'bullish' && direction !== 'bearish') continue;
+        const momentum = (direction === 'bullish' ? rises[i] : falls[i]) >= MOMENTUM_TICKS;
+        const basket = basketFor(pp.key, direction, momentum);
+        const results = basket.keys.map(k => settleAt(k, prices, i, decimals));
+        if (results.some(r => r === null)) continue;
+        net += results.reduce((sum, won, j) => sum + basket.shares[j] * (won ? basket.profits[j] : -1), 0);
+        if (!results.some(Boolean)) sweeps += 1;
+        n += 1;
+    }
+    return { n, avg_net: n ? Math.round((net / n) * 1000) / 1000 : null, sweeps };
+}
+
 /**
  * @param {number[]} prices oldest first
  * @param {number} decimals the symbol's price precision (for last digits)
@@ -282,7 +360,13 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
             const t = runStats(pair_flags[pp.versus], min_run);
             const both = m.ticks_in_runs + t.ticks_in_runs;
             const rp = replayPair(pp, pair_flags[pp.key], tail, min_run, decimals);
-            return { min_run, runs: m.runs, ticks_in_runs: m.ticks_in_runs, bias: both ? round2((m.ticks_in_runs / both) * 100) : 50, outcomes: rp.n, avg_net: rp.avg_net };
+            const level = { min_run, runs: m.runs, ticks_in_runs: m.ticks_in_runs, bias: both ? round2((m.ticks_in_runs / both) * 100) : 50, outcomes: rp.n, avg_net: rp.avg_net };
+            // the basket bases are also replayed as the 3-contract basket (what the AI buys), not only as the two digit legs
+            if (BASKET_BASE_KEYS.includes(pp.key)) {
+                const rb = replayBasket(pp, pair_flags[pp.key], tail, flags, min_run, decimals);
+                level.basket = { outcomes: rb.n, avg_net: rb.avg_net, sweeps: rb.sweeps };
+            }
+            return level;
         });
         return {
             key: pp.key,
@@ -356,12 +440,32 @@ export function computeRunSignals(scan, symbol) {
             const net_ok = !replayed || level.avg_net >= 0; // the pair must have at least broken even after this pattern
             const trend_ok = !pp.trend || scan.trend === pp.trend; // Rise + Odd needs higher highs, Fall + Even lower lows on the 1-tick chart
             const entry = fresh && net_ok && trend_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
+            // BASKET ENTRY: the entry is judged on all three contracts the AI buys, not only the digit pair.
+            //   1. the digit pair entry above (fresh pattern, bias, digit legs not losing after it),
+            //   2. the chart gives a direction, which picks the third contract exactly as the AI does,
+            //   3. that third contract has its own support: its run bias is at least 55%,
+            //   4. replayed as the whole basket (stakes split, each leg on its own exit tick) the basket was not losing after this pattern.
+            let basket = null;
+            if (BASKET_BASE_KEYS.includes(pp.key)) {
+                const momentum = (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS);
+                const setup = basketFor(pp.key, scan.trend, momentum);
+                const third_row = setup ? scan.rows.find(r => r.key === setup.third.key) : null;
+                const third_bias = third_row ? third_row.levels[0].bias : null;
+                const third_ok = third_bias !== null && third_bias >= 50 + MIN_ENTRY_BIAS_EDGE;
+                const rb = level.basket ?? { outcomes: 0, avg_net: null };
+                const basket_replayed = rb.outcomes >= MIN_OUTCOME_SAMPLE && rb.avg_net !== null;
+                const basket_net_ok = !basket_replayed || rb.avg_net >= 0;
+                basket = { setup: setup ? setup.number : null, direction: scan.trend, regime: momentum ? 'momentum' : 'drift', third: setup ? setup.third.type : null, third_bias, outcomes: rb.outcomes, avg_net: rb.avg_net, entry: Boolean(entry && setup && third_ok && basket_net_ok) };
+            }
             (entry ? entries : extras).push({
                 family: 'run_bias',
                 strategy: 'run_bias',
                 contract_type: pp.types[0], // the first leg; pair_types lists both
                 pair_types: pp.types,
                 pair_key: pp.key,
+                basket_entry: basket ? basket.entry : undefined, // true = the AI may buy the 3-contract basket on this signal
+                basket_setup: basket ? basket.setup : undefined, // 1-16: which of the 16 setups this signal is (the AI cross-checks it)
+                basket: basket ?? undefined,
                 trend: scan.trend, // the 1-tick chart direction (bullish / bearish / none): the basket's third contract follows it
                 momentum: (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS),
                 duration_ticks: 1,

@@ -84,6 +84,12 @@ export type TDigitSignal = {
     pair_types?: string[];
     /** run_bias pair signals: which of the five pairs this is (even_under5, odd_over4, rise_odd, fall_even). */
     pair_key?: string;
+    /** Basket bases only: the backend judged the whole 3-contract basket (digit pair + third contract + replayed basket result) and it may be bought. */
+    basket_entry?: boolean;
+    /** Basket bases only: which of the 16 setups this signal is (null = no chart direction). The AI checks it against its own table. */
+    basket_setup?: number | null;
+    /** Rise / Only Ups need a bullish chart, Fall / Only Downs a bearish one; basket signals carry the chart direction here. */
+    momentum?: boolean;
     trend?: string;
     /** run_bias family only: every analysed run length of this contract (2 AND 3 ticks for the digit contracts) favours it at once. */
     confluence?: boolean;
