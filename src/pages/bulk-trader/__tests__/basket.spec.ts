@@ -1,4 +1,4 @@
-import { AutoPilotEngine, TAutoPilotConfig, buildConfigFromPreset, BASKET_BASES, basketSetup, basketStakes, basketMinTotal, basketHasConflict } from '../autoPilotEngine';
+import { AutoPilotEngine, TAutoPilotConfig, buildConfigFromPreset, BASKET_BASES, basketSetup, basketStakes, basketMinTotal, basketHasConflict, basketDiagnosis } from '../autoPilotEngine';
 import type { TSnapshotMap } from '../analysis-types';
 
 jest.mock('uuid', () => ({ v4: () => 'test-id' }));
@@ -264,5 +264,41 @@ describe('the 1.5x martingale state machine', () => {
         expect(c.basket_mode).toBe(true);
         expect(c.basket_keys).toEqual(['even_under5', 'odd_over4', 'even_over4', 'odd_under5']);
         expect(c.martingale_multiplier).toBe(1.5);
+    });
+});
+
+describe('a silent AI explains itself', () => {
+    const snap = (signals: unknown[]) => ({ R_X: { signals } });
+    const old = { family: 'run_bias', pair_types: ['DIGITEVEN', 'DIGITUNDER'], pair_key: 'even_under5', entry: true, confidence: 40 };
+
+    it('an OLD backend (no basket fields) is named as the reason', () => {
+        expect(basketDiagnosis(snap([old]), {})).toMatch(/OLD version/);
+    });
+
+    it('no digit-pair signals at all is reported', () => {
+        expect(basketDiagnosis(snap([]), {})).toMatch(/no digit-pair signals at all/);
+    });
+
+    it('a quiet market, then the reasons digit-pair entries were dropped', () => {
+        const base = { ...old, basket_setup: 1, basket_entry: false };
+        expect(basketDiagnosis(snap([{ ...base, entry: false }]), {})).toMatch(/No digit-pair entry on any market/);
+        expect(basketDiagnosis(snap([{ ...base, basket_setup: null }]), {})).toMatch(/1 had no chart direction/);
+        expect(basketDiagnosis(snap([{ ...base, basket: { third_bias: 51 } }]), {})).toMatch(/no support for the third contract/);
+        expect(basketDiagnosis(snap([{ ...base, basket: { third_bias: 60 } }]), {})).toMatch(/losing when replayed/);
+        expect(basketDiagnosis(snap([{ ...base, basket_entry: true, confidence: 12 }]), { min_confidence: 20 })).toMatch(/weaker than the minimum signal strength \(20\)/);
+        expect(basketDiagnosis(snap([{ ...base, basket_entry: true }]), { basket_keys: ['odd_over4'] })).toMatch(/unticked base/);
+        expect(basketDiagnosis(snap([{ ...base, basket_entry: true }]), {})).toMatch(/1 basket entry is ready/);
+    });
+
+    it('with an old backend the AI logs the reason as an error once it has waited', async () => {
+        const h = make({ R_OLD: [{ ...old, run_id: 1, contract_type: 'DIGITEVEN', label: 'x', basis: '' } as never] }, bk);
+        h.engine.start();
+        await wait(60);
+        (h.engine as unknown as { started_at: number }).started_at = Date.now() - 20_000; // pretend it has been running a while
+        (h.engine as unknown as { last_wait_emit: number }).last_wait_emit = 0;
+        await wait(400);
+        expect(h.logs.some(l => /Not buying yet: The backend is an OLD version/.test(l))).toBe(true);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
     });
 });

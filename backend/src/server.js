@@ -52,7 +52,8 @@ if (isPersistenceEnabled()) {
 }
 
 app.get('/health', (_req, res) => {
-    res.json({ ok: true, persistence: isPersistenceEnabled(), analysis_symbols: DIGIT_SYMBOLS.length });
+    // basket_api: 2 = this backend sends basket_entry / basket_setup on the digit-pair signals (the 3-contract basket AI needs it)
+    res.json({ ok: true, persistence: isPersistenceEnabled(), analysis_symbols: DIGIT_SYMBOLS.length, basket_api: 2 });
 });
 
 // REST fallback / initial page-load snapshot for the Digit Matrix tab — the

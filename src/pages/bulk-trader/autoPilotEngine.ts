@@ -188,6 +188,48 @@ export const basketStakes = (total: number, legs: TBasketLeg[]): number[] => {
     return [...parts, Number((total - parts.reduce((a, b) => a + b, 0)).toFixed(2))];
 };
 
+/**
+ * Why a basket-mode AI is not buying, in one line, from what the backend is sending right now. Tells an old backend (no basket fields) apart from a
+ * quiet market, and counts what removed the digit-pair entries it did see (no chart direction, third contract unsupported, replayed basket losing,
+ * signal weaker than the minimum strength, base unticked).
+ */
+export const basketDiagnosis = (
+    snapshots: Record<string, { signals: unknown[] }>,
+    config: { basket_keys?: string[]; min_confidence?: number },
+): string => {
+    const keys = new Set(config.basket_keys ?? ALL_BASKET_KEYS);
+    type S = { pair_key?: string; pair_types?: string[]; entry?: boolean; basket_entry?: boolean; basket_setup?: number | null; confidence?: number; basket?: { setup?: number | null; third_bias?: number | null } };
+    let pair = 0, entries = 0, old_backend = 0, unticked = 0, no_direction = 0, third = 0, replay = 0, weak = 0, ready = 0;
+    for (const snap of Object.values(snapshots)) {
+        for (const raw of snap.signals as S[]) {
+            if (!raw.pair_types || !raw.pair_key || !ALL_BASKET_KEYS.includes(raw.pair_key)) continue;
+            pair += 1;
+            if (raw.basket_setup === undefined) old_backend += 1;
+            if (!raw.entry) continue;
+            entries += 1;
+            if (!keys.has(raw.pair_key)) unticked += 1;
+            else if (raw.basket_entry !== true) {
+                if (raw.basket_setup === null || raw.basket_setup === undefined) no_direction += 1;
+                else if ((raw.basket?.third_bias ?? 100) < 55) third += 1;
+                else replay += 1;
+            } else if ((config.min_confidence ?? 0) > 0 && (raw.confidence ?? 0) < (config.min_confidence ?? 0)) weak += 1;
+            else ready += 1;
+        }
+    }
+    if (pair === 0) return 'The backend sent no digit-pair signals at all. Is the backend running and connected?';
+    if (old_backend === pair) return 'The backend is an OLD version: it sends no basket fields (basket_entry / basket_setup), so no basket can be bought. Deploy the backend from this version (Render), then restart the AI.';
+    if (entries === 0) return 'No digit-pair entry on any market right now (the last digits are not clustering). Waiting.';
+    if (ready > 0) return `${ready} basket entr${ready === 1 ? 'y is' : 'ies are'} ready.`;
+    const parts = [
+        no_direction ? `${no_direction} had no chart direction` : '',
+        third ? `${third} had no support for the third contract` : '',
+        replay ? `${replay} were losing when replayed as a basket` : '',
+        weak ? `${weak} were weaker than the minimum signal strength (${config.min_confidence})` : '',
+        unticked ? `${unticked} were on an unticked base` : '',
+    ].filter(Boolean);
+    return `${entries} digit-pair entr${entries === 1 ? 'y' : 'ies'} seen, none is a basket entry: ${parts.join(', ')}.`;
+};
+
 /** What the recovery lock matches on: the pair a signal belongs to, or its contract type when it is a single contract. */
 const recoveryKey = (c: { pair_key?: string; contract_type: string }): string => pairKeyOf(c) ?? c.contract_type;
 
@@ -1070,7 +1112,15 @@ export class AutoPilotEngine {
         if (!candidate) {
             if (Date.now() - this.last_wait_emit > 30_000) {
                 this.last_wait_emit = Date.now();
-                this._emit({ phase: 'waiting', reason: 'waiting for the backend to signal an entry (3 or more ticks in a row in favour of a contract)' });
+                if (this.config.basket_mode === true && Date.now() - this.started_at < 10_000) {
+                    this.last_wait_emit = Date.now() - 20_000; // the first snapshots may still be arriving: look again in 10 seconds
+                } else if (this.config.basket_mode === true) {
+                    // Say WHY nothing is being bought, so a silent AI is never a mystery (an old backend, no direction, a locked market ...).
+                    const why = basketDiagnosis(this.getSnapshots() as Record<string, { signals: unknown[] }>, this.config);
+                    const lock = this.lock ? ` Recovering on ${this.lock.symbol}: only that market and pair may be bought (switch after ${this.config.switch_wait_seconds ?? DEFAULT_SWITCH_WAIT_SECONDS}s without an entry).` : '';
+                    this.hooks?.onLog?.(/OLD version|no digit-pair signals at all/.test(why) ? 'error' : 'info', `Not buying yet: ${why}${lock}`);
+                    this._emit({ phase: 'waiting', reason: `${why}${lock}` });
+                } else this._emit({ phase: 'waiting', reason: 'waiting for the backend to signal an entry (3 or more ticks in a row in favour of a contract)' });
             }
             this.poll_timer = setTimeout(() => this._findAndEnter(stake, tag), SIGNAL_POLL_MS);
             return;
