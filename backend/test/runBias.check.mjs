@@ -26,18 +26,19 @@ assert.deepEqual([st.runs, st.ticks_in_runs, st.longest, st.current], [2, 7, 4, 
 st = runStats(flags10, 2);
 assert.deepEqual([st.runs, st.ticks_in_runs], [3, 9]);
 
-// a run fires at 2 ticks AND at 3 ticks (two different run ids), never twice on the same level; an old run does not fire
+// a run fires on its 2-tick level (fast rule: 2 consecutive ticks + the digit frequency), once per run; an old run does not fire
 const biasedEven = [];
 for (let i = 0; i < 40; i++) biasedEven.push(2, 4, 6, 8, 0, 1); // long even runs (and 0 counts as even), a single odd between; Even wins after every replay
 const at = (breaker, digits) => computeRunSignals(computeRunBias(px([...biasedEven, breaker, ...digits]), 2), 'T');
-const entries = sigs => sigs.filter(s => s.entry && s.contract_type === 'DIGITEVEN');
+const entries = sigs => sigs.filter(s => s.entry && s.contract_type === 'DIGITEVEN' && !s.pair_types); // the single Even contract (a pair that starts with Even is a different signal)
 const two = entries(at(1, [2, 4]));
 assert.equal(two.length, 1, 'level 2 fires on the second tick of the run');
 assert.equal(two[0].run.min_run, 2);
 const three = entries(at(1, [2, 4, 6]));
 const levelsFiring = three.map(s => s.run.min_run).sort();
-assert.ok(levelsFiring.includes(3), 'level 3 fires on the third tick');
-assert.equal(new Set(three.map(s => s.run_id)).size, three.length, 'one run id per level');
+assert.deepEqual(levelsFiring, [2], 'the FAST rule fires on the 2-tick level only: the AI does not wait for the 3rd tick, and the same run is not bought twice');
+assert.equal(three.length, 1);
+assert.equal(three[0].run_id, two[0].run_id, 'the run keeps its id when it grows from 2 to 3 ticks');
 const stale = entries(at(1, [2, 4, 6, 8, 0, 2]));
 assert.equal(stale.length, 0, 'a run that is long past its levels no longer fires');
 for (const s of three) assert.ok(s.run.current <= s.run.min_run + FRESH_SLACK);
@@ -297,8 +298,8 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
     assert.ok(Math.abs(sw.avg_net - -1) < 0.002, 'a full sweep loses the whole total stake');
 }
 
-// Property check over many random markets: a basket entry is always a digit-pair entry with a chart direction, a setup that matches the AI's table,
-// third-contract support and a basket replay that is not losing; and the path is reachable (some market does produce one).
+// Property check over many random markets: a basket entry is always a digit-pair entry (2 consecutive ticks + the digit frequency) with a chart direction and a setup that matches
+// the AI's table; and the path is reachable (some market does produce one).
 {
     let seed = 12345;
     const rnd = () => {
@@ -307,6 +308,7 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
     };
     let fired = 0;
     let looked = 0;
+    let loose = 0;
     for (let m = 0; m < 400; m++) {
         let price = 1000;
         const drift = (rnd() - 0.5) * 0.4;
@@ -329,12 +331,15 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
             assert.ok(sg.entry, 'a basket entry is also a digit-pair entry');
             assert.ok(scan.trend === 'bullish' || scan.trend === 'bearish');
             assert.equal(sg.basket.third, b.types[2]);
-            assert.ok(sg.basket.third_bias >= 55, 'the third contract has its own support');
-            assert.ok(sg.basket.outcomes < 10 || sg.basket.avg_net >= 0, 'a basket that was losing after this pattern is not an entry');
+            // FAST rule: 2 consecutive ticks + the digit frequency favouring the digit legs + a chart direction. Nothing else holds the basket back.
+            assert.equal(sg.run.min_run, 2, 'a basket fires on the 2-tick level');
+            assert.ok(sg.digit_freq && sg.digit_freq.favoured, 'the digit frequency favours the digit legs');
+            if (!(sg.basket.third_bias >= 55) || (sg.basket.outcomes >= 10 && sg.basket.avg_net < 0)) loose += 1; // would have waited under the old rules
             assert.equal(sg.momentum, sg.basket.regime === 'momentum');
         }
     }
     assert.ok(looked > 0 && fired > 0, `basket entries must be reachable (looked ${looked}, fired ${fired})`);
+    assert.ok(loose > 0, `the AI no longer waits for the third contract's bias or the basket replay (${loose} of ${fired} entries would have waited before)`);
 }
 
 console.log('runBias checks passed');

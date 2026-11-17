@@ -27,7 +27,6 @@ import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow } from './tradeHistory';
 import type { TRecoveryMode } from './autoPilotEngine';
-import { DigitFrequencyCard } from './DigitFrequencyCard';
 import { PairFrequencyCard } from './PairFrequencyCard';
 import { RunBiasCard } from './RunBiasCard';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
@@ -980,8 +979,6 @@ const AiAgentPanel = ({
             <RunBiasCard snapshots={snapshots} />
 
             <PairFrequencyCard snapshots={snapshots} />
-
-            <DigitFrequencyCard snapshots={snapshots} />
 
             {(history.length > 0 || activity.length > 0) && (
                 <div className='ai-agent-panel__history'>
