@@ -20,7 +20,7 @@ const shortName = (symbol: string) => symbol.replace(/^1HZ(\d+)V$/, 'V$1 (1s)');
  * The backend's run bias: for every 1-second market, how strongly the last ticks favour each contract, measured as its share of
  * all the runs of consecutive ticks (50% = balanced; the higher, the more the market favours it). Even/Odd and Over 4/Under 5 show
  * the 2-tick bias / 3-tick bias; the other contracts the bias from 2 ticks. A number in brackets is
- * a run that is on right now; green means the backend has flagged it as an entry signal, which is what the AI buys on.
+ * a run that is on right now; a ✓ means at least 2 of the four digits (1st, 2nd, 3rd most and least appearing, see the Digit frequency card) favour that contract, which boosts its confidence and counts toward its confluence; green means the backend has flagged it as an entry signal, which is what the AI buys on.
  */
 export const RunBiasCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
     const symbols = Object.keys(snapshots)
@@ -55,10 +55,11 @@ export const RunBiasCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
                                     <td>{localize(label)}</td>
                                     {symbols.map(s => {
                                         const row = snapshots[s].run_bias?.rows.find(r => r.key === key) ?? snapshots[s].run_bias?.pairs?.find(r => r.key === key);
+                                        const digit = snapshots[s].digit_freq?.logic?.find(l => l.key === key);
                                         const entry = !!row && ('types' in row ? entryKeys(s).has((row as { types: string[] }).types[0]) : entryKeys(s).has((row as { contract_type: string }).contract_type));
                                         return (
-                                            <td key={s} className={entry ? 'is-win' : ''} title={row ? `${row.runs} runs, ${row.ticks_in_runs} ticks in runs, longest ${row.longest}. Replayed entry and exit ticks after the pattern: ${(row.levels ?? []).map(l => `${l.min_run}+ ticks: ${l.wins ?? 0}/${l.outcomes ?? 0} won${l.hit == null ? '' : ` (${l.hit}%)`}`).join(', ')}` : ''}>
-                                                {row ? `${(row.levels?.length ? row.levels.map(l => `${l.bias.toFixed(0)}%`).join(' / ') : `${row.bias.toFixed(0)}%`)}${row.current ? ` (${row.current})` : ''}` : '-'}
+                                            <td key={s} className={entry ? 'is-win' : ''} title={row ? `${digit ? `Digit frequency (1st/2nd/3rd most and least appearing digit): ${digit.verdict}, ${digit.agree} of the 4 digits favour it. ` : ''}${row.runs} runs, ${row.ticks_in_runs} ticks in runs, longest ${row.longest}. Replayed entry and exit ticks after the pattern: ${(row.levels ?? []).map(l => `${l.min_run}+ ticks: ${l.wins ?? 0}/${l.outcomes ?? 0} won${l.hit == null ? '' : ` (${l.hit}%)`}`).join(', ')}` : ''}>
+                                                {row ? `${(row.levels?.length ? row.levels.map(l => `${l.bias.toFixed(0)}%`).join(' / ') : `${row.bias.toFixed(0)}%`)}${row.current ? ` (${row.current})` : ''}${digit?.favoured ? ' ✓' : ''}` : '-'}
                                             </td>
                                         );
                                     })}

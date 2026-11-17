@@ -3,6 +3,7 @@ import { computePairFrequencies, computePairSignals } from './pairScan.js';
 import { computeSignals, computeStats, createDigitWindow, pushDigit } from './digitAnalysis.js';
 import { computeContractSignals, createPriceWindow, pushPrice } from './contractAnalysis.js';
 import { computeRunBias, computeRunSignals } from './runBias.js';
+import { computeDigitFrequency } from './digitFrequency.js';
 import { computeStreakSignal } from './streakStrategy.js';
 
 // Deriv's current documentation ("Use ONLY this API") and live testing both
@@ -161,6 +162,12 @@ export class MarketFeed {
             if (!this._pairCache) this._pairCache = new Map();
             this._pairCache.set(symbol, cached);
         }
+        // Digit frequency: the 1st / 2nd / 3rd most appearing and the least appearing digit, and the frequency logic for Even / Odd / Over 4 / Under 5.
+        // Computed before the run signals: the four digits add to their confluence.
+        if (cached.digit_key !== cache_key) {
+            cached.digit_freq = computeDigitFrequency(priceWindow.prices, this.getPipSize(symbol));
+            cached.digit_key = cache_key;
+        }
         // Run bias: how often 3+ ticks in a row favoured each contract, and whether such a run is happening right now (an ENTRY signal).
         if (cached.run_key !== cache_key) {
             cached.run_bias = computeRunBias(priceWindow.prices, this.getPipSize(symbol), priceWindow.total);
@@ -168,11 +175,11 @@ export class MarketFeed {
                 this._dp_warned.add(symbol);
                 console.warn(`[marketFeed] ${symbol}: pip size says ${cached.run_bias.reported_decimals} decimals but its prices print ${cached.run_bias.decimals}; the prices are used for the digits.`);
             }
-            cached.run_signals = computeRunSignals(cached.run_bias, symbol);
+            cached.run_signals = computeRunSignals(cached.run_bias, symbol, cached.digit_freq);
             cached.run_key = cache_key;
         }
         const signals = [...digit_signals, ...contract_signals, ...cached.signals, ...cached.run_signals].sort((a, b) => b.confidence - a.confidence);
-        return { stats, signals, pairs: cached.pairs, run_bias: cached.run_bias };
+        return { stats, signals, pairs: cached.pairs, run_bias: cached.run_bias, digit_freq: cached.digit_freq };
     }
 
     /**

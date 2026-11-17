@@ -93,6 +93,15 @@ export type TDigitSignal = {
     trend?: string;
     /** run_bias family only: every analysed run length of this contract (2 AND 3 ticks for the digit contracts) favours it at once. */
     confluence?: boolean;
+    /** run_bias family only: the run lengths alone agree (the old `confluence`), before the four digits are counted. */
+    levels_confluence?: boolean;
+    /** Even / Odd / Over 4 / Under 5 (and the pairs made of them): at least 2 of the four digits (1st / 2nd / 3rd most appearing, least appearing) favour this contract. `confluence` needs this too. */
+    digit_confluence?: boolean;
+    /** Confidence points the digits added (5 / 10 / 15 for 2 / 3 / 4 of the four digits favouring the contract; 0 otherwise). Never changes `entry`. */
+    digit_boost?: number;
+    /** The confidence before the digit boost. */
+    base_confidence?: number;
+    digit_freq?: { agree: number; top3_votes: number; least_inside: boolean; pct: number; verdict: 'favoured' | 'split' | 'none' };
     /** run_bias family only: which run of ticks this is (the tick count when it started), so one run is traded once. */
     run_id?: number | string;
     /** run_bias family only: the numbers behind the signal (`min_run` = the run length this signal was measured on). */
@@ -114,6 +123,42 @@ export type TPairRow = {
 
 export type TPairScan = { n: number; barrier: number; rows: TPairRow[] };
 
+/** One digit of the backend's digit-frequency ranking (see backend/src/digitFrequency.js). `tied` = how many other digits share its count. */
+export type TDigitRank = { digit: number; count: number; pct: number; tied: number };
+
+/** The frequency logic of one digit contract. `agree` = how many of the four digits (1st / 2nd / 3rd most appearing, least appearing) favour it; favoured = at least 2 of the 4 AND ahead of its opposite. */
+export type TDigitLogic = {
+    key: 'even' | 'odd' | 'over4' | 'under5';
+    contract_type: string;
+    label: string;
+    /** % of the window's ticks that fell on this contract's digits. */
+    pct: number;
+    /** How many of the 3 most appearing digits belong to this contract (0-3). */
+    top3_votes: number;
+    /** The least appearing digit belongs to this contract (so it does NOT favour it). */
+    least_inside: boolean;
+    /** How many of the four digits favour this contract (0-4): the top-3 digits that belong to it, plus 1 when the least appearing digit is on the other side. */
+    agree: number;
+    favoured: boolean;
+    /** favoured = at least 2 of 4 and ahead of the opposite; split = 2 of 4 but level with the opposite (a 2-2 split favours neither); none = fewer than 2. */
+    verdict: 'favoured' | 'split' | 'none';
+};
+
+/** The backend's digit frequency for one market: 1st / 2nd / 3rd most appearing digit, the least appearing digit, and the Even / Odd / Over 4 / Under 5 logic. */
+export type TDigitFreq = {
+    n: number;
+    decimals?: number;
+    ranking: TDigitRank[];
+    first?: TDigitRank;
+    second?: TDigitRank;
+    third?: TDigitRank;
+    least?: TDigitRank;
+    logic: TDigitLogic[];
+    even_odd?: 'even' | 'odd' | null;
+    over_under?: 'over4' | 'under5' | null;
+    last_digit?: number;
+};
+
 export type TSymbolSnapshot = {
     stats: TDigitStats;
     signals: TDigitSignal[];
@@ -121,6 +166,8 @@ export type TSymbolSnapshot = {
     pairs?: TPairScan;
     /** The backend's run bias: how often 3+ ticks in a row favoured each contract (see backend/src/runBias.js). */
     run_bias?: TRunBias;
+    /** Digit frequency: the most and least appearing digits and the Even / Odd / Over 4 / Under 5 frequency logic (see backend/src/digitFrequency.js). */
+    digit_freq?: TDigitFreq;
 };
 
 export type TRunBiasRow = {

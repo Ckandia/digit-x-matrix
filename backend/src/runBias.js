@@ -390,17 +390,30 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
  *   entry = the run has reached that level (and is not stale) AND the bias on that level is at least 55%.
  * The run id is per run AND per level, so a run can fire at 2 ticks and again at 3 without ever firing the same level twice.
  */
-export function computeRunSignals(scan, symbol) {
+/** Confidence points added when 2, 3 or all 4 of the digits (1st / 2nd / 3rd most appearing, least appearing) favour a contract. */
+export const DIGIT_BOOST = { 2: 5, 3: 10, 4: 15 };
+
+export function computeRunSignals(scan, symbol, digit_freq = null) {
     if (!scan || !scan.rows.length) return [];
+    // DIGIT FREQUENCY BOOST (Even / Odd / Over 4 / Under 5): the 1st, 2nd and 3rd most appearing digit and the least appearing digit
+    // (backend/src/digitFrequency.js) each favour a contract or not. NOT all four have to agree: when at least 2 favour a contract (and it
+    // is ahead of its opposite) they BOOST its confidence and count toward its confluence. The boost only raises `confidence` (which ranks
+    // entries and passes the minimum signal strength); it never sets, delays or blocks `entry`.
+    const digit_logic = key => digit_freq?.logic?.find(l => l.key === key) ?? null;
+    const boost_for = dl => (dl && dl.favoured ? DIGIT_BOOST[dl.agree] ?? 0 : 0);
     const entries = [];
     const extras = [];
     for (const row of scan.rows) {
         const def = RUN_CONTRACTS.find(c => c.key === row.key);
         // Confluence: EVERY analysed run length of this contract (2 AND 3 ticks for Even/Odd and Over 4/Under 5) favours it at once.
-        const confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
+        const levels_confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
+        const dl = digit_logic(row.key); // null for Rise / Fall / Only Ups / Only Downs, or when there is no digit frequency yet
+        const confluence = levels_confluence && (dl ? dl.favoured : true);
+        const digit_boost = boost_for(dl);
         for (const level of row.levels) {
             if (level.bias <= 50) continue;
-            const confidence = Math.round(clamp((level.bias - 50) * 2, 0, 100));
+            const base_confidence = Math.round(clamp((level.bias - 50) * 2, 0, 100));
+            const confidence = Math.min(100, base_confidence + digit_boost);
             const fresh = row.current >= level.min_run && row.current <= level.min_run + FRESH_SLACK;
             // Rise / Only Ups need a confirmed higher-high trend, Fall / Only Downs a lower-low trend on the 1-tick chart (checked here, so
             // the AI can buy the very next tick without asking for the chart).
@@ -422,6 +435,11 @@ export function computeRunSignals(scan, symbol) {
                 confidence,
                 entry,
                 confluence,
+                levels_confluence,
+                digit_confluence: dl ? dl.favoured : undefined, // at least 2 of the four digits (1st / 2nd / 3rd most, least) favour this contract
+                digit_boost: dl ? digit_boost : undefined, // confidence points added by the digits (0 when they do not favour it)
+                base_confidence: dl ? base_confidence : undefined, // the confidence before the boost
+                digit_freq: dl ? { agree: dl.agree, top3_votes: dl.top3_votes, least_inside: dl.least_inside, pct: dl.pct, verdict: dl.verdict } : undefined,
                 run_id: entry ? `${row.run_start}:${level.min_run}` : undefined,
                 run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run, outcomes: level.outcomes, wins: level.wins, hit: level.hit, pattern: row.pattern },
                 basis: `Run bias: ${row.label} had ${level.runs} runs of ${level.min_run}+ ticks on ${symbol} over the last ${scan.n} ticks (bias ${level.bias}%, run now ${row.current}). Replayed entry and exit ticks after the same pattern: ${level.wins}/${level.outcomes} won${level.hit === null ? '' : ` (${level.hit}%)`}.`,
@@ -432,7 +450,12 @@ export function computeRunSignals(scan, symbol) {
     // Pair signals: the sequence favours two contracts at once, so both are bought together.
     for (const row of scan.pairs ?? []) {
         const pp = PAIR_PATTERNS.find(x => x.key === row.key);
-        const confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
+        const levels_confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
+        // a pair is digit-confluent when the four digits favour every digit leg of it (Even + Under 5: both; Rise + Odd: the Odd leg)
+        const digit_legs = pp.keys.map(k => digit_logic(k)).filter(Boolean);
+        const digit_confluence = digit_legs.length ? digit_legs.every(l => l.favoured) : undefined;
+        const confluence = levels_confluence && (digit_confluence === undefined ? true : digit_confluence);
+        const digit_boost = digit_legs.length && digit_confluence ? Math.min(...digit_legs.map(l => DIGIT_BOOST[l.agree] ?? 0)) : 0; // the weaker leg sets the boost
         for (const level of row.levels) {
             if (level.bias <= 50) continue;
             const fresh = row.current >= level.min_run && row.current <= level.min_run + FRESH_SLACK;
@@ -471,9 +494,12 @@ export function computeRunSignals(scan, symbol) {
                 duration_ticks: 1,
                 prediction: pp.types[0] === 'DIGITOVER' ? 4 : undefined,
                 label: pp.label,
-                confidence: Math.round(clamp((level.bias - 50) * 2, 0, 100)),
+                confidence: Math.min(100, Math.round(clamp((level.bias - 50) * 2, 0, 100)) + digit_boost),
                 entry,
                 confluence,
+                levels_confluence,
+                digit_confluence,
+                digit_boost: digit_legs.length ? digit_boost : undefined,
                 run_id: entry ? `${row.run_start}:${level.min_run}:pair` : undefined,
                 run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run, outcomes: level.outcomes, avg_net: level.avg_net, pattern: row.pattern },
                 basis: `Pair: the last ${pp.cross ? 'ticks' : 'digits'} favour ${pp.label} at once (${pp.cross ? 'price move and digit together' : pp.digits.join(', ')}) on ${symbol}: bias ${level.bias}%, run now ${row.current}, replayed net ${level.avg_net ?? 'n/a'} per pair over ${level.outcomes} entries.`,

@@ -53,7 +53,7 @@ if (isPersistenceEnabled()) {
 
 app.get('/health', (_req, res) => {
     // basket_api: 2 = this backend sends basket_entry / basket_setup on the digit-pair signals (the 3-contract basket AI needs it)
-    res.json({ ok: true, persistence: isPersistenceEnabled(), analysis_symbols: DIGIT_SYMBOLS.length, basket_api: 2 });
+    res.json({ ok: true, persistence: isPersistenceEnabled(), analysis_symbols: DIGIT_SYMBOLS.length, basket_api: 2, digit_freq_api: 1 });
 });
 
 // REST fallback / initial page-load snapshot for the Digit Matrix tab — the
@@ -84,6 +84,13 @@ app.get('/api/analysis/snapshot', (_req, res) => {
 app.get('/api/analysis/pairs', (_req, res) => {
     const data = {};
     for (const [symbol, snapshot] of Object.entries(marketFeed.getAllSnapshots())) if (snapshot?.pairs) data[symbol] = snapshot.pairs;
+    res.json({ data });
+});
+
+// Digit frequency (1st / 2nd / 3rd most appearing and the least appearing digit, plus the Even / Odd / Over 4 / Under 5 frequency logic) for every 1s market.
+app.get('/api/analysis/digits', (_req, res) => {
+    const data = {};
+    for (const [symbol, snapshot] of Object.entries(marketFeed.getAllSnapshots())) if (snapshot?.digit_freq) data[symbol] = snapshot.digit_freq;
     res.json({ data });
 });
 
