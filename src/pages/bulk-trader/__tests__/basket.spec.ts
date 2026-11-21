@@ -72,22 +72,22 @@ const buyStakes = (h: { conn: Conn }, from = 0, n = 3) => h.conn.buys_().slice(f
 const settleRound = (h: { conn: Conn }, from: number, results: number[]) => results.forEach((profit, i) => h.conn.settle(101 + from + i, profit, h.conn.buys_()[from + i].price));
 
 describe('the 16 basket setups', () => {
-    it('numbers 1-16 map to base x regime x direction, in the order the spec lists them (momentum buys Only Ups AND Only Downs, drift Rise / Fall)', () => {
+    it('numbers 1-16 map to base x regime x direction, in the order the spec lists them', () => {
         const rows: [string, boolean, string, number, string[], number[]][] = [
-            ['even_under5', true, 'bullish', 1, ['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW'], [0.4, 0.4, 0.1, 0.1]],
-            ['even_under5', true, 'bearish', 2, ['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW'], [0.4, 0.4, 0.1, 0.1]],
+            ['even_under5', true, 'bullish', 1, ['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH'], [0.4, 0.4, 0.2]],
+            ['even_under5', true, 'bearish', 2, ['DIGITEVEN', 'DIGITUNDER', 'RUNLOW'], [0.4, 0.4, 0.2]],
             ['even_under5', false, 'bullish', 3, ['DIGITEVEN', 'DIGITUNDER', 'CALL'], [0.35, 0.35, 0.3]],
             ['even_under5', false, 'bearish', 4, ['DIGITEVEN', 'DIGITUNDER', 'PUT'], [0.35, 0.35, 0.3]],
-            ['odd_over4', true, 'bullish', 5, ['DIGITODD', 'DIGITOVER', 'RUNHIGH', 'RUNLOW'], [0.4, 0.4, 0.1, 0.1]],
-            ['odd_over4', true, 'bearish', 6, ['DIGITODD', 'DIGITOVER', 'RUNHIGH', 'RUNLOW'], [0.4, 0.4, 0.1, 0.1]],
+            ['odd_over4', true, 'bullish', 5, ['DIGITODD', 'DIGITOVER', 'RUNHIGH'], [0.4, 0.4, 0.2]],
+            ['odd_over4', true, 'bearish', 6, ['DIGITODD', 'DIGITOVER', 'RUNLOW'], [0.4, 0.4, 0.2]],
             ['odd_over4', false, 'bullish', 7, ['DIGITODD', 'DIGITOVER', 'CALL'], [0.35, 0.35, 0.3]],
             ['odd_over4', false, 'bearish', 8, ['DIGITODD', 'DIGITOVER', 'PUT'], [0.35, 0.35, 0.3]],
-            ['even_over4', true, 'bullish', 9, ['DIGITEVEN', 'DIGITOVER', 'RUNHIGH', 'RUNLOW'], [0.4, 0.4, 0.1, 0.1]],
-            ['even_over4', true, 'bearish', 10, ['DIGITEVEN', 'DIGITOVER', 'RUNHIGH', 'RUNLOW'], [0.4, 0.4, 0.1, 0.1]],
+            ['even_over4', true, 'bullish', 9, ['DIGITEVEN', 'DIGITOVER', 'RUNHIGH'], [0.4, 0.4, 0.2]],
+            ['even_over4', true, 'bearish', 10, ['DIGITEVEN', 'DIGITOVER', 'RUNLOW'], [0.4, 0.4, 0.2]],
             ['even_over4', false, 'bullish', 11, ['DIGITEVEN', 'DIGITOVER', 'CALL'], [0.35, 0.35, 0.3]],
             ['even_over4', false, 'bearish', 12, ['DIGITEVEN', 'DIGITOVER', 'PUT'], [0.35, 0.35, 0.3]],
-            ['odd_under5', true, 'bullish', 13, ['DIGITODD', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW'], [0.4, 0.4, 0.1, 0.1]],
-            ['odd_under5', true, 'bearish', 14, ['DIGITODD', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW'], [0.4, 0.4, 0.1, 0.1]],
+            ['odd_under5', true, 'bullish', 13, ['DIGITODD', 'DIGITUNDER', 'RUNHIGH'], [0.4, 0.4, 0.2]],
+            ['odd_under5', true, 'bearish', 14, ['DIGITODD', 'DIGITUNDER', 'RUNLOW'], [0.4, 0.4, 0.2]],
             ['odd_under5', false, 'bullish', 15, ['DIGITODD', 'DIGITUNDER', 'CALL'], [0.35, 0.35, 0.3]],
             ['odd_under5', false, 'bearish', 16, ['DIGITODD', 'DIGITUNDER', 'PUT'], [0.35, 0.35, 0.3]],
         ];
@@ -96,8 +96,7 @@ describe('the 16 basket setups', () => {
             expect(setup.number).toBe(number);
             expect(setup.legs.map(l => l.type)).toEqual(types);
             expect(setup.legs.map(l => l.share)).toEqual(shares);
-            expect(setup.legs.map(l => l.ticks)).toEqual(momentum ? [1, 1, 2, 2] : [1, 1, 1]);
-            expect(setup.legs.length).toBe(momentum ? 4 : 3);
+            expect(setup.legs.map(l => l.ticks)).toEqual([1, 1, momentum ? 2 : 1]);
             expect(basketHasConflict(setup.legs.map(l => l.type))).toBe(false);
         }
         expect(BASKET_BASES.map(b => b.blind)).toEqual(['5, 7, 9', '0, 2, 4', '1, 3', '6, 8']);
@@ -109,34 +108,23 @@ describe('the 16 basket setups', () => {
         expect(basketHasConflict(['DIGITEVEN', 'DIGITODD', 'CALL'])).toBe(true);
         expect(basketHasConflict(['DIGITEVEN', 'DIGITUNDER', 'CALL', 'PUT'])).toBe(true);
         expect(basketHasConflict(['CALL', 'RUNLOW'])).toBe(true);
-        // Only Ups + Only Downs together is the momentum basket on purpose: not a conflict
-        expect(basketHasConflict(['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW'])).toBe(false);
-        expect(basketHasConflict(['RUNHIGH', 'RUNLOW'])).toBe(false);
     });
 
-    it('stakes split 40/40/10/10 (momentum) and 35/35/30 (drift) to the cent and add up to the total; tiny totals are raised to the 0.35 minimum', () => {
+    it('stakes split 40/40/20 and 35/35/30 to the cent and add up to the total; tiny totals are raised to the 0.35 minimum', () => {
         const mom = basketSetup('even_under5', 'bullish', true)!.legs;
         const drift = basketSetup('even_under5', 'bullish', false)!.legs;
-        expect(basketStakes(4, mom)).toEqual([1.6, 1.6, 0.4, 0.4]);
-        expect(basketStakes(10, mom)).toEqual([4, 4, 1, 1]);
+        expect(basketStakes(2, mom)).toEqual([0.8, 0.8, 0.4]);
         expect(basketStakes(10, drift)).toEqual([3.5, 3.5, 3]);
-        for (const total of [3.5, 3.57, 4.01, 7.33, 12.9]) {
-            const parts = basketStakes(total, mom);
-            expect(parts).toHaveLength(4);
-            expect(Number(parts.reduce((a, b) => a + b, 0).toFixed(2))).toBe(total);
-        }
         const odd = basketStakes(1.17, drift);
         expect(Number(odd.reduce((a, b) => a + b, 0).toFixed(2))).toBe(1.17);
-        // each Only contract is 10% of the total, so the smallest momentum basket is 3.50 (0.35 / 0.1)
-        expect(basketMinTotal(mom)).toBe(3.5);
-        expect(basketStakes(basketMinTotal(mom), mom)).toEqual([1.4, 1.4, 0.35, 0.35]);
+        expect(basketMinTotal(mom)).toBe(1.75);
         expect(basketMinTotal(drift)).toBe(1.17);
     });
 });
 
 describe('the basket is bought in one go', () => {
-    it('momentum: one signal = FOUR buys (the digit pair + Only Ups + Only Downs) sent in the same tick, with the split stakes and the right durations', async () => {
-        const h = make({ R_B1: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, { ...bk, stake: 4 });
+    it('one signal = three buys sent in the same tick, with the split stakes and the right durations', async () => {
+        const h = make({ R_B1: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, bk);
         const times: number[] = [];
         const orig = h.conn.send.bind(h.conn);
         h.conn.send = ((r: any) => {
@@ -145,32 +133,11 @@ describe('the basket is bought in one go', () => {
         }) as never;
         h.engine.start();
         await wait(150);
-        expect(h.conn.buys_()).toHaveLength(4);
-        expect(buyTypes(h, 0, 4)).toEqual(['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW']);
-        expect(buyStakes(h, 0, 4)).toEqual([1.6, 1.6, 0.4, 0.4]);
-        expect(h.conn.buys_().slice(0, 4).map(b => b.parameters.duration)).toEqual([1, 1, 2, 2]);
-        expect(times).toHaveLength(4);
+        expect(buyTypes(h)).toEqual(['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH']);
+        expect(buyStakes(h)).toEqual([0.8, 0.8, 0.4]);
+        expect(h.conn.buys_().slice(0, 3).map(b => b.parameters.duration)).toEqual([1, 1, 2]);
+        expect(times).toHaveLength(3);
         expect(Math.max(...times) - Math.min(...times)).toBeLessThan(5);
-        h.engine.stop();
-    });
-
-    it('momentum buys Only Ups AND Only Downs whichever way the chart goes: the bearish setup buys the same four contracts (setup 6)', async () => {
-        const h = make({ R_B10: [basketSig('odd_over4', ['DIGITODD', 'DIGITOVER'], 'bearish', true, { basket_setup: 6 })] }, { ...bk, stake: 4 });
-        h.engine.start();
-        await wait(150);
-        expect(h.conn.buys_()).toHaveLength(4);
-        expect(buyTypes(h, 0, 4)).toEqual(['DIGITODD', 'DIGITOVER', 'RUNHIGH', 'RUNLOW']);
-        expect(buyStakes(h, 0, 4)).toEqual([1.6, 1.6, 0.4, 0.4]);
-        h.engine.stop();
-    });
-
-    it('drift still buys three: bullish drift on Even + Under 5 buys Even, Under 5 and Rise only (setup 3)', async () => {
-        const h = make({ R_B11: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false, { basket_setup: 3 })] }, { ...bk, stake: 10 });
-        h.engine.start();
-        await wait(150);
-        expect(h.conn.buys_()).toHaveLength(3);
-        expect(buyTypes(h)).toEqual(['DIGITEVEN', 'DIGITUNDER', 'CALL']);
-        expect(buyStakes(h)).toEqual([3.5, 3.5, 3]);
         h.engine.stop();
     });
 
@@ -184,11 +151,11 @@ describe('the basket is bought in one go', () => {
         h.engine.stop();
     });
 
-    it('a base total too small for the 10% Only contracts is raised so every contract is at least 0.35 (momentum: 3.50)', async () => {
+    it('a base total too small for the 20% contract is raised so every contract is at least 0.35', async () => {
         const h = make({ R_B3: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, { ...bk, stake: 1 });
         h.engine.start();
         await wait(150);
-        expect(buyStakes(h, 0, 4)).toEqual([1.4, 1.4, 0.35, 0.35]);
+        expect(buyStakes(h)).toEqual([0.7, 0.7, 0.35]);
         h.engine.stop();
     });
 
@@ -197,6 +164,17 @@ describe('the basket is bought in one go', () => {
         h.engine.start();
         await wait(150);
         expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
+    });
+
+    it('no confirmed trend is needed: the basket buys at once, the third contract leaning the way the backend names', async () => {
+        const h = make({ R_B5: [basketSig(EU[0], [...EU[1]] as [string, string], 'none', false, { basket_direction: 'bearish', basket_setup: 4 })] }, bk);
+        h.engine.start();
+        await wait(150);
+        const types = h.conn.buys_().map(b => b.parameters.contract_type);
+        expect(types).toHaveLength(3);
+        expect([...types].sort()).toEqual(['DIGITEVEN', 'DIGITUNDER', 'PUT']); // setup 3/4 = bearish drift: Fall
+        expect(h.conn.log.filter(x => x === 'ticks_history')).toHaveLength(0); // no chart request before the buy
         h.engine.stop();
     });
 
@@ -218,7 +196,7 @@ describe('the basket is bought in one go', () => {
         const right = make({ R_B9: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true, { basket_setup: 1 })] }, bk);
         right.engine.start();
         await wait(150);
-        expect(buyTypes(right, 0, 4)).toEqual(['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW']);
+        expect(buyTypes(right)).toEqual(['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH']);
         right.engine.stop();
     });
 
@@ -230,91 +208,65 @@ describe('the basket is bought in one go', () => {
         h.engine.stop();
     });
 
-    it('if one contract is refused the others still run and are watched', async () => {
-        const h = make({ R_B6: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, { ...bk, stake: 4 });
+    it('if one contract is refused the other two still run and are watched', async () => {
+        const h = make({ R_B6: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, bk);
         const orig = h.conn.send.bind(h.conn);
         h.conn.send = ((r: any) => (r.buy && r.parameters.contract_type === 'RUNHIGH' ? Promise.reject(new Error('refused')) : orig(r))) as never;
         h.engine.start();
         await wait(150);
-        expect(h.logs.some(l => /runs with 3 of 4/.test(l))).toBe(true);
-        expect(buyTypes(h, 0, 3)).toEqual(['DIGITEVEN', 'DIGITUNDER', 'RUNLOW']);
-        settleRound(h, 0, [1.52, -1.6, -0.4]); // Even paid, Under 5 and Only Downs lost: net -0.48
+        expect(h.logs.some(l => /runs with 2 of 3/.test(l))).toBe(true);
+        settleRound(h, 0, [0.76, -0.8]);
         await wait(250);
-        expect(h.logs.some(l => /Basket closed: net -0.48/.test(l))).toBe(true);
+        expect(h.logs.some(l => /Basket closed: net -0.04/.test(l))).toBe(true);
         h.engine.stop();
     });
 });
 
 describe('the 1.5x martingale state machine', () => {
-    it('full sweep (every contract returns 0): the total stake x1.5 for the next signal', async () => {
-        const h = make({ R_M1: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false)] }, bk);
+    it('full sweep (all 3 return 0): the total stake x1.5 for the next signal', async () => {
+        const h = make({ R_M1: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, bk);
         h.engine.start();
         await wait(150);
-        settleRound(h, 0, [-0.7, -0.7, -0.6]);
+        settleRound(h, 0, [-0.8, -0.8, -0.4]);
         await wait(250);
-        expect(buyStakes(h, 3)).toEqual([1.05, 1.05, 0.9]); // total 3 = 2 x 1.5
+        expect(buyStakes(h, 3)).toEqual([1.2, 1.2, 0.6]); // total 3 = 2 x 1.5
         h.engine.stop();
     });
 
     it('partial loss (some contracts pay but the net is negative): the total stake stays flat', async () => {
-        const h = make({ R_M2: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false)] }, bk);
+        const h = make({ R_M2: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, bk);
         h.engine.start();
         await wait(150);
-        settleRound(h, 0, [0.66, -0.7, -0.6]); // net -0.64, one contract paid
+        settleRound(h, 0, [0.76, -0.8, -0.4]); // net -0.44, one contract paid
         await wait(250);
-        expect(buyStakes(h, 3)).toEqual([0.7, 0.7, 0.6]);
+        expect(buyStakes(h, 3)).toEqual([0.8, 0.8, 0.4]);
         h.engine.stop();
     });
 
     it('after a full sweep then a partial loss the raised total stays; a net profit goes back to the base', async () => {
-        const h = make({ R_M3: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false)] }, bk);
+        const h = make({ R_M3: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, bk);
         h.engine.start();
         await wait(150);
-        settleRound(h, 0, [-0.7, -0.7, -0.6]); // sweep -> total 3
+        settleRound(h, 0, [-0.8, -0.8, -0.4]); // sweep -> total 3
         await wait(250);
-        settleRound(h, 3, [0.99, -1.05, -0.9]); // total 3, net -0.96: partial -> stays 3
+        settleRound(h, 3, [1.14, -1.2, -0.6]); // total 3, net -0.66: partial -> stays 3
         await wait(250);
-        expect(buyStakes(h, 6)).toEqual([1.05, 1.05, 0.9]);
-        settleRound(h, 6, [0.99, 0.99, -0.9]); // net +1.08: reset
+        expect(buyStakes(h, 6)).toEqual([1.2, 1.2, 0.6]);
+        settleRound(h, 6, [1.14, 1.14, -0.6]); // net +1.68: reset
         await wait(250);
-        expect(buyStakes(h, 9)).toEqual([0.7, 0.7, 0.6]); // back to the base total 2
+        expect(buyStakes(h, 9)).toEqual([0.8, 0.8, 0.4]); // back to the base total 2
         h.engine.stop();
     });
 
     it('a net of exactly 0 counts as profit and resets the stake', async () => {
-        const h = make({ R_M4: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false)] }, bk);
+        const h = make({ R_M4: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, bk);
         h.engine.start();
         await wait(150);
-        settleRound(h, 0, [-0.7, -0.7, -0.6]); // total 3 next
+        settleRound(h, 0, [-0.8, -0.8, -0.4]); // total 3 next
         await wait(250);
-        settleRound(h, 3, [1.05, 0, -1.05]); // net 0
+        settleRound(h, 3, [1.2, 0, -1.2]); // net 0
         await wait(250);
-        expect(buyStakes(h, 6)).toEqual([0.7, 0.7, 0.6]);
-        h.engine.stop();
-    });
-
-    it('momentum, FOUR contracts: all four lose = total x1.5; a net profit goes back to the base total', async () => {
-        const h = make({ R_M5: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, { ...bk, stake: 4 });
-        h.engine.start();
-        await wait(150);
-        expect(buyStakes(h, 0, 4)).toEqual([1.6, 1.6, 0.4, 0.4]);
-        settleRound(h, 0, [-1.6, -1.6, -0.4, -0.4]); // a full sweep of all four
-        await wait(250);
-        expect(buyStakes(h, 4, 4)).toEqual([2.4, 2.4, 0.6, 0.6]); // total 6 = 4 x 1.5
-        // Only Ups pays (2.8 x 0.6 = 1.68), Even pays 2.28, the rest lose: net 2.28 + 1.68 - 2.4 - 0.6 - 0.6 = +0.36: profit, back to the base
-        settleRound(h, 4, [2.28, -2.4, 1.68, -0.6]);
-        await wait(250);
-        expect(buyStakes(h, 8, 4)).toEqual([1.6, 1.6, 0.4, 0.4]);
-        h.engine.stop();
-    });
-
-    it('momentum, FOUR contracts: one Only contract pays but the net is a loss = the total stays', async () => {
-        const h = make({ R_M6: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, { ...bk, stake: 4 });
-        h.engine.start();
-        await wait(150);
-        settleRound(h, 0, [-1.6, -1.6, 1.12, -0.4]); // Only Ups paid 1.12 (2.8 x 0.4) but the net is -2.48
-        await wait(250);
-        expect(buyStakes(h, 4, 4)).toEqual([1.6, 1.6, 0.4, 0.4]);
+        expect(buyStakes(h, 6)).toEqual([0.8, 0.8, 0.4]);
         h.engine.stop();
     });
 

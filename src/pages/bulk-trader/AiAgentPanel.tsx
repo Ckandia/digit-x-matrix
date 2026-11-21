@@ -27,7 +27,6 @@ import { useStore } from '@/hooks/useStore';
 import { MessageTypes } from '@/external/bot-skeleton';
 import { getDurationTicks, mergeTradeRow } from './tradeHistory';
 import type { TRecoveryMode } from './autoPilotEngine';
-import { DigitFrequencyCard } from './DigitFrequencyCard';
 import { PairFrequencyCard } from './PairFrequencyCard';
 import { RunBiasCard } from './RunBiasCard';
 import { LearningEngine, makeProfileId, TLearningMode } from './learningEngine';
@@ -645,8 +644,8 @@ const AiAgentPanel = ({
                                 disabled={!config || status === 'connecting'}
                                 onChange={e => config && setConfig({ ...config, basket_mode: e.target.checked, basket_keys: config.basket_keys ?? ALL_BASKET_KEYS })}
                             />{' '}
-                            <strong>{localize('Basket: buy the contracts together at the same time')}</strong>{' '}
-                            <InfoNote text={localize('Each digit-pair signal buys its contracts in the same tick: the pair\'s two digit contracts plus BOTH Only Ups and Only Downs at the same time (momentum: the last 3 ticks went the trend\'s way, 4 contracts, stakes 40/40/10/10) or Rise / Fall by the chart (drift, 3 contracts, stakes 35/35/30). The stake is the TOTAL of the basket. All contracts lose: total x1.5 next time. Some win but the net is a loss: same total. Net profit: back to the base total. Overrides Pairs only and the contract families while on.')} />
+                            <strong>{localize('3-contract basket: buy three contracts at the same time')}</strong>{' '}
+                            <InfoNote text={localize('Each digit-pair signal (2 ticks in a row + the digit frequency: 1st, 2nd, 3rd most and least frequent digit) buys 3 contracts in the same tick, with no wait: the pair\'s two digit contracts plus Only Ups / Only Downs (momentum: the last 3 ticks went the trend\'s way, stakes 40/40/20) or Rise / Fall (drift, stakes 35/35/30). The three do not have to agree and no confirmed trend is needed: with no trend the third contract leans the way the last tick moved. The stake is the TOTAL of the three. All three lose: total x1.5 next time. Some win but the net is a loss: same total. Net profit: back to the base total. Overrides Pairs only and the contract families while on.')} />
                         </label>
                         {config?.basket_mode === true &&
                             BASKET_BASES.map(base => (
@@ -980,8 +979,6 @@ const AiAgentPanel = ({
             <RunBiasCard snapshots={snapshots} />
 
             <PairFrequencyCard snapshots={snapshots} />
-
-            <DigitFrequencyCard snapshots={snapshots} />
 
             {(history.length > 0 || activity.length > 0) && (
                 <div className='ai-agent-panel__history'>

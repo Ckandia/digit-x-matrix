@@ -102,10 +102,10 @@ export type TAutoPilotConfig = {
      */
     min_confidence?: number;
     /**
-     * BASKET (default on). Every backend digit-pair signal buys its contracts in the same tick (Promise.all): the pair's two digit contracts +
-     * BOTH Only Ups AND Only Downs at the same time (momentum, 4 contracts, stakes 40/40/10/10) or Rise/Fall by the chart (drift, 3 contracts,
-     * stakes 35/35/30), see basketSetup. The stake is the TOTAL of the basket. Martingale: all contracts lose = total x martingale_multiplier (1.5);
-     * some win but the net is negative = the same total; net >= 0 = back to the base total. Takes over from pairs_only and the single-contract families while on.
+     * 3-CONTRACT BASKET (default on). Every backend digit-pair signal buys THREE contracts in the same tick (Promise.all): the pair's two digit
+     * contracts + Only Ups/Downs (momentum) or Rise/Fall (drift), see basketSetup. The stake is split 40/40/20 or 35/35/30 of the TOTAL stake
+     * (`stake` = the total of the 3). Martingale: all 3 lose = total x martingale_multiplier (1.5); some win but the net is negative = the same
+     * total; net >= 0 = back to the base total. Takes over from pairs_only and the single-contract families while on.
      */
     basket_mode?: boolean;
     /** Which bases the basket may fire on (keys of BASKET_BASES). Undefined = all four. */
@@ -135,14 +135,12 @@ export const ALL_PAIR_KEYS = TRADE_PAIRS.map(p => p.key);
 const pairKeyOf = (sig: { pair_key?: string; contract_type: string }): string | null =>
     sig.pair_key ?? (sig.contract_type === 'RUNHIGH' || sig.contract_type === 'RUNLOW' ? 'only_ups_downs' : null);
 // ---------------------------------------------------------------------------------------------------------------------
-// The basket: one backend pair signal (a digit base) + the chart's contract(s), all bought in the same tick.
+// The 3-contract basket: one backend pair signal (a digit base) + a directional third contract, all three bought in the same tick.
 //   Bases (blind spot = the digits where both digit legs lose):
 //     A Even + Under 5 (5,7,9)   B Odd + Over 4 (0,2,4)   C Even + Over 4 (1,3)   D Odd + Under 5 (6,8)
-//   Chart contracts: momentum (the last 3 ticks went the trend's way) = BOTH Only Ups AND Only Downs at the same time (2 ticks each, no side is
-//                    picked because they are analysed on 2 ticks), 4 contracts, stakes 40/40/10/10;
-//                    drift (otherwise) = Rise (bullish) / Fall (bearish) (1 tick), 3 contracts, stakes 35/35/30.
+//   Third contract: momentum (the last 3 ticks went the trend's way) = Only Ups / Only Downs (2 ticks), stakes 40/40/20;
+//                   drift (otherwise) = Rise / Fall (1 tick), stakes 35/35/30. Bullish = Ups / Rise, bearish = Downs / Fall.
 //   Setups 1-4 = A, 5-8 = B, 9-12 = C, 13-16 = D, each in the order: bullish momentum, bearish momentum, bullish drift, bearish drift.
-//   (the bullish and bearish momentum setups of a base buy the same four contracts: the chart direction only says what triggered the basket.)
 // ---------------------------------------------------------------------------------------------------------------------
 export const BASKET_BASES: { key: string; label: string; types: [string, string]; blind: string; first: number }[] = [
     { key: 'even_under5', label: 'Even + Under 5', types: ['DIGITEVEN', 'DIGITUNDER'], blind: '5, 7, 9', first: 1 },
@@ -151,7 +149,7 @@ export const BASKET_BASES: { key: string; label: string; types: [string, string]
     { key: 'odd_under5', label: 'Odd + Under 5', types: ['DIGITODD', 'DIGITUNDER'], blind: '6, 8', first: 13 },
 ];
 export const ALL_BASKET_KEYS = BASKET_BASES.map(b => b.key);
-export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.1, 0.1]; // digit, digit, Only Ups, Only Downs
+export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.2];
 export const BASKET_DRIFT_SHARES = [0.35, 0.35, 0.3];
 export const MIN_LEG_STAKE = 0.35; // Deriv's smallest stake per contract
 export type TBasketLeg = { type: string; label: string; ticks: number; share: number };
@@ -160,7 +158,7 @@ const BASKET_CONFLICTS: [string, string][] = [
     ['DIGITEVEN', 'DIGITODD'],
     ['DIGITOVER', 'DIGITUNDER'],
     ['CALL', 'PUT'],
-    // Only Ups + Only Downs is NOT a conflict here: the momentum basket buys both on purpose (they are 2-tick contracts, no side is picked)
+    ['RUNHIGH', 'RUNLOW'],
     ['CALL', 'RUNLOW'],
     ['PUT', 'RUNHIGH'],
 ];
@@ -171,23 +169,17 @@ export const basketSetup = (pair_key: string | undefined, direction: string | un
     if (!base || (direction !== 'bullish' && direction !== 'bearish')) return null;
     const bull = direction === 'bullish';
     const shares = momentum ? BASKET_MOMENTUM_SHARES : BASKET_DRIFT_SHARES;
-    // The chart's contract(s): momentum = Only Ups AND Only Downs together (both, whatever the direction); drift = Rise or Fall by the direction.
-    const thirds: TBasketLeg[] = momentum
-        ? [
-              { type: 'RUNHIGH', label: 'Only Ups', ticks: 2, share: shares[2] },
-              { type: 'RUNLOW', label: 'Only Downs', ticks: 2, share: shares[3] },
-          ]
-        : [{ type: bull ? 'CALL' : 'PUT', label: bull ? 'Rise' : 'Fall', ticks: 1, share: shares[2] }];
+    const third: TBasketLeg = momentum
+        ? { type: bull ? 'RUNHIGH' : 'RUNLOW', label: bull ? 'Only Ups' : 'Only Downs', ticks: 2, share: shares[2] }
+        : { type: bull ? 'CALL' : 'PUT', label: bull ? 'Rise' : 'Fall', ticks: 1, share: shares[2] };
     const legs: TBasketLeg[] = [
         { type: base.types[0], label: OPPOSITE_LABEL[base.types[0]] ?? base.types[0], ticks: 1, share: shares[0] },
         { type: base.types[1], label: OPPOSITE_LABEL[base.types[1]] ?? base.types[1], ticks: 1, share: shares[1] },
-        ...thirds,
+        third,
     ];
-    if (basketHasConflict(legs.map(l => l.type))) throw new Error(`Basket ${base.label} + ${thirds.map(t => t.label).join(' + ')} holds contracts that cancel each other`);
+    if (basketHasConflict(legs.map(l => l.type))) throw new Error(`Basket ${base.label} + ${third.label} holds contracts that cancel each other`);
     return { number: base.first + (momentum ? 0 : 2) + (bull ? 0 : 1), base: base.label, regime: momentum ? 'momentum' : 'drift', direction: bull ? 'bullish' : 'bearish', legs, blind: base.blind };
 };
-/** The chart's contract(s) of a basket as text: 'Only Ups + Only Downs' (momentum) or 'Rise' / 'Fall' (drift). */
-export const basketThirdLabel = (setup: TBasketSetup): string => setup.legs.slice(2).map(l => l.label).join(' + ');
 /** The smallest total stake that still gives every contract at least MIN_LEG_STAKE. */
 export const basketMinTotal = (legs: TBasketLeg[]): number => Math.ceil((MIN_LEG_STAKE / Math.min(...legs.map(l => l.share))) * 100) / 100;
 /** Splits a total stake by the legs' shares, to the cent; the last leg takes the rounding remainder so the legs add up to the total. */
@@ -337,7 +329,7 @@ export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAuto
         protect_trades: 0,
         contract_families: ALL_FAMILY_KEYS,
         both_sides: true,
-        basket_mode: true, // every digit-pair signal buys the basket (3 contracts, or 4 on momentum) at once; martingale x1.5 only after a full sweep
+        basket_mode: true, // every digit-pair signal buys the 3-contract basket at once; martingale x1.5 only after a full sweep
         basket_keys: ALL_BASKET_KEYS,
         stay_on_market: true, // recover a loss on the same market and pair; switch only after switch_after_losses losses or switch_wait_seconds without an entry
         switch_after_losses: DEFAULT_SWITCH_AFTER_LOSSES,
@@ -956,10 +948,11 @@ export class AutoPilotEngine {
                 // A PAIR signal: the sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4; rising + odd = Rise + Odd; falling + even = Fall + Even).
                 const pair_types = (sig as { pair_types?: string[] }).pair_types;
                 if (basket) {
-                    // Basket: only a digit-pair signal of a ticked base, with a chart direction (bullish / bearish) that picks the setup (on drift also Rise / Fall).
+                    // 3-contract basket: only a digit-pair signal of a ticked base, with a chart direction (bullish / bearish) for the third contract.
                     // The backend judges the entry on the whole basket (digit pair + third contract + replayed basket result): `basket_entry`.
                     const bk = (sig as { pair_key?: string }).pair_key;
-                    const dir = (sig as { trend?: string }).trend;
+                    // The third contract leans the way the backend says (the trend, else the last tick's move): no confirmed trend is needed.
+                    const dir = (sig as { basket_direction?: string }).basket_direction ?? (sig as { trend?: string }).trend;
                     if (!pair_types || !bk || !basket_keys.has(bk) || (dir !== 'bullish' && dir !== 'bearish')) continue;
                     if ((sig as { basket_entry?: boolean }).basket_entry !== true) continue;
                 } else if (pairs_only) {
@@ -1425,12 +1418,12 @@ export class AutoPilotEngine {
     }
 
     /**
-     * The basket (3 contracts on drift, 4 on momentum). All the `buy` requests are sent in the same event-loop tick with Promise.all. Each buy is wrapped so a refusal
+     * The 3-contract basket. All three `buy` requests are sent in the same event-loop tick with Promise.all. Each buy is wrapped so a refusal
      * of one comes back as a value instead of rejecting the whole Promise.all: a contract that DID get bought is never left unwatched.
      */
     private _enterBasket(candidate: TCandidate, wanted_total: number, tag?: TAutoPilotEvent['tag']) {
-        const meta = candidate as { pair_key?: string; trend?: string; momentum?: boolean };
-        const setup = basketSetup(meta.pair_key, meta.trend, meta.momentum === true);
+        const meta = candidate as { pair_key?: string; trend?: string; basket_direction?: string; momentum?: boolean };
+        const setup = basketSetup(meta.pair_key, meta.basket_direction ?? meta.trend, meta.momentum === true);
         const retry = (ms: number) => setTimeout(() => this._findAndEnter(wanted_total, tag), ms);
         if (!setup) {
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
@@ -1465,12 +1458,12 @@ export class AutoPilotEngine {
                     duration_ticks: leg.ticks,
                     prediction: leg.type === 'DIGITOVER' ? 4 : leg.type === 'DIGITUNDER' ? 5 : undefined,
                     pair_with: undefined,
-                    basis: `Basket setup ${setup.number}: ${setup.base} + ${basketThirdLabel(setup)} (${setup.direction} ${setup.regime}).`,
+                    basis: `Basket setup ${setup.number}: ${setup.base} + ${setup.legs[2].label} (${setup.direction} ${setup.regime}).`,
                 } as unknown as TCandidate;
                 return { leg, stake: stakes[i], cand, params: buildTradeParameters(cand, stakes[i], this.currency) };
             });
         } catch (err) {
-            // Not all the basket's contracts can be built on this market (one is not offered): nothing was sent, no partial basket.
+            // Not all three contracts can be built on this market (one is not offered): nothing was sent, no partial basket.
             const detail = err instanceof Error ? err.message : 'Could not build the basket';
             this.hooks?.onLog?.('info', `Basket skipped on ${candidate.symbol}: ${detail}`);
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
@@ -1481,7 +1474,7 @@ export class AutoPilotEngine {
         this.lastCandidate = candidate;
         this.last_live_at = Date.now();
         this.entry_tag = tag;
-        this._emit({ phase: 'entering', symbol: candidate.symbol, contract_type: candidate.contract_type, label: `Setup ${setup.number}: ${setup.base} + ${basketThirdLabel(setup)}`, confidence: candidate.confidence, stake: total, tag });
+        this._emit({ phase: 'entering', symbol: candidate.symbol, contract_type: candidate.contract_type, label: `Setup ${setup.number}: ${setup.base} + ${setup.legs[2].label}`, confidence: candidate.confidence, stake: total, tag });
         this.hooks?.onLog?.('info', `Basket setup ${setup.number} on ${candidate.symbol}: ${built.map(b => `${b.leg.label} ${b.stake}`).join(' + ')} = ${total} ${this.currency} (${setup.direction} ${setup.regime}, blind spot ${setup.blind}).`);
         const buyLeg = async (b: (typeof built)[number]) => {
             const t0 = Date.now();
@@ -1495,7 +1488,7 @@ export class AutoPilotEngine {
                 return { ok: false as const, b, err };
             }
         };
-        // All the sends start synchronously inside this one call: same event-loop tick.
+        // The three sends start synchronously inside this one call: same event-loop tick.
         Promise.all(built.map(buyLeg)).then(results => {
             const bought = results.filter((r): r is Extract<(typeof results)[number], { ok: true }> => r.ok);
             const failed = results.filter(r => !r.ok);
@@ -1513,7 +1506,7 @@ export class AutoPilotEngine {
                 this.stop('trade placement failed');
                 return;
             }
-            for (const f of failed) this.hooks?.onLog?.('error', `${f.b.leg.label} could not be bought (${String((f as { err?: { message?: string } }).err?.message ?? 'refused')}): the basket runs with ${bought.length} of ${setup.legs.length} contracts.`);
+            for (const f of failed) this.hooks?.onLog?.('error', `${f.b.leg.label} could not be bought (${String((f as { err?: { message?: string } }).err?.message ?? 'refused')}): the basket runs with ${bought.length} of 3 contracts.`);
             const pair: TPair = { pending: bought.length, profit: 0, stake: Number(bought.reduce((a, r) => a + r.b.stake, 0).toFixed(2)), basket: true, returned: 0, legs: bought.length, intended: wanted_total };
             this.ladder_spent = Number((this.ladder_spent + pair.stake).toFixed(2));
             for (const r of bought) this._watch(r.b.cand, r.b.stake, r.id, r.b.leg.ticks, pair);

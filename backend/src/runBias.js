@@ -17,6 +17,7 @@
 // validated edge, and every contract still pays less than 2x. The numbers are here so the AI has a consistent, fast signal.
 
 import { detectTrend, TREND_WINDOW } from './trend.js';
+import { digitFrequency, DIGIT_GATE_ON } from './digitFrequency.js';
 
 export const MIN_RUN = 2; // the shortest run any contract is analysed on
 export const RUN_WINDOW = 300; // ticks the bias is measured on (the freshest, so it follows the market)
@@ -220,48 +221,41 @@ export function replayPair(pair, flag, prices, min_run, decimals = 2) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// THE BASKET, judged as the basket the AI really buys. One digit-pair pattern + the chart's contract(s):
+// THE 3-CONTRACT BASKET, judged as the basket the AI really buys. One digit-pair pattern + a third contract chosen by the chart:
 //   direction = the 1-tick chart trend (bullish / bearish; 'none' = no basket)
-//   momentum  = the last MOMENTUM_TICKS ticks all moved that way  -> BOTH Only Ups AND Only Downs at the same time (2 ticks), 4 contracts, stakes 40/40/10/10
-//   otherwise = drift                                             -> Rise / Fall by the direction (1 tick), 3 contracts,    stakes 35/35/30
-// Only Ups / Only Downs are analysed on 2 ticks, so the AI does not pick a side for them: it buys both (one of them wins when the next two ticks
-// both go the same way). The chart direction still decides WHETHER there is a basket and which of the 16 setup numbers it is.
+//   momentum  = the last MOMENTUM_TICKS ticks all moved that way  -> Only Ups / Only Downs (2 ticks), stakes 40/40/20
+//   otherwise = drift                                             -> Rise / Fall (1 tick),            stakes 35/35/30
 // The setup number (1-16) is fixed here and the AI checks it against its own table, so backend and AI can never disagree on what a signal buys.
 // ---------------------------------------------------------------------------------------------------------------------------------
 export const BASKET_BASE_KEYS = ['even_under5', 'odd_over4', 'even_over4', 'odd_under5']; // setups 1-4, 5-8, 9-12, 13-16
-export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.1, 0.1]; // digit, digit, Only Ups, Only Downs (the Only pair together = 20% of the total)
+export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.2];
 export const BASKET_DRIFT_SHARES = [0.35, 0.35, 0.3];
 // Profit per unit staked on a winning leg. Digit and Rise/Fall legs pay about 0.95. Only Ups / Only Downs over 2 ticks win about a quarter of the
 // time on a random walk, so at the same ~5% margin they pay about 0.95 / 0.25 - 1 = 2.8. It is an ESTIMATE (the real payout comes from Deriv's
 // proposal): it only decides whether the replayed basket was above or below break-even, it never moves a stake.
 export const ONLY_RUN_PROFIT = 2.8;
 const LEG_PROFIT = { even: PAIR_LEG_PROFIT, odd: PAIR_LEG_PROFIT, over4: PAIR_LEG_PROFIT, under5: PAIR_LEG_PROFIT, rise: PAIR_LEG_PROFIT, fall: PAIR_LEG_PROFIT, only_up: ONLY_RUN_PROFIT, only_down: ONLY_RUN_PROFIT };
-// The contract(s) added to the digit pair. Momentum: BOTH Only Ups and Only Downs (no side is picked). Drift: Rise or Fall by the chart direction.
 const THIRD = {
-    momentum: [
-        { key: 'only_up', type: 'RUNHIGH', label: 'Only Ups' },
-        { key: 'only_down', type: 'RUNLOW', label: 'Only Downs' },
-    ],
-    drift: { bullish: [{ key: 'rise', type: 'CALL', label: 'Rise' }], bearish: [{ key: 'fall', type: 'PUT', label: 'Fall' }] },
+    momentum: { bullish: { key: 'only_up', type: 'RUNHIGH', label: 'Only Ups' }, bearish: { key: 'only_down', type: 'RUNLOW', label: 'Only Downs' } },
+    drift: { bullish: { key: 'rise', type: 'CALL', label: 'Rise' }, bearish: { key: 'fall', type: 'PUT', label: 'Fall' } },
 };
 
-/** The basket for a base + chart direction + regime: its contracts (3 on drift, 4 on momentum: the digit pair + Only Ups + Only Downs), their stake shares and the setup number. null = no basket. */
+/** The basket for a base + chart direction + regime: its three contracts (keys and types), their stake shares and the setup number. null = no basket. */
 export function basketFor(pair_key, direction, momentum) {
     const index = BASKET_BASE_KEYS.indexOf(pair_key);
     if (index < 0 || (direction !== 'bullish' && direction !== 'bearish')) return null;
     const pp = PAIR_PATTERNS.find(x => x.key === pair_key);
     const regime = momentum ? 'momentum' : 'drift';
-    const thirds = momentum ? THIRD.momentum : THIRD.drift[direction]; // the contracts added to the digit pair (2 on momentum, 1 on drift)
+    const third = THIRD[regime][direction];
     const shares = momentum ? BASKET_MOMENTUM_SHARES : BASKET_DRIFT_SHARES;
-    const keys = [...pp.keys, ...thirds.map(t => t.key)];
+    const keys = [...pp.keys, third.key];
     return {
-        // the setup number is still base x regime x chart direction (1-16): on momentum the bullish and bearish setups of a base buy the same four contracts
         number: index * 4 + 1 + (momentum ? 0 : 2) + (direction === 'bullish' ? 0 : 1),
         direction,
         regime,
         keys,
-        types: [...pp.types, ...thirds.map(t => t.type)],
-        thirds,
+        types: [...pp.types, third.type],
+        third,
         shares,
         profits: keys.map(k => LEG_PROFIT[k]),
     };
@@ -276,7 +270,7 @@ const runEndingAt = flag => {
 
 /**
  * Replays the basket the way the AI buys it: every time the pair pattern first reaches `min_run` ticks (tick i), look at what the chart said AT THAT
- * TICK (trend from the prices up to i only, momentum from the rise / fall run ending at i), build that tick's basket, settle every contract of it (3, or 4 on momentum) on
+ * TICK (trend from the prices up to i only, momentum from the rise / fall run ending at i), build that tick's basket, settle all three contracts on
  * their own exit ticks and add up the net result per 1.00 staked in total (stakes split by the basket's shares: a win pays share x profit, a loss
  * costs the share). Ticks with no chart direction are skipped, the AI does not trade them either. `trendAt(i)` can be replaced (tests).
  */
@@ -309,6 +303,20 @@ export function replayBasket(pp, flag, prices, flags, min_run, decimals = 2, tre
  * @param {number} decimals the symbol's price precision (for last digits)
  * @param {number} [total_ticks] how many ticks this symbol has ever shown (so a run's id keeps counting as the window slides)
  */
+/**
+ * The direction the basket's third contract (Rise / Fall, Only Ups / Only Downs) leans. The confirmed 1-tick trend when there is one; otherwise the
+ * way the last price MOVED (the last tick that was not flat); with no move at all, bullish. The basket no longer waits for a confirmed trend:
+ * the third contract does not have to agree with the digit pair for the AI to buy.
+ */
+export function basketDirection(trend, prices) {
+    if (trend === 'bullish' || trend === 'bearish') return trend;
+    for (let i = prices.length - 1; i > 0; i--) {
+        if (prices[i] > prices[i - 1]) return 'bullish';
+        if (prices[i] < prices[i - 1]) return 'bearish';
+    }
+    return 'bullish';
+}
+
 /** How many of the last entries of a boolean array are true in a row. */
 const trailingRun = arr => {
     let k = 0;
@@ -389,7 +397,10 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
             pattern: mine.current ? tail.slice(-Math.min(mine.current, 3)).map(price => String(lastDigit(price, decimals))) : [],
         };
     });
-    return { n, min_run: MIN_RUN, decimals, reported_decimals: reported_dp, trend: detectTrend(tail.slice(-TREND_WINDOW)), rise_run: trailingRun(flags.rise), fall_run: trailingRun(flags.fall), rows, pairs };
+    // Digit frequency of the same window: 1st / 2nd / 3rd most and the least frequent digit, and what they say about Even / Odd / Over 4 / Under 5.
+    const digits = digitFrequency(tail.map(price => lastDigit(price, decimals)));
+    const trend = detectTrend(tail.slice(-TREND_WINDOW));
+    return { n, min_run: MIN_RUN, decimals, reported_decimals: reported_dp, trend, direction: basketDirection(trend, tail), rise_run: trailingRun(flags.rise), fall_run: trailingRun(flags.fall), digits, rows, pairs };
 }
 
 /**
@@ -397,30 +408,20 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
  *   entry = the run has reached that level (and is not stale) AND the bias on that level is at least 55%.
  * The run id is per run AND per level, so a run can fire at 2 ticks and again at 3 without ever firing the same level twice.
  */
-/** Confidence points added when 2, 3 or all 4 of the digits (1st / 2nd / 3rd most appearing, least appearing) favour a contract. */
-export const DIGIT_BOOST = { 2: 5, 3: 10, 4: 15 };
-
-export function computeRunSignals(scan, symbol, digit_freq = null) {
+export function computeRunSignals(scan, symbol) {
     if (!scan || !scan.rows.length) return [];
-    // DIGIT FREQUENCY BOOST (Even / Odd / Over 4 / Under 5): the 1st, 2nd and 3rd most appearing digit and the least appearing digit
-    // (backend/src/digitFrequency.js) each favour a contract or not. NOT all four have to agree: when at least 2 favour a contract (and it
-    // is ahead of its opposite) they BOOST its confidence and count toward its confluence. The boost only raises `confidence` (which ranks
-    // entries and passes the minimum signal strength); it never sets, delays or blocks `entry`.
-    const digit_logic = key => digit_freq?.logic?.find(l => l.key === key) ?? null;
-    const boost_for = dl => (dl && dl.favoured ? DIGIT_BOOST[dl.agree] ?? 0 : 0);
     const entries = [];
     const extras = [];
     for (const row of scan.rows) {
         const def = RUN_CONTRACTS.find(c => c.key === row.key);
         // Confluence: EVERY analysed run length of this contract (2 AND 3 ticks for Even/Odd and Over 4/Under 5) favours it at once.
-        const levels_confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
-        const dl = digit_logic(row.key); // null for Rise / Fall / Only Ups / Only Downs, or when there is no digit frequency yet
-        const confluence = levels_confluence && (dl ? dl.favoured : true);
-        const digit_boost = boost_for(dl);
+        const confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
+        // Even / Odd / Over 4 / Under 5 are judged by the FAST rule: 2 consecutive ticks + the digit frequency (2 of the 4 key digits are enough).
+        const dc = scan.digits?.contracts?.[row.key];
+        const fast = DIGIT_GATE_ON && Boolean(dc);
         for (const level of row.levels) {
-            if (level.bias <= 50) continue;
-            const base_confidence = Math.round(clamp((level.bias - 50) * 2, 0, 100));
-            const confidence = Math.min(100, base_confidence + digit_boost);
+            if (!fast && level.bias <= 50) continue;
+            const confidence = Math.round(clamp((level.bias - 50) * 2, 0, 100));
             const fresh = row.current >= level.min_run && row.current <= level.min_run + FRESH_SLACK;
             // Rise / Only Ups need a confirmed higher-high trend, Fall / Only Downs a lower-low trend on the 1-tick chart (checked here, so
             // the AI can buy the very next tick without asking for the chart).
@@ -430,7 +431,10 @@ export function computeRunSignals(scan, symbol, digit_freq = null) {
             // (needs enough replays to mean something; a contract bought as a pair is not judged alone).
             const replayed = level.outcomes >= MIN_OUTCOME_SAMPLE && level.hit !== null;
             const hit_ok = !replayed || !NEEDS_BREAK_EVEN.has(row.key) || level.hit >= BREAK_EVEN_PCT;
-            const entry = fresh && trend_ok && hit_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
+            // FAST rule: the run is on at 2 ticks AND the digit frequency favours the contract (2 of the 4 key digits: 1st, 2nd, 3rd most and the
+            // least frequent). No wait for the 3-tick level, the run bias or the replayed hit rate: those slowed the AI down. The 3-tick level is
+            // still reported, but only the 2-tick level fires, so one run is never bought twice.
+            const entry = fast ? fresh && dc.favoured && level.min_run === MIN_RUN : fresh && trend_ok && hit_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
             const signal = {
                 family: 'run_bias',
                 strategy: 'run_bias',
@@ -439,17 +443,14 @@ export function computeRunSignals(scan, symbol, digit_freq = null) {
                 prediction: row.contract_type === 'DIGITOVER' ? 4 : row.contract_type === 'DIGITUNDER' ? 5 : undefined,
                 trend: need ? scan.trend : undefined,
                 label: row.label,
-                confidence,
+                // a signal the digit frequency backs is ranked by whichever is stronger: the run bias or the digit frequency strength
+                confidence: dc?.favoured ? Math.max(confidence, dc.strength) : confidence,
+                digit_freq: dc ? { favoured: dc.favoured, strength: dc.strength, support: dc.support, share: dc.share, key_digits: scan.digits.key_digits } : undefined,
                 entry,
                 confluence,
-                levels_confluence,
-                digit_confluence: dl ? dl.favoured : undefined, // at least 2 of the four digits (1st / 2nd / 3rd most, least) favour this contract
-                digit_boost: dl ? digit_boost : undefined, // confidence points added by the digits (0 when they do not favour it)
-                base_confidence: dl ? base_confidence : undefined, // the confidence before the boost
-                digit_freq: dl ? { agree: dl.agree, top3_votes: dl.top3_votes, least_inside: dl.least_inside, pct: dl.pct, verdict: dl.verdict } : undefined,
                 run_id: entry ? `${row.run_start}:${level.min_run}` : undefined,
                 run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run, outcomes: level.outcomes, wins: level.wins, hit: level.hit, pattern: row.pattern },
-                basis: `Run bias: ${row.label} had ${level.runs} runs of ${level.min_run}+ ticks on ${symbol} over the last ${scan.n} ticks (bias ${level.bias}%, run now ${row.current}). Replayed entry and exit ticks after the same pattern: ${level.wins}/${level.outcomes} won${level.hit === null ? '' : ` (${level.hit}%)`}.`,
+                basis: `Run bias: ${row.label} had ${level.runs} runs of ${level.min_run}+ ticks on ${symbol} over the last ${scan.n} ticks (bias ${level.bias}%, run now ${row.current}). Replayed entry and exit ticks after the same pattern: ${level.wins}/${level.outcomes} won${level.hit === null ? '' : ` (${level.hit}%)`}.${dc ? ` Digit frequency: ${dc.support}/4 key digits (${scan.digits.key_digits.join(',')}) support it, ${dc.share}% of ticks ended on its digits${dc.favoured ? `, strength ${dc.strength}%` : ', not in its favour'}.` : ''}`,
             };
             (entry ? entries : extras).push(signal);
         }
@@ -457,37 +458,35 @@ export function computeRunSignals(scan, symbol, digit_freq = null) {
     // Pair signals: the sequence favours two contracts at once, so both are bought together.
     for (const row of scan.pairs ?? []) {
         const pp = PAIR_PATTERNS.find(x => x.key === row.key);
-        const levels_confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
-        // a pair is digit-confluent when the four digits favour every digit leg of it (Even + Under 5: both; Rise + Odd: the Odd leg)
-        const digit_legs = pp.keys.map(k => digit_logic(k)).filter(Boolean);
-        const digit_confluence = digit_legs.length ? digit_legs.every(l => l.favoured) : undefined;
-        const confluence = levels_confluence && (digit_confluence === undefined ? true : digit_confluence);
-        const digit_boost = digit_legs.length && digit_confluence ? Math.min(...digit_legs.map(l => DIGIT_BOOST[l.agree] ?? 0)) : 0; // the weaker leg sets the boost
+        const confluence = row.levels.every(l => l.bias >= 50 + MIN_ENTRY_BIAS_EDGE);
+        // A pair with a digit leg (Even / Odd / Over 4 / Under 5) is judged by the FAST rule: 2 consecutive ticks + the digit frequency favours every digit leg.
+        const leg_freq = pp.keys.map(k => scan.digits?.contracts?.[k]).filter(Boolean);
+        const fast = DIGIT_GATE_ON && leg_freq.length > 0;
         for (const level of row.levels) {
-            if (level.bias <= 50) continue;
+            if (!fast && level.bias <= 50) continue;
             const fresh = row.current >= level.min_run && row.current <= level.min_run + FRESH_SLACK;
             const replayed = level.outcomes >= MIN_OUTCOME_SAMPLE && level.avg_net !== null;
             const net_ok = !replayed || level.avg_net >= 0; // the pair must have at least broken even after this pattern
             const trend_ok = !pp.trend || scan.trend === pp.trend; // Rise + Odd needs higher highs, Fall + Even lower lows on the 1-tick chart
-            const entry = fresh && net_ok && trend_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
-            // BASKET ENTRY: the entry is judged on all the contracts the AI buys (3, or 4 on momentum), not only the digit pair.
-            //   1. the digit pair entry above (fresh pattern, bias, digit legs not losing after it),
-            //   2. the chart gives a direction, which picks the setup (and on drift the third contract, Rise / Fall) exactly as the AI does,
-            //   3. on drift that third contract has its own support: its run bias is at least 55% (momentum buys Only Ups AND Only Downs: nothing to support),
-            //   4. replayed as the whole basket (stakes split, each leg on its own exit tick) the basket was not losing after this pattern.
+            // Every digit leg of the pair needs the digit frequency in its favour. Rise + Odd / Fall + Even also keep their 1-tick trend.
+            const freq_ok = !fast || leg_freq.every(c => c.favoured);
+            const entry = fast ? fresh && trend_ok && freq_ok && level.min_run === MIN_RUN : fresh && net_ok && trend_ok && level.bias >= 50 + MIN_ENTRY_BIAS_EDGE;
+            // BASKET ENTRY: the pair entry above (fast rule: 2 consecutive ticks + the digit frequency) AND a chart direction, which picks the third
+            // contract exactly as the AI does. The third contract's own run bias and the replayed basket result are still reported, but they no
+            // longer hold the basket back (with the digit frequency off, the old rule needs both: third bias >= 55% and a basket not losing).
             let basket = null;
             if (BASKET_BASE_KEYS.includes(pp.key)) {
                 const momentum = (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS);
-                const setup = basketFor(pp.key, scan.trend, momentum);
-                // Drift: Rise / Fall follows the chart, so it needs its own support (its run bias >= 55%). Momentum buys Only Ups AND Only Downs
-                // together (2-tick contracts, no side to pick), so there is no third contract to support: third_bias is null and it does not gate.
-                const third_row = setup && !momentum ? scan.rows.find(r => r.key === setup.thirds[0].key) : null;
+                // Fast rule: the third contract leans the way the chart moves (trend, else the last tick); no confirmed trend is needed. Old rule: trend only.
+                const direction = fast ? (scan.direction ?? scan.trend) : scan.trend;
+                const setup = basketFor(pp.key, direction, momentum);
+                const third_row = setup ? scan.rows.find(r => r.key === setup.third.key) : null;
                 const third_bias = third_row ? third_row.levels[0].bias : null;
-                const third_ok = setup ? (momentum ? true : third_bias !== null && third_bias >= 50 + MIN_ENTRY_BIAS_EDGE) : false;
+                const third_ok = third_bias !== null && third_bias >= 50 + MIN_ENTRY_BIAS_EDGE;
                 const rb = level.basket ?? { outcomes: 0, avg_net: null };
                 const basket_replayed = rb.outcomes >= MIN_OUTCOME_SAMPLE && rb.avg_net !== null;
                 const basket_net_ok = !basket_replayed || rb.avg_net >= 0;
-                basket = { setup: setup ? setup.number : null, direction: scan.trend, regime: momentum ? 'momentum' : 'drift', third: setup ? setup.types.slice(2).join('+') : null, legs: setup ? setup.types.length : null, third_bias, outcomes: rb.outcomes, avg_net: rb.avg_net, entry: Boolean(entry && setup && third_ok && basket_net_ok) };
+                basket = { setup: setup ? setup.number : null, direction, regime: momentum ? 'momentum' : 'drift', third: setup ? setup.third.type : null, third_bias, outcomes: rb.outcomes, avg_net: rb.avg_net, entry: Boolean(entry && setup && (fast || (third_ok && basket_net_ok))) };
             }
             (entry ? entries : extras).push({
                 family: 'run_bias',
@@ -495,20 +494,22 @@ export function computeRunSignals(scan, symbol, digit_freq = null) {
                 contract_type: pp.types[0], // the first leg; pair_types lists both
                 pair_types: pp.types,
                 pair_key: pp.key,
-                basket_entry: basket ? basket.entry : undefined, // true = the AI may buy the basket (3 contracts on drift, 4 on momentum) on this signal
+                basket_entry: basket ? basket.entry : undefined, // true = the AI may buy the 3-contract basket on this signal
                 basket_setup: basket ? basket.setup : undefined, // 1-16: which of the 16 setups this signal is (the AI cross-checks it)
                 basket: basket ?? undefined,
-                trend: scan.trend, // the 1-tick chart direction (bullish / bearish / none): the basket's third contract follows it
+                trend: scan.trend, // the 1-tick chart trend (bullish / bearish / none)
+                basket_direction: basket ? basket.direction : undefined, // the direction the basket's third contract leans (the trend, else the last tick's move)
                 momentum: (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS),
                 duration_ticks: 1,
                 prediction: pp.types[0] === 'DIGITOVER' ? 4 : undefined,
                 label: pp.label,
-                confidence: Math.min(100, Math.round(clamp((level.bias - 50) * 2, 0, 100)) + digit_boost),
+                confidence: (() => {
+                    const base = Math.round(clamp((level.bias - 50) * 2, 0, 100));
+                    return leg_freq.length && freq_ok ? Math.max(base, Math.min(...leg_freq.map(c => c.strength))) : base;
+                })(), // ranked by the weaker digit leg's strength, never below the run bias
+                digit_freq: leg_freq.length ? { favoured: leg_freq.every(c => c.favoured), strength: Math.min(...leg_freq.map(c => c.strength)), legs: pp.keys.filter(k => scan.digits?.contracts?.[k]), key_digits: scan.digits.key_digits } : undefined,
                 entry,
                 confluence,
-                levels_confluence,
-                digit_confluence,
-                digit_boost: digit_legs.length ? digit_boost : undefined,
                 run_id: entry ? `${row.run_start}:${level.min_run}:pair` : undefined,
                 run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run, outcomes: level.outcomes, avg_net: level.avg_net, pattern: row.pattern },
                 basis: `Pair: the last ${pp.cross ? 'ticks' : 'digits'} favour ${pp.label} at once (${pp.cross ? 'price move and digit together' : pp.digits.join(', ')}) on ${symbol}: bias ${level.bias}%, run now ${row.current}, replayed net ${level.avg_net ?? 'n/a'} per pair over ${level.outcomes} entries.`,

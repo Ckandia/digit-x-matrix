@@ -1,202 +1,149 @@
-// Pure checks for the digit-frequency module: ranking (1st / 2nd / 3rd most, least), ties, and the Even / Odd / Over 4 / Under 5 frequency logic.
+// Pure checks for the digit frequency. Run: npm run check:digits
 import assert from 'node:assert/strict';
-import { computeDigitFrequency, rankDigits, contractLogic, DIGIT_CONTRACTS, MIN_DIGIT_SAMPLE, DIGIT_WINDOW } from '../src/digitFrequency.js';
-import { computeRunBias } from '../src/runBias.js';
-import { MarketFeed } from '../src/marketFeed.js';
+import { digitFrequency, DIGIT_MIN_SUPPORT } from '../src/digitFrequency.js';
+import { computeRunBias, computeRunSignals, basketDirection } from '../src/runBias.js';
 
-// prices whose last digit (2 decimals) is the given digit
-const px = digits => digits.map((d, i) => Number((100 + i * 0.1 + d / 100).toFixed(2)));
-// a digit list where digit d appears counts[d] times, shuffled deterministically
-const build = counts => {
-    const out = [];
-    counts.forEach((c, d) => { for (let k = 0; k < c; k++) out.push(d); });
-    let seed = 7;
-    for (let i = out.length - 1; i > 0; i--) {
-        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-        const j = seed % (i + 1);
-        [out[i], out[j]] = [out[j], out[i]];
-    }
-    return out;
+const rep = (d, k) => new Array(k).fill(d);
+
+// ---- ranking: 1st, 2nd, 3rd most frequent and the least frequent digit
+const a = digitFrequency([...rep(2, 30), ...rep(4, 25), ...rep(6, 20), ...rep(1, 10), ...rep(3, 9), ...rep(5, 8), ...rep(7, 7), ...rep(8, 6), ...rep(9, 5), ...rep(0, 4)]);
+assert.equal(a.n, 124);
+assert.deepEqual([a.first.digit, a.second.digit, a.third.digit, a.least.digit], [2, 4, 6, 0]);
+assert.equal(a.first.count, 30);
+assert.equal(a.first.pct, 24.19);
+assert.deepEqual(a.key_digits, [2, 4, 6, 0]);
+assert.equal(a.counts.reduce((x, y) => x + y, 0), 124, 'counts add up to the window');
+
+// ---- ties: the most recently seen digit ranks higher among the most frequent; the longest-unseen digit is the least frequent
+const t = digitFrequency([5, 5, 7, 7, 3, 3, 1, 1, 9, 9, 8, 6, 4, 2, 0, 0]); // 5,7,3,1,9,0 twice; 8,6,4,2 once
+assert.equal(t.first.digit, 0, 'ties on 2 appearances: 0 was seen last, so it ranks first');
+assert.deepEqual([t.second.digit, t.third.digit], [9, 1]);
+assert.equal(t.least.digit, 8, 'ties on 1 appearance: 8 has not been seen for the longest');
+
+// ---- support for the contracts
+// top 3 = 2, 4, 6 (all even, all under-5 except 6), least = 0 (even, under 5)
+assert.equal(a.contracts.even.support, 3, 'three even top digits; the least digit is even too, so it does not add');
+assert.deepEqual(a.contracts.even.supporting, [2, 4, 6]);
+assert.equal(a.contracts.odd.support, 1, 'only the (even) least digit supports Odd');
+assert.deepEqual(a.contracts.odd.supporting, [0]);
+assert.equal(a.contracts.under5.support, 2, '2 and 4 are under 5; 6 is over 4; the least digit 0 is under 5 so it does not add');
+assert.equal(a.contracts.over4.support, 2, '6 is over 4 and the least digit 0 is not over 4');
+// even: 2,4,6,8,0 -> 30+25+20+6+4 = 85 of 124
+assert.equal(a.contracts.even.share, 68.55);
+assert.equal(a.contracts.even.favoured, true);
+assert.equal(a.contracts.even.strength, Math.round(2 * 20 + (68.55 - 50) * 2), '3 supporting digits = 40, plus 2 points per % above half the window');
+assert.equal(a.contracts.odd.favoured, false);
+assert.equal(a.contracts.odd.strength, 0, 'no strength unless the frequency is in favour');
+assert.equal(DIGIT_MIN_SUPPORT, 2, 'two of the four key digits already make a bias: the AI does not wait for all four');
+// a 2-2 tie with the opposite contract goes to the one whose digits filled more of the window
+assert.equal(a.contracts.under5.support, a.contracts.over4.support);
+assert.equal(a.contracts.under5.favoured, true, 'Under 5 (2 digits, 63% of the window) beats Over 4 (2 digits, 37%)');
+assert.equal(a.contracts.over4.favoured, false);
+assert.equal(a.contracts.under5.strength, Math.round(1 * 20 + (62.9 - 50) * 2));
+// two supporting digits are enough
+const two = digitFrequency([...rep(2, 12), ...rep(4, 11), ...rep(0, 10), ...rep(6, 10), ...rep(8, 1), ...rep(1, 11), ...rep(3, 9), ...rep(5, 8), ...rep(7, 8), ...rep(9, 8)]);
+assert.deepEqual(two.key_digits, [2, 1, 4, 8]);
+assert.equal(two.contracts.even.support, 2);
+assert.equal(two.contracts.odd.support, 2);
+assert.equal(two.contracts.even.share, two.contracts.odd.share, 'even 44 vs odd 44 of 88');
+assert.equal(two.contracts.even.favoured || two.contracts.odd.favoured, false, 'an exact tie favours neither: the AI never leans both ways');
+const lean = digitFrequency([...rep(2, 12), ...rep(4, 11), ...rep(0, 10), ...rep(6, 10), ...rep(8, 3), ...rep(1, 11), ...rep(3, 9), ...rep(5, 8), ...rep(7, 8), ...rep(9, 8)]);
+assert.equal(lean.contracts.even.support, 2);
+assert.equal(lean.contracts.even.favoured, true, '2 supporting digits and a bigger share: Even is favoured');
+assert.equal(lean.contracts.odd.favoured, false);
+assert.equal(lean.contracts.even.strength >= 20, true, 'a favoured contract always clears the AI default minimum signal strength of 20');
+
+// ---- the least digit counts FOR the opposite contract
+const b = digitFrequency([...rep(1, 20), ...rep(3, 18), ...rep(5, 16), ...rep(0, 12), ...rep(2, 11), ...rep(4, 10), ...rep(6, 9), ...rep(8, 8), ...rep(9, 7), ...rep(7, 3)]);
+assert.deepEqual([b.first.digit, b.second.digit, b.third.digit, b.least.digit], [1, 3, 5, 7]);
+assert.equal(b.contracts.odd.support, 3, 'top 1,3,5 are odd; the odd least digit 7 does not add');
+assert.equal(b.contracts.even.support, 1, 'only the odd least digit points away from odd, i.e. towards Even');
+const c = digitFrequency([...rep(2, 20), ...rep(4, 18), ...rep(1, 16), ...rep(0, 12), ...rep(6, 11), ...rep(8, 10), ...rep(3, 9), ...rep(5, 8), ...rep(9, 7), ...rep(7, 4)]);
+assert.deepEqual([c.first.digit, c.second.digit, c.third.digit, c.least.digit], [2, 4, 1, 7]);
+assert.equal(c.contracts.even.support, 3, '2 and 4 are even, and the rare odd digit 7 leaves the even digits to appear: 3 of 4');
+assert.equal(c.contracts.even.supporting.includes(7), true);
+assert.equal(digitFrequency([]), null);
+
+// ---- the scan carries it, and the gate follows it
+const price = (cents, d) => Math.floor(cents / 10) * 10 + d; // a price whose last cent-digit is d
+const series = digits => {
+    let base = 10000;
+    return digits.map(d => { base += 10; return price(base, d) / 100; });
 };
-const get = (counts) => computeDigitFrequency(px(build(counts)), 2);
-
-// not enough ticks: nothing reported
-const few = computeDigitFrequency(px(build([5, 5, 5, 5, 5, 5, 5, 5, 5, 5])), 2);
-assert.equal(few.n, 50);
-assert.deepEqual(few.ranking, []);
-assert.ok(MIN_DIGIT_SAMPLE > 50);
-
-// 1st, 2nd, 3rd most and least, with counts and percentages (100 ticks)
-let r = get([8, 9, 10, 11, 12, 6, 7, 20, 15, 2]); // 100 ticks
-assert.equal(r.n, 100);
-assert.deepEqual([r.first.digit, r.second.digit, r.third.digit, r.least.digit], [7, 8, 4, 9]);
-assert.deepEqual([r.first.count, r.first.pct], [20, 20]);
-assert.deepEqual([r.second.count, r.third.count, r.least.count], [15, 12, 2]);
-assert.equal(r.ranking.length, 10);
-assert.equal(r.ranking.reduce((s, x) => s + x.count, 0), 100, 'every tick is counted once');
-assert.ok(Math.abs(r.ranking.reduce((s, x) => s + x.pct, 0) - 100) < 0.2);
-assert.equal(r.first.tied, 0);
-
-// digit 0 counts (a price like 100.50 loses its 0 in JSON; the reader pads to the market's decimals)
-r = get([30, 7, 7, 7, 7, 7, 7, 7, 7, 12]);
-assert.equal(r.first.digit, 0, 'digit 0 is read as 0, not as the digit before it');
-
-// ties: the digit seen more recently ranks higher; `tied` says a rank is a tie-break
-const tieDigits = [...build([10, 10, 10, 10, 10, 10, 10, 10, 10, 10])];
-r = computeDigitFrequency(px(tieDigits), 2);
-assert.equal(r.first.tied, 9, 'all ten digits tied');
-assert.equal(r.ranking[0].digit, tieDigits[tieDigits.length - 1], 'the most recently seen digit ranks first on a tie');
-assert.equal(new Set(r.ranking.map(x => x.digit)).size, 10, 'ranking has each digit exactly once');
-
-// THE LOGIC. top three = 8, 6, 2 (all even), least = 9 (odd): all four digits favour Even (agree 4); none favour Odd
-r = get([6, 4, 14, 3, 5, 4, 16, 3, 20, 2]); // top: 8(20) 6(16) 2(14); least 9(2)
-assert.deepEqual([r.first.digit, r.second.digit, r.third.digit, r.least.digit], [8, 6, 2, 9]);
-let L = Object.fromEntries(r.logic.map(l => [l.key, l]));
-assert.equal(L.even.agree, 4);
-assert.equal(L.even.favoured, true);
-assert.equal(L.even.verdict, 'favoured');
-assert.equal(L.odd.agree, 0);
-assert.equal(L.odd.favoured, false);
-assert.equal(r.even_odd, 'even');
-// Over 4 / Under 5 for the same data: top three 8, 6 (over 4) and 2 (under 5); the least digit 9 is Over 4, so it favours Under 5.
-// Over 4: 2 top digits + 0 = 2. Under 5: 1 top digit + 1 = 2. A 2-2 split favours neither.
-assert.equal(L.over4.agree, 2);
-assert.equal(L.under5.agree, 2);
-assert.equal(L.over4.favoured, false);
-assert.equal(L.under5.favoured, false);
-assert.equal(L.over4.verdict, 'split');
-assert.equal(r.over_under, null, 'a 2-2 split favours neither side');
-
-// NOT all four have to agree: 3 of 4 favour Over 4 here (top 9 and 7 are over 4, the least digit 0 is under 5)
-r = get([2, 12, 3, 15, 4, 5, 6, 14, 9, 30]); // top: 9(30) 3(15) 7(14); least 0(2)
-assert.deepEqual([r.first.digit, r.second.digit, r.third.digit, r.least.digit], [9, 3, 7, 0]);
-L = Object.fromEntries(r.logic.map(l => [l.key, l]));
-assert.equal(L.odd.agree, 4, 'three odd digits on top and an even least digit');
-assert.equal(L.over4.agree, 3, '9 and 7 are over 4, and the least digit 0 is on the other side');
-assert.equal(L.over4.favoured, true, '3 of 4 is enough');
-assert.equal(L.under5.agree, 1);
-assert.equal(L.under5.favoured, false);
-assert.equal(r.even_odd, 'odd');
-assert.equal(r.over_under, 'over4');
-
-// exactly 2 of 4 is enough when ahead of the opposite: top 1, 3, 6 (two odd), least 8 (even) -> Odd agree 3; make it 2: top 1, 3, 6 and least 7 (odd)
-r = get([8, 20, 6, 18, 7, 9, 16, 2, 7, 7]); // top: 1(20) 3(18) 6(16); least 7(2) -> wait 7 has 2
-assert.deepEqual([r.first.digit, r.second.digit, r.third.digit, r.least.digit], [1, 3, 6, 7]);
-L = Object.fromEntries(r.logic.map(l => [l.key, l]));
-assert.equal(L.odd.agree, 2, 'two odd top digits, but the least digit is odd too');
-assert.equal(L.even.agree, 2, 'one even top digit plus the odd least digit');
-assert.equal(r.even_odd, null, 'level 2-2');
-
-// complementary pairs: never both favoured, over many random markets
-let seed = 42;
-const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
-for (let m = 0; m < 300; m++) {
-    const len = 60 + Math.floor(rnd() * 500);
-    const digs = Array.from({ length: len }, () => Math.floor(rnd() * 10));
-    const out = computeDigitFrequency(px(digs), 2);
-    const Lm = Object.fromEntries(out.logic.map(l => [l.key, l]));
-    assert.ok(!(Lm.even.favoured && Lm.odd.favoured), 'Even and Odd are never both favoured');
-    assert.ok(!(Lm.over4.favoured && Lm.under5.favoured), 'Over 4 and Under 5 are never both favoured');
-    assert.equal(Lm.even.top3_votes + Lm.odd.top3_votes, 3);
-    assert.equal(Lm.even.agree + Lm.odd.agree, 4, 'the four digits are split between Even and Odd');
-    assert.equal(Lm.over4.agree + Lm.under5.agree, 4, 'the four digits are split between Over 4 and Under 5');
-    for (const l of out.logic) assert.ok(!l.favoured || l.agree >= 2, 'favoured needs at least 2 of the 4 digits');
-    assert.equal(Lm.over4.top3_votes + Lm.under5.top3_votes, 3);
-    assert.ok(Math.abs(Lm.even.pct + Lm.odd.pct - 100) < 0.05);
-    assert.ok(Math.abs(Lm.over4.pct + Lm.under5.pct - 100) < 0.05);
-    assert.equal(out.n, Math.min(len, DIGIT_WINDOW));
-    const ranks = out.ranking.map(x => x.count);
-    assert.deepEqual(ranks, [...ranks].sort((a, b) => b - a), 'ranking is sorted most to least');
-    assert.equal(out.first.count, Math.max(...ranks));
-    assert.equal(out.least.count, Math.min(...ranks));
-}
-
-// only the freshest 500 ticks count
-const old = Array(200).fill(7);
-const fresh = build([40, 40, 40, 40, 40, 40, 40, 40, 40, 100]).slice(0, 500);
-r = computeDigitFrequency(px([...old, ...fresh]), 2);
-assert.equal(r.n, 500);
-assert.equal(r.ranking.reduce((s, x) => s + x.count, 0), 500);
-
-// per-market decimals: a wrong reported pip size does not change the digits (same rule as the run bias)
-const three = Array.from({ length: 200 }, (_, i) => Number((100 + i * 0.1 + ((i * 7) % 10) / 1000).toFixed(3)));
-const a = computeDigitFrequency(three, 2); // reported 2dp, prices print 3dp
-const b = computeDigitFrequency(three, 3);
-assert.equal(a.decimals, 3);
-assert.deepEqual(a.ranking, b.ranking);
-assert.equal(a.decimals, computeRunBias(three, 2).decimals, 'reads the same decimals as the run bias');
-
-// the logic table covers exactly the four contracts
-assert.deepEqual(DIGIT_CONTRACTS.map(c => c.key), ['even', 'odd', 'over4', 'under5']);
-for (const c of DIGIT_CONTRACTS) assert.equal(c.digits.length, 5);
-assert.equal(typeof contractLogic, 'function');
-
-// wired into the snapshot of the live feed class (no network: feed is not started)
-const feed = new MarketFeed();
-const prices = px(build([30, 20, 30, 20, 30, 20, 30, 20, 30, 20]).slice(0, 200));
-feed._rebuildWindow('1HZ10V', prices);
-const snap = feed.getSnapshot('1HZ10V');
-{
-    assert.ok(snap.digit_freq, 'snapshot carries digit_freq');
-    assert.equal(snap.digit_freq.n, 200);
-    assert.equal(snap.digit_freq.ranking.length, 10);
-    assert.equal(snap.digit_freq.logic.length, 4);
-    // the signal list is untouched: no digit_freq signals, the AI trades the same signals as before
-    assert.ok(snap.signals.every(s => s.family !== 'digit_freq'));
-}
-
-// BOOST + CONFLUENCE: when at least 2 of the four digits favour Even / Odd / Over 4 / Under 5 the confidence is boosted (+5 / +10 / +15 for 2 / 3 / 4);
-// the digits never touch `entry`, and never touch Rise / Fall
-import { computeRunSignals, DIGIT_BOOST } from '../src/runBias.js';
-assert.deepEqual(DIGIT_BOOST, { 2: 5, 3: 10, 4: 15 });
-const biasedEven = [];
-for (let i = 0; i < 40; i++) biasedEven.push(2, 4, 6, 8, 0, 1);
-const evenPx = px([...biasedEven, 1, 2, 4]);
-const scan = computeRunBias(evenPx, 2);
-const mk = (even_agree, under_agree) => ({
-    logic: [
-        { key: 'even', favoured: even_agree >= 2 && even_agree > 4 - even_agree, agree: even_agree, top3_votes: 3, least_inside: false, pct: 80, verdict: 'x' },
-        { key: 'odd', favoured: false, agree: 4 - even_agree, top3_votes: 0, least_inside: true, pct: 20, verdict: 'none' },
-        { key: 'over4', favoured: false, agree: 4 - under_agree, top3_votes: 1, least_inside: false, pct: 50, verdict: 'none' },
-        { key: 'under5', favoured: under_agree >= 2 && under_agree > 4 - under_agree, agree: under_agree, top3_votes: 2, least_inside: false, pct: 50, verdict: 'x' },
-    ],
-});
-const evenSig = sigs => sigs.filter(s => s.contract_type === 'DIGITEVEN' && !s.pair_types);
-const none = evenSig(computeRunSignals(scan, 'T'));
-assert.ok(none.length, 'the fixture produces Even signals');
-for (const s of none) { assert.equal(s.digit_boost, undefined); assert.equal(s.confluence, s.levels_confluence, 'no digit data: behaves as before'); }
-const sameEntries = (a, b) => assert.deepEqual(a.map(s => `${s.contract_type}|${s.run.min_run}|${s.entry}`), b.map(s => `${s.contract_type}|${s.run.min_run}|${s.entry}`));
-for (const [agree, boost] of [[4, 15], [3, 10], [2, 0]]) {
-    // 2 of 4 against 2 of 4 is a split: favoured needs to be ahead, so no boost; 3 and 4 are ahead
-    const sigs = evenSig(computeRunSignals(scan, 'T', mk(agree, 2)));
-    sameEntries(sigs, none);
-    for (const [i, s] of sigs.entries()) {
-        assert.equal(s.digit_boost, boost, `agree ${agree}`);
-        assert.equal(s.base_confidence, none[i].confidence, 'base confidence is the confidence without the digits');
-        assert.equal(s.confidence, Math.min(100, none[i].confidence + boost));
-        assert.equal(s.digit_confluence, boost > 0);
-        assert.equal(s.confluence, s.levels_confluence && boost > 0);
-    }
-}
-// the weakest digit support: 1 of 4 gives nothing
-for (const s of evenSig(computeRunSignals(scan, 'T', mk(1, 2)))) assert.equal(s.digit_boost, 0);
-// favoured with exactly 2 (ahead of the opposite 1)... 2 vs 2 is a split; build 2 vs 1 by hand
-const twoOfFour = { logic: mk(4, 2).logic.map(l => (l.key === 'even' ? { ...l, agree: 2, favoured: true } : l.key === 'odd' ? { ...l, agree: 1 } : l)) };
-for (const s of evenSig(computeRunSignals(scan, 'T', twoOfFour))) { assert.equal(s.digit_boost, 5, '2 of the 4 digits is enough'); assert.equal(s.digit_confluence, true); }
-// the confidence never passes 100
-const capped = evenSig(computeRunSignals(scan, 'T', mk(4, 2)));
-assert.ok(capped.every(s => s.confidence <= 100));
-// price contracts are never touched by the digits
-assert.ok(computeRunSignals(scan, 'T', mk(4, 2)).filter(s => ['CALL', 'PUT', 'RUNHIGH', 'RUNLOW'].includes(s.contract_type)).every(s => s.digit_boost === undefined));
-// a pair needs BOTH digit legs favoured and takes the weaker leg's boost: Even (4 of 4) + Under 5 (3 of 4)
-const pairSigs = sigs => sigs.filter(s => s.pair_key === 'even_under5');
+// 90 ticks, mostly even digits, ending on a run of three even ticks
+const evenish = [];
+for (let i = 0; i < 90; i++) evenish.push(i % 6 === 0 ? 3 : [2, 4, 6, 0, 8][i % 5]);
+evenish.push(2, 4, 6);
+const scan = computeRunBias(series(evenish), 2);
+assert.ok(scan.digits && scan.digits.n === scan.n, 'digit frequency is part of the scan');
+assert.equal(scan.digits.contracts.even.favoured, true);
+const evenSig = computeRunSignals(scan, 'T').find(x => x.contract_type === 'DIGITEVEN' && x.run && x.run.min_run === 3);
+assert.ok(evenSig && evenSig.digit_freq && evenSig.digit_freq.favoured, 'Even carries its digit frequency');
+// the same scan with the digit frequency turned against Even blocks the entry
+const against = JSON.parse(JSON.stringify(scan));
+against.digits.contracts.even.favoured = false;
+against.digits.contracts.even.strength = 0;
+assert.equal(computeRunSignals(against, 'T').some(x => x.entry && x.contract_type === 'DIGITEVEN' && !x.pair_types), false, 'no single Even entry when the frequency is not in its favour');
+// a pair needs BOTH legs in favour: a history that ends on three digits inside 0, 2, 4 (a pair run), with the frequency set by hand
 const pairDigits = [];
-for (let i = 0; i < 30; i++) pairDigits.push(0, 2, 4, 7, 0, 2, 5, 9, 1, 3); // digits 0 2 4 are Even AND Under 5: the pair runs
-const pairScan = computeRunBias(px([...pairDigits, 7, 0, 2, 4]), 2);
-const pairBase = pairSigs(computeRunSignals(pairScan, 'T'));
-const both = pairSigs(computeRunSignals(pairScan, 'T', mk(4, 3)));
-assert.ok(both.length === pairBase.length && both.length > 0);
-for (const [i, s] of both.entries()) { assert.equal(s.digit_confluence, true); assert.equal(s.digit_boost, 10, 'the weaker leg (3 of 4) sets the boost'); assert.equal(s.confidence, Math.min(100, pairBase[i].confidence + 10)); assert.equal(s.entry, pairBase[i].entry); }
-for (const s of pairSigs(computeRunSignals(pairScan, 'T', mk(4, 1)))) { assert.equal(s.digit_confluence, false); assert.equal(s.digit_boost, 0, 'Under 5 is not favoured: no pair boost'); }
+for (let i = 0; i < 90; i++) pairDigits.push([2, 4, 0, 4, 2, 0, 1, 3][i % 8]);
+pairDigits.push(1, 2, 4, 0); // a breaker first, so the run is exactly 3 and fresh
+const pairScan = computeRunBias(series(pairDigits), 2);
+const forced = (even, under5) => {
+    const x = JSON.parse(JSON.stringify(pairScan));
+    x.digits.contracts.even.favoured = even;
+    x.digits.contracts.under5.favoured = under5;
+    return computeRunSignals(x, 'T').some(sg => sg.entry && sg.pair_key === 'even_under5');
+};
+assert.equal(forced(true, true), true, 'Even + Under 5 fires when the frequency favours both legs');
+assert.equal(forced(true, false), false, 'Even + Under 5 needs the frequency to favour Under 5 as well');
+assert.equal(forced(false, true), false, 'and Even');
+// ---- no confirmed trend, no wait: the basket still fires, its third contract leaning the way the last tick moved
+assert.equal(basketDirection('bullish', [1, 0]), 'bullish', 'a confirmed trend wins');
+assert.equal(basketDirection('bearish', [1, 2]), 'bearish');
+assert.equal(basketDirection('none', [1, 2, 3, 2]), 'bearish', 'no trend: the last move was down');
+assert.equal(basketDirection('none', [1, 2, 3, 3]), 'bullish', 'a flat last tick is skipped: the last real move was up');
+assert.equal(basketDirection('none', [5, 5, 5]), 'bullish', 'no move at all: bullish');
+const noTrend = (trend, last) => {
+    const x = JSON.parse(JSON.stringify(pairScan));
+    x.digits.contracts.even.favoured = true;
+    x.digits.contracts.under5.favoured = true;
+    x.trend = trend;
+    x.direction = basketDirection(trend, last);
+    x.rise_run = 0;
+    x.fall_run = 0;
+    return computeRunSignals(x, 'T').find(sg => sg.entry && sg.pair_key === 'even_under5');
+};
+const flatBasket = noTrend('none', [10, 11, 10]);
+assert.ok(flatBasket, 'the digit pair fires with no confirmed trend');
+assert.equal(flatBasket.basket_entry, true, 'and so does the basket: the three contracts need not agree');
+assert.equal(flatBasket.basket_direction, 'bearish');
+assert.equal(flatBasket.basket_setup, 4, 'Even + Under 5 with a falling last tick = setup 4 (bearish drift: Fall)');
+assert.equal(noTrend('none', [10, 11]).basket_setup, 3, 'a rising last tick = setup 3 (bullish drift: Rise)');
+assert.equal(noTrend('bullish', [10, 9]).basket_direction, 'bullish', 'a confirmed trend still decides the direction');
 
+// ---- property check on random digit windows: the bias never leans both ways, and it follows the key digits exactly
+{
+    let seed = 777;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
+    let favouredAny = 0;
+    for (let w = 0; w < 3000; w++) {
+        const digits = Array.from({ length: 300 }, () => Math.floor(rnd() * 10));
+        const f = digitFrequency(digits);
+        assert.equal(f.counts.reduce((x, y) => x + y, 0), 300);
+        for (const [k, o] of [['even', 'odd'], ['odd', 'even'], ['over4', 'under5'], ['under5', 'over4']]) {
+            const me = f.contracts[k];
+            assert.equal(me.support + f.contracts[o].support, 4, 'each key digit supports exactly one of a pair of opposite contracts');
+            assert.equal(me.favoured && f.contracts[o].favoured, false, 'a contract and its opposite are never both favoured');
+            if (me.favoured) {
+                favouredAny += 1;
+                assert.ok(me.support >= 2, 'favoured needs at least 2 of the 4 key digits');
+                assert.ok(me.strength >= 20, 'and clears the default minimum signal strength');
+            } else assert.equal(me.strength, 0);
+        }
+        assert.ok(f.counts[f.first.digit] >= f.counts[f.second.digit] && f.counts[f.second.digit] >= f.counts[f.third.digit], 'ranking is by frequency');
+        assert.ok(f.counts[f.least.digit] <= Math.min(...f.counts), 'the least digit has the fewest appearances');
+    }
+    assert.ok(favouredAny > 0);
+}
 console.log('digitFrequency checks passed');
