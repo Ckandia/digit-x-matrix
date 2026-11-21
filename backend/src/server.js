@@ -6,6 +6,7 @@ import { getSignalHistory, isPersistenceEnabled, logSignalSnapshot } from './db.
 import { DIGIT_SYMBOLS, MarketFeed } from './marketFeed.js';
 import { attachSignalHub } from './signalHub.js';
 import { getStats, isValidProfile, parseOutcome, recordOutcome } from './learning.js';
+import { PaperTrader } from './paperTrader.js';
 import { startTradePurge } from './tradeStore.js';
 import { mountJournalIngest } from './journalIngest.js';
 import { mountMcp } from './mcpServer.js';
@@ -34,6 +35,11 @@ mountMcp(app); // the Claude connector (read-only); needs MCP_SECRET
 const marketFeed = new MarketFeed();
 marketFeed.start();
 
+// The offline "virtual hook": paper trades on every market and contract, 24/7, no token and no money.
+// The AI Trader reads these results (GET /api/paper/stats) to see which contracts really beat the payout.
+const paperTrader = new PaperTrader(marketFeed);
+paperTrader.start().catch(err => console.error('[paper] failed to start:', err.message));
+
 // Optional (only runs when DATABASE_URL is set, e.g. a Neon connection
 // string): periodically persist each symbol's current stats + signals so
 // there's a queryable history of what the "brain" was seeing over time —
@@ -52,8 +58,7 @@ if (isPersistenceEnabled()) {
 }
 
 app.get('/health', (_req, res) => {
-    // basket_api: 2 = this backend sends basket_entry / basket_setup on the digit-pair signals (the 3-contract basket AI needs it)
-    res.json({ ok: true, persistence: isPersistenceEnabled(), analysis_symbols: DIGIT_SYMBOLS.length, basket_api: 2 });
+    res.json({ ok: true, persistence: isPersistenceEnabled(), analysis_symbols: DIGIT_SYMBOLS.length });
 });
 
 // REST fallback / initial page-load snapshot for the Digit Matrix tab — the
@@ -70,6 +75,12 @@ app.get('/api/contracts/:symbol', async (req, res) => {
         console.error('[contracts] failed:', err.message);
         res.json({ symbol: req.params.symbol, rules: null });
     }
+});
+
+let paper_cache = { at: 0, body: null };
+app.get('/api/paper/stats', (_req, res) => {
+    if (Date.now() - paper_cache.at > 10_000) paper_cache = { at: Date.now(), body: paperTrader.getReport() };
+    res.json({ data: paper_cache.body });
 });
 
 app.get('/api/analysis/symbols', (_req, res) => {

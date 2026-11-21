@@ -388,50 +388,44 @@ describe('virtual hook: paper trade before EVERY live trade (the default)', () =
         u.engine.stop();
     });
 
-    it('rule 4: Only Ups <-> Only Downs are opposites (paper Only Ups loses -> Only Downs live, 2 ticks)', async () => {
+    it('Only Ups + Only Downs basket: even with the hook on, both sides fire straight away (no paper test, no trend wait)', async () => {
         const h = hookMake({ both_sides: true }, 'R_UH8', 'RUNHIGH');
-        h.conn.history = BULL; // Only Ups waits for a higher-high on the 1-tick chart
+        h.conn.history = []; // no chart at all: a trend wait would never pass
         await startOnPaper(h);
-        expect(virtualEvents(h, 'start')[0]).toMatchObject({ contract_type: 'RUNHIGH' });
-        h.conn.history = BEAR; // by the time the opposite is bought, the chart shows a lower-low (Only Downs needs it)
-        h.conn.ticks(h.symbol, [100, 100, 99]); // first tick after entry falls: Only Ups loses
-        await wait(60);
-        expect(h.conn.buys_()).toHaveLength(2); // both sides: Only Downs (the opposite) + Only Ups
-        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'RUNLOW', duration: 2, duration_unit: 't' });
-        expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'RUNHIGH', duration: 2, duration_unit: 't' });
-        h.engine.stop();
-    });
-
-    it('Only Ups: a paper win (every tick rises) buys Only Ups live', async () => {
-        const h = hookMake({ both_sides: true }, 'R_UH9', 'RUNHIGH');
-        h.conn.history = BULL;
-        await startOnPaper(h);
-        h.conn.ticks(h.symbol, [100, 100, 101]);
-        await wait(60);
-        expect(h.conn.buys_()).toHaveLength(0); // 1 of 2 ticks: not settled yet
-        h.conn.ticks(h.symbol, [102]);
-        await wait(60);
-        expect(h.conn.buys_()).toHaveLength(2); // both sides
-        expect(h.conn.buys_()[0].parameters).toMatchObject({ contract_type: 'RUNHIGH', duration: 2 });
-        expect(h.conn.buys_()[1].parameters).toMatchObject({ contract_type: 'RUNLOW', duration: 2 });
-        h.engine.stop();
-    });
-
-    it('both sides: the two legs settle as ONE trade (net result), and only then does the hook start again', async () => {
-        const h = hookMake({ both_sides: true }, 'R_UH11', 'RUNHIGH');
-        h.conn.history = BULL;
-        await startOnPaper(h);
-        h.conn.ticks(h.symbol, [100, 100, 101, 102]); // paper win
-        await wait(60);
+        expect(virtualEvents(h, 'start')).toHaveLength(0); // no paper test
         expect(h.conn.buys_()).toHaveLength(2);
-        const starts = virtualEvents(h, 'start').length;
+        expect(h.conn.buys_().map(b => b.parameters.contract_type).sort()).toEqual(['RUNHIGH', 'RUNLOW']);
+        expect(h.conn.buys_()[0].parameters).toMatchObject({ duration: 2, duration_unit: 't', underlying_symbol: h.symbol });
+        expect(h.conn.buys_()[1].parameters).toMatchObject({ duration: 2, duration_unit: 't', underlying_symbol: h.symbol });
+        expect(h.conn.sent.filter(r => r.ticks_history)).toHaveLength(0); // the chart is never read for a direction
+        h.engine.stop();
+    });
+
+    it('basket: both prices are asked for first, and both buys leave only after both prices are in (nothing is bought if one price is bad)', async () => {
+        const h = hookMake({ both_sides: true }, 'R_UH9', 'RUNHIGH');
+        await startOnPaper(h);
+        const kinds = h.conn.sent.filter(r => r.proposal || r.buy).map(r => (r.proposal ? 'proposal' : 'buy'));
+        expect(kinds.slice(0, 4)).toEqual(['proposal', 'proposal', 'buy', 'buy']);
+        h.engine.stop();
+
+        const bad = hookMake({ both_sides: true }, 'R_UH9B', 'RUNHIGH');
+        bad.conn.proposalError = req => (req.parameters?.contract_type === 'RUNLOW' || req.contract_type === 'RUNLOW' ? 'Only Downs is not offered' : null);
+        await startOnPaper(bad);
+        expect(bad.conn.buys_()).toHaveLength(0); // neither side bought
+        bad.engine.stop();
+    });
+
+    it('basket: the two legs settle as ONE trade (net result) and the next basket fires again together', async () => {
+        const h = hookMake({ both_sides: true }, 'R_UH11', 'RUNHIGH');
+        await startOnPaper(h);
+        expect(h.conn.buys_()).toHaveLength(2);
         h.conn.settle('c1', 9); // Only Ups wins
         await wait(60);
-        expect(virtualEvents(h, 'start')).toHaveLength(starts); // the other side is still open: nothing new yet
-        h.conn.settle('c2', -1); // Only Downs loses
-        await wait(60);
-        expect(virtualEvents(h, 'start')).toHaveLength(starts + 1); // net +8: a win -> back to paper first
-        expect(h.conn.buys_()).toHaveLength(2);
+        expect(h.conn.buys_()).toHaveLength(2); // the other side is still open: nothing new yet
+        h.conn.settle('c2', -1); // Only Downs loses: net +8
+        await wait(120);
+        expect(h.conn.buys_()).toHaveLength(4); // next basket, both sides again
+        expect(h.conn.buys_().slice(2).map(b => b.parameters.contract_type).sort()).toEqual(['RUNHIGH', 'RUNLOW']);
         h.engine.stop();
     });
 

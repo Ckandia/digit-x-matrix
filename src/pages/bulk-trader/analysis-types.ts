@@ -13,8 +13,7 @@ export type TContractFamily =
     | 'asians'
     | 'high_low_tick'
     | 'reset'
-    | 'pairs'
-    | 'run_bias';
+    | 'pairs';
 
 export type TContractType =
     | TDigitContractType
@@ -78,27 +77,6 @@ export type TDigitSignal = {
     basis: string;
     /** Set when a signal comes from a named playbook strategy (e.g. 'streak_reversal'), so the learner scores it on its own. */
     strategy?: string;
-    /** run_bias family only: true when 3 or more ticks in a row favour this contract RIGHT NOW in a market whose bias favours it. The AI buys on it. */
-    entry?: boolean;
-    /** run_bias family only: the digit sequence favours TWO contracts at once (Even + Under 5, Odd + Over 4); the AI buys both together. */
-    pair_types?: string[];
-    /** run_bias pair signals: which of the five pairs this is (even_under5, odd_over4, rise_odd, fall_even). */
-    pair_key?: string;
-    /** Basket bases only: the backend judged the whole 3-contract basket (digit pair + third contract + replayed basket result) and it may be bought. */
-    basket_entry?: boolean;
-    /** Basket bases only: which of the 16 setups this signal is (null = no chart direction). The AI checks it against its own table. */
-    basket_setup?: number | null;
-    /** Rise / Only Ups need a bullish chart, Fall / Only Downs a bearish one; basket signals carry the chart direction here. */
-    momentum?: boolean;
-    trend?: string;
-    /** run_bias family only: every analysed run length of this contract (2 AND 3 ticks for the digit contracts) favours it at once. */
-    confluence?: boolean;
-    /** run_bias family only: which run of ticks this is (the tick count when it started), so one run is traded once. */
-    run_id?: number | string;
-    /** Digit frequency behind a digit signal (Even / Odd / Over 4 / Under 5, or a pair with such a leg): strength %, how many of the 4 key digits support it, share of the window. */
-    digit_freq?: { favoured: boolean; strength: number; support?: number; share?: number; legs?: string[]; key_digits: number[] };
-    /** run_bias family only: the numbers behind the signal (`min_run` = the run length this signal was measured on). */
-    run?: { current: number; runs: number; ticks_in_runs: number; longest: number; bias: number; min_run?: number; outcomes?: number; wins?: number; hit?: number | null; pattern?: string[] };
 };
 
 /** One contract's row of the backend's two-tick pair scan (see backend/src/pairScan.js). */
@@ -121,29 +99,7 @@ export type TSymbolSnapshot = {
     signals: TDigitSignal[];
     /** Two-tick pair frequencies for the ten contracts on this market. */
     pairs?: TPairScan;
-    /** The backend's run bias: how often 3+ ticks in a row favoured each contract (see backend/src/runBias.js). */
-    run_bias?: TRunBias;
 };
-
-export type TRunBiasRow = {
-    key: string;
-    contract_type: string;
-    label: string;
-    runs: number;
-    ticks_in_runs: number;
-    longest: number;
-    current: number;
-    /** Bias on the shortest run length this contract is analysed on. */
-    bias: number;
-    /** The same numbers per analysed run length: Even/Odd and Over 4/Under 5 on 2 AND 3 ticks, the others from 2. Bias = share (%) of all run ticks of the pair: 50 = balanced, higher = more favoured. */
-    levels?: { min_run: number; runs: number; ticks_in_runs: number; bias: number; outcomes?: number; wins?: number; hit?: number | null }[];
-    run_start?: number | null;
-};
-export type TDigitRank = { digit: number; count: number; pct: number };
-export type TDigitContract = { label: string; support: number; supporting: number[]; share: number; favoured: boolean; strength: number };
-/** The backend's digit frequency for one market: 1st / 2nd / 3rd most and the least frequent digit, and what they say about Even / Odd / Over 4 / Under 5. */
-export type TDigitFrequency = { n: number; counts: number[]; pct: number[]; first: TDigitRank; second: TDigitRank; third: TDigitRank; least: TDigitRank; key_digits: number[]; contracts: Record<string, TDigitContract> };
-export type TRunBias = { digits?: TDigitFrequency; n: number; min_run: number; pairs?: (Omit<TRunBiasRow, 'contract_type'> & { types: string[] })[]; /** Decimal places this market really prints, read from its own prices. */ decimals?: number; reported_decimals?: number; rows: TRunBiasRow[] };
 
 export type TSnapshotMap = Record<string, TSymbolSnapshot>;
 

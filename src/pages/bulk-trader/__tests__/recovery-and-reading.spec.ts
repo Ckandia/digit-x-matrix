@@ -117,15 +117,14 @@ class Conn {
     buys_ = () => this.sent.filter(r => r.buy);
 }
 
-let rid = 0; // every read of a signal gets a fresh run id
-const even = (confidence: number) => ({ family: 'run_bias', strategy: 'run_bias', entry: true, contract_type: 'DIGITEVEN', label: 'Even', confidence: confidence, basis: '', get run_id() { return ++rid; } }) as never;
+const even = (confidence: number) => ({ family: 'digits', contract_type: 'DIGITEVEN', label: 'Even', confidence, basis: '' }) as never;
 
 describe('recovery in the engine (martingale + recover_losses)', () => {
     const make = (cfg: Partial<TAutoPilotConfig> = {}, symbol = 'R_REC') => {
         const snapshots: TSnapshotMap = { [symbol]: { stats: {} as never, signals: [even(90)] } };
         const conn = new Conn();
         const events: string[] = [];
-        const config: TAutoPilotConfig = { recovery_mode: 'martingale', recover_losses: true, stake: 1, martingale_multiplier: 2, max_steps: 4, stop_loss: 1000, take_profit: 1000, protect_trades: 0, ...cfg };
+        const config: TAutoPilotConfig = { recovery_mode: 'martingale', recover_losses: true, stake: 1, martingale_multiplier: 2, max_steps: 4, stop_loss: 1000, take_profit: 1000, auto_flip: false, protect_trades: 0, virtual_hook: false, follow_stream: false, ...cfg };
         const engine = new AutoPilotEngine(conn as never, 'USD', config, () => snapshots, e => events.push(e.phase + (e.reason ? `:${e.reason}` : '')));
         return { conn, engine, events };
     };
@@ -137,10 +136,10 @@ describe('recovery in the engine (martingale + recover_losses)', () => {
         expect(h.conn.buys_().map(b => b.price)).toEqual([1]);
         h.conn.settle('c1', -1);
         await wait();
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.23]);
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.41]);
         h.conn.settle('c2', -2.41);
         await wait();
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.23, 4.7]); // (1 + 2.23 + 1) / 0.9
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.41, 5.32]); // (1 + 2.41 + 1) / 0.83
         h.conn.settle('c3', 4.5); // the recovery step wins
         await wait();
         expect(h.conn.buys_()[3].price).toBe(1);
@@ -155,7 +154,7 @@ describe('recovery in the engine (martingale + recover_losses)', () => {
         await wait();
         h.conn.settle('c2', -2.41); // step 2 of 2 lost
         await wait();
-        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.23, 1]);
+        expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2.41, 1]);
         expect(h.events.some(e => e.startsWith('stopped'))).toBe(false);
         h.engine.stop();
     });
@@ -168,5 +167,22 @@ describe('recovery in the engine (martingale + recover_losses)', () => {
         await wait();
         expect(h.conn.buys_().map(b => b.price)).toEqual([1, 2]);
         h.engine.stop();
+    });
+});
+
+describe('entry reader in the engine', () => {
+    it('picks the contract and market from the latest ticks, not from the signal with the highest confidence', async () => {
+        const conn = new Conn();
+        // A carries the 99% signal but its last digits alternate; B ends on two even digits (Even is one tick short of firing).
+        conn.history.R_READA = Array.from({ length: 30 }, (_, i) => Number((100 + i * 0.1 + (i % 2 === 0 ? 0.01 : 0.02)).toFixed(2)));
+        conn.history.R_READB = Array.from({ length: 30 }, (_, i) => Number((100 + i * 0.1 + (i >= 28 ? 0.04 : i % 2 === 0 ? 0.01 : 0.03)).toFixed(2)));
+        const snapshots: TSnapshotMap = { R_READA: { stats: {} as never, signals: [even(99)] }, R_READB: { stats: {} as never, signals: [] } };
+        const config: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 2, max_steps: 4, stop_loss: 1000, take_profit: 1000, auto_flip: false, protect_trades: 0, virtual_hook: false, follow_stream: false, contract_families: ['even_odd'], read_entries: true };
+        const engine = new AutoPilotEngine(conn as never, 'USD', config, () => snapshots, () => undefined);
+        engine.start();
+        await wait(150);
+        expect(conn.buys_()).toHaveLength(1);
+        expect(conn.buys_()[0].parameters).toMatchObject({ contract_type: 'DIGITEVEN', underlying_symbol: 'R_READB' });
+        engine.stop();
     });
 });

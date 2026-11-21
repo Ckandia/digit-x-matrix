@@ -2,7 +2,6 @@ import WebSocket from 'ws';
 import { computePairFrequencies, computePairSignals } from './pairScan.js';
 import { computeSignals, computeStats, createDigitWindow, pushDigit } from './digitAnalysis.js';
 import { computeContractSignals, createPriceWindow, pushPrice } from './contractAnalysis.js';
-import { computeRunBias, computeRunSignals } from './runBias.js';
 import { computeStreakSignal } from './streakStrategy.js';
 
 // Deriv's current documentation ("Use ONLY this API") and live testing both
@@ -111,7 +110,7 @@ export class MarketFeed {
         return () => this.listeners.delete(fn);
     }
 
-    /** Called for every live tick with (symbol, { quote, pip_size, epoch }, snapshot). Kept for listeners that want every tick. */
+    /** Called for every live tick with (symbol, { quote, pip_size, epoch }, snapshot). Used by the paper trader. */
     onTick(fn) {
         this.tickListeners.add(fn);
         return () => this.tickListeners.delete(fn);
@@ -161,18 +160,8 @@ export class MarketFeed {
             if (!this._pairCache) this._pairCache = new Map();
             this._pairCache.set(symbol, cached);
         }
-        // Run bias: how often 3+ ticks in a row favoured each contract, and whether such a run is happening right now (an ENTRY signal).
-        if (cached.run_key !== cache_key) {
-            cached.run_bias = computeRunBias(priceWindow.prices, this.getPipSize(symbol), priceWindow.total);
-            if (cached.run_bias.decimals !== undefined && cached.run_bias.decimals !== cached.run_bias.reported_decimals && !(this._dp_warned ??= new Set()).has(symbol)) {
-                this._dp_warned.add(symbol);
-                console.warn(`[marketFeed] ${symbol}: pip size says ${cached.run_bias.reported_decimals} decimals but its prices print ${cached.run_bias.decimals}; the prices are used for the digits.`);
-            }
-            cached.run_signals = computeRunSignals(cached.run_bias, symbol);
-            cached.run_key = cache_key;
-        }
-        const signals = [...digit_signals, ...contract_signals, ...cached.signals, ...cached.run_signals].sort((a, b) => b.confidence - a.confidence);
-        return { stats, signals, pairs: cached.pairs, run_bias: cached.run_bias };
+        const signals = [...digit_signals, ...contract_signals, ...cached.signals].sort((a, b) => b.confidence - a.confidence);
+        return { stats, signals, pairs: cached.pairs };
     }
 
     /**
@@ -278,7 +267,7 @@ export class MarketFeed {
     }
 
     /**
-     * Asks Deriv for a price (proposal) so a caller can see what each contract REALLY pays, including Touch / No Touch
+     * Asks Deriv for a price (proposal) so the paper trader knows what each contract REALLY pays, including Touch / No Touch
      * (whose payout depends on the barrier). Public data, no token. Resolves with the proposal or null.
      */
     async getProposal(request) {
@@ -340,7 +329,7 @@ export class MarketFeed {
             const waiter = this.proposal_waiters?.get(data.echo_req?.req_id);
             if (waiter) {
                 this.proposal_waiters.delete(data.echo_req.req_id);
-                waiter(null); // a contract Deriv will not price right now: the caller just keeps its last known payout
+                waiter(null); // a contract Deriv will not price right now: the paper trader just keeps its last known payout
                 return;
             }
             // eslint-disable-next-line no-console

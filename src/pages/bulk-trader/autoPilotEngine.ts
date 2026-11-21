@@ -35,20 +35,15 @@ export type TRiskPreset = {
 
 export const RISK_PRESETS: Record<TRiskLevel, TRiskPreset> = {
     // Growth stays at or below a typical ~1.9x payout, so a streak stake is funded by what the streak has won.
-    conservative: { stake_pct: 1, streak_multiplier: 1.5, max_streak: 3, martingale_multiplier: 1.5, max_steps: 4, stop_loss_pct: 10, take_profit_pct: 15 },
-    moderate: { stake_pct: 2, streak_multiplier: 1.8, max_streak: 3, martingale_multiplier: 1.5, max_steps: 5, stop_loss_pct: 15, take_profit_pct: 20 },
-    aggressive: { stake_pct: 3, streak_multiplier: 1.9, max_streak: 4, martingale_multiplier: 1.5, max_steps: 6, stop_loss_pct: 25, take_profit_pct: 30 },
+    conservative: { stake_pct: 1, streak_multiplier: 1.5, max_streak: 3, martingale_multiplier: 1.8, max_steps: 4, stop_loss_pct: 10, take_profit_pct: 15 },
+    moderate: { stake_pct: 2, streak_multiplier: 1.8, max_streak: 3, martingale_multiplier: 2.1, max_steps: 5, stop_loss_pct: 15, take_profit_pct: 20 },
+    aggressive: { stake_pct: 3, streak_multiplier: 1.9, max_streak: 4, martingale_multiplier: 2.5, max_steps: 6, stop_loss_pct: 25, take_profit_pct: 30 },
 };
 
-/** How the stake behaves. 'martingale' (default) = the stake grows ONLY after a loss (x martingale_multiplier, default 1.5, up to max_steps
- *  losses) and goes back to the base stake after a win; a win never raises it. 'reverse' = reverse martingale: bigger stake after wins, base
- *  stake after a loss. 'flat' = same base stake always. A saved 'flip' (the old opposite-side ladder) runs as 'martingale'. */
+/** How the stake behaves. 'reverse' (default) = reverse martingale: bigger stake after wins, base stake after a loss.
+ *  Classic modes, which raise the stake after a LOSS: 'martingale' = same contract again, 'flip' = the opposite side.
+ *  'flat' = same base stake always. */
 export type TRecoveryMode = 'reverse' | 'martingale' | 'flip' | 'flat';
-export const stakeMode = (m?: TRecoveryMode): 'reverse' | 'martingale' | 'flat' => (m === 'flat' ? 'flat' : m === 'martingale' || m === 'flip' ? 'martingale' : 'reverse');
-export const DEFAULT_LOSS_MULTIPLIER = 1.5;
-export const DEFAULT_MIN_CONFIDENCE = 20;
-export const DEFAULT_SWITCH_AFTER_LOSSES = 2;
-export const DEFAULT_SWITCH_WAIT_SECONDS = 45;
 
 /** After this many losses in a row the AI switches to a different contract (does not wait for the market). */
 export const SWITCH_AFTER_LOSSES = 2;
@@ -62,11 +57,51 @@ export type TAutoPilotConfig = {
     max_steps: number;
     stop_loss: number; // absolute currency amount, anchored to balance at start
     take_profit: number; // absolute currency amount, anchored to balance at start
+    /** After a loss, switch to the partner contract (Even<->Over 4 ...); after the next loss, back. Off when undefined/false. */
+    auto_flip?: boolean;
     /** Capital protection: for the first N trades of a run the stake stays at the base stake (no growth) and a tight early loss limit applies. 0/undefined = off. */
     protect_trades?: number;
+    /** Virtual hook: after a real loss, trade on paper (no money) until the contract wins `virtual_confirmations` paper trades in a row, then trade THAT contract for real. */
+    virtual_hook?: boolean;
+    /** Paper wins in a row a contract needs before it is traded for real again (1-5, default 2). */
+    virtual_confirmations?: number;
+    /**
+     * Follow the tick stream: a LIVE trade is only entered while the latest ticks already point the contract's way (the
+     * assumption being that they keep following one another): Even after even last digits, Odd after odd, Under 5 after
+     * digits 0-4, Over 4 after digits 5-9, Rise after rising ticks, Fall after falling ticks. Off when undefined/false.
+     */
+    follow_stream?: boolean;
+    /** How many ticks in a row must show it (1-5, default 2). Older polling rule, kept for saved configs; entries now use `entry_tick`. */
+    follow_ticks?: number;
+    /**
+     * Two-tick entry: the live buy fires on the Nth tick of a run of matching ticks (2-5, default 3). With 3, two ticks must
+     * already agree and the buy goes out the moment the THIRD matching tick prints, never on the 4th or 5th of the same run.
+     * 5,7,8 -> Over 4 on the 8. 2,4,6 -> Even on the 6. A longer run is stale and waits for a fresh one. Needs `follow_stream`.
+     */
+    entry_tick?: number;
+    /**
+     * How many ticks the AI waits on one contract for its entry (the run of matching ticks). If none appears in that many
+     * ticks the contract is SKIPPED (nothing is bought) and the AI moves on to another one. 10-90, default 30.
+     */
+    entry_wait_ticks?: number;
+    /**
+     * What the hook does with its paper results.
+     * 'hook' (default, the active rule): the AI starts on paper and every real loss sends it back to paper.
+     *   - a paper trade LOSES  -> the OPPOSITE contract is bought for real (Even<->Odd, Over 4<->Under 5, Rise<->Fall, Only Ups<->Only Downs, ...)
+     *   - EXCEPT Even/Odd, which follows the hook: a paper loss buys nothing live, the same contract stays on paper until it wins
+     *   - a paper WIN -> the SAME contract is bought for real
+     *   - ONE paper trade runs before EVERY live trade (after live wins and losses alike). No auto flip, no switching to other contracts.
+     * 'opposite' (older rule): the contract is paper-traded; the moment a paper trade LOSES, the OPPOSITE contract (Even<->Odd,
+     * Over 4<->Under 5, Rise<->Fall, Touch<->No Touch) is bought for real on the same market. If that real trade loses, the
+     * hook starts again, and so on. Paper wins just keep paper-trading.
+     * 'confirm': the older rule, SUSPENDED (kept in code and tests, not selectable in the UI), `virtual_confirmations` paper wins in a row, then the same contract is traded for real.
+     */
+    virtual_mode?: 'hook' | 'opposite' | 'confirm';
     /** Which contract families the AI may trade (keys of CONTRACT_FAMILIES). Undefined = no restriction (the older behaviour). */
     contract_families?: string[];
-    /** Only Ups / Only Downs: BOTH sides are bought on every signal (same market, same stake each). Default on. */
+    /** Hook rules: after every live trade the next paper test is on the next allowed family, so every ticked contract gets its turn. Default on. */
+    rotate_contracts?: boolean;
+    /** Only Ups/Only Downs and Touch/No Touch: once the virtual hook clears the trade, BOTH sides are bought live (same market, same stake each). Default on. */
     both_sides?: boolean;
     /**
      * Pacing: at most this many LIVE trades per hour (0 / undefined = no limit). A live buy that would come sooner than
@@ -75,169 +110,25 @@ export type TAutoPilotConfig = {
      */
     max_trades_per_hour?: number;
     /**
-     * Slow-internet protection (ms; 0 = off). A signal is only valid for the very next tick, so on a slow line a buy lands after the
-     * pattern has ended. The AI measures its round trip to Deriv and the lateness of the backend feed, and does not buy while the
-     * connection is slower than this (default 500 ms). Signals that arrive late are dropped, never bought late.
+     * Recovery stake (martingale mode). After a loss the next stake is sized to win back EVERYTHING the current ladder has lost
+     * plus one base stake, at the payout the last contract showed. When the ladder runs out of steps or of budget it is dropped
+     * (the loss is accepted), the stake goes back to the base stake and the run carries on; only the overall stop loss ends it.
      */
-    max_latency_ms?: number;
+    recover_losses?: boolean;
     /**
-     * Overlap pairs (default on). When Even and Under 5 BOTH have an entry on the same market at the same time (digits 0, 2, 4 are
-     * even AND under 5), or Odd and Over 4 both do (digits 5, 7, 9 are odd AND over 4), both contracts are bought together. This is not
-     * a hedge: they win together on 3 digits, one of them wins on 4 digits and none on 3, so the cost and the odds stay the same as two
-     * separate bets. It only places the two bets on the same tick.
+     * Entry reader: the contract AND the market are chosen from the latest ticks, not from signal confidence. Every ticked
+     * contract on every market is read; the one whose entry is closest to firing (a run of ticks one short of `entry_tick`,
+     * a fast market for Touch, a calm one for No Touch) is taken next. Needs `follow_stream` for the entry timing itself.
      */
-    overlap_pairs?: boolean;
-    /**
-     * PAIRS ONLY (default on). The AI trades nothing but the ticked pairs, and the two legs of a pair are bought at the same moment, on
-     * the same market, same stake each, counted as one trade: Only Ups + Only Downs, Even + Under 5, Odd + Over 4, Rise + Odd, Fall + Even.
-     * A single contract is never bought in this mode. Off = the older behaviour (single contracts by family, pairs only as an extra).
-     */
-    pairs_only?: boolean;
-    /** Which pairs may fire in pairs-only mode (keys of TRADE_PAIRS). Undefined = all five. */
-    pair_keys?: string[];
-    /**
-     * Entry quality gate (0-100, same scale as a signal's confidence = (measured bias - 50) x 2). A signal below it is never bought, and the
-     * highest-confidence signal across all markets goes first. 20 = the contract's measured hit rate on that market is at least 60%.
-     * It picks the best moment the data shows, it cannot make a tick predictable. 0 / undefined = off.
-     */
-    min_confidence?: number;
-    /**
-     * 3-CONTRACT BASKET (default on). Every backend digit-pair signal buys THREE contracts in the same tick (Promise.all): the pair's two digit
-     * contracts + Only Ups/Downs (momentum) or Rise/Fall (drift), see basketSetup. The stake is split 40/40/20 or 35/35/30 of the TOTAL stake
-     * (`stake` = the total of the 3). Martingale: all 3 lose = total x martingale_multiplier (1.5); some win but the net is negative = the same
-     * total; net >= 0 = back to the base total. Takes over from pairs_only and the single-contract families while on.
-     */
-    basket_mode?: boolean;
-    /** Which bases the basket may fire on (keys of BASKET_BASES). Undefined = all four. */
-    basket_keys?: string[];
-    /**
-     * Recover on the SAME market and the SAME pair/contract after a loss (default on in the presets). Without it the AI prefers the market
-     * traded least recently, so after a loss it moved to another market and another contract. It may switch only when one of the two
-     * conditions below is met; a win always frees it to pick the best entry anywhere again.
-     */
-    stay_on_market?: boolean;
-    /** Switch market after this many losses in a row on the same market (default 2): that market is not working. */
-    switch_after_losses?: number;
-    /** Switch market when the same market and pair gave no new entry for this many seconds after a loss (default 45). */
-    switch_wait_seconds?: number;
+    read_entries?: boolean;
 };
-
-/** The five pairs the AI fires at the same time in pairs-only mode. `signal` = which backend signal triggers it. */
-export const TRADE_PAIRS: { key: string; label: string; types: [string, string] }[] = [
-    { key: 'only_ups_downs', label: 'Only Ups + Only Downs', types: ['RUNHIGH', 'RUNLOW'] },
-    { key: 'even_under5', label: 'Even + Under 5', types: ['DIGITEVEN', 'DIGITUNDER'] },
-    { key: 'odd_over4', label: 'Odd + Over 4', types: ['DIGITODD', 'DIGITOVER'] },
-    { key: 'rise_odd', label: 'Rise + Odd', types: ['CALL', 'DIGITODD'] },
-    { key: 'fall_even', label: 'Fall + Even', types: ['PUT', 'DIGITEVEN'] },
-];
-export const ALL_PAIR_KEYS = TRADE_PAIRS.map(p => p.key);
-/** The pair a backend signal belongs to: a pair signal carries `pair_key`; an Only Ups / Only Downs signal is the Only Ups + Only Downs pair. */
-const pairKeyOf = (sig: { pair_key?: string; contract_type: string }): string | null =>
-    sig.pair_key ?? (sig.contract_type === 'RUNHIGH' || sig.contract_type === 'RUNLOW' ? 'only_ups_downs' : null);
-// ---------------------------------------------------------------------------------------------------------------------
-// The 3-contract basket: one backend pair signal (a digit base) + a directional third contract, all three bought in the same tick.
-//   Bases (blind spot = the digits where both digit legs lose):
-//     A Even + Under 5 (5,7,9)   B Odd + Over 4 (0,2,4)   C Even + Over 4 (1,3)   D Odd + Under 5 (6,8)
-//   Third contract: momentum (the last 3 ticks went the trend's way) = Only Ups / Only Downs (2 ticks), stakes 40/40/20;
-//                   drift (otherwise) = Rise / Fall (1 tick), stakes 35/35/30. Bullish = Ups / Rise, bearish = Downs / Fall.
-//   Setups 1-4 = A, 5-8 = B, 9-12 = C, 13-16 = D, each in the order: bullish momentum, bearish momentum, bullish drift, bearish drift.
-// ---------------------------------------------------------------------------------------------------------------------
-export const BASKET_BASES: { key: string; label: string; types: [string, string]; blind: string; first: number }[] = [
-    { key: 'even_under5', label: 'Even + Under 5', types: ['DIGITEVEN', 'DIGITUNDER'], blind: '5, 7, 9', first: 1 },
-    { key: 'odd_over4', label: 'Odd + Over 4', types: ['DIGITODD', 'DIGITOVER'], blind: '0, 2, 4', first: 5 },
-    { key: 'even_over4', label: 'Even + Over 4', types: ['DIGITEVEN', 'DIGITOVER'], blind: '1, 3', first: 9 },
-    { key: 'odd_under5', label: 'Odd + Under 5', types: ['DIGITODD', 'DIGITUNDER'], blind: '6, 8', first: 13 },
-];
-export const ALL_BASKET_KEYS = BASKET_BASES.map(b => b.key);
-export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.2];
-export const BASKET_DRIFT_SHARES = [0.35, 0.35, 0.3];
-export const MIN_LEG_STAKE = 0.35; // Deriv's smallest stake per contract
-export type TBasketLeg = { type: string; label: string; ticks: number; share: number };
-export type TBasketSetup = { number: number; base: string; regime: 'momentum' | 'drift'; direction: 'bullish' | 'bearish'; legs: TBasketLeg[]; blind: string };
-const BASKET_CONFLICTS: [string, string][] = [
-    ['DIGITEVEN', 'DIGITODD'],
-    ['DIGITOVER', 'DIGITUNDER'],
-    ['CALL', 'PUT'],
-    ['RUNHIGH', 'RUNLOW'],
-    ['CALL', 'RUNLOW'],
-    ['PUT', 'RUNHIGH'],
-];
-/** A basket never holds two contracts that cannot both win (Even + Odd, Rise + Fall ...). */
-export const basketHasConflict = (types: string[]): boolean => BASKET_CONFLICTS.some(([a, b]) => types.includes(a) && types.includes(b));
-export const basketSetup = (pair_key: string | undefined, direction: string | undefined, momentum: boolean): TBasketSetup | null => {
-    const base = BASKET_BASES.find(b => b.key === pair_key);
-    if (!base || (direction !== 'bullish' && direction !== 'bearish')) return null;
-    const bull = direction === 'bullish';
-    const shares = momentum ? BASKET_MOMENTUM_SHARES : BASKET_DRIFT_SHARES;
-    const third: TBasketLeg = momentum
-        ? { type: bull ? 'RUNHIGH' : 'RUNLOW', label: bull ? 'Only Ups' : 'Only Downs', ticks: 2, share: shares[2] }
-        : { type: bull ? 'CALL' : 'PUT', label: bull ? 'Rise' : 'Fall', ticks: 1, share: shares[2] };
-    const legs: TBasketLeg[] = [
-        { type: base.types[0], label: OPPOSITE_LABEL[base.types[0]] ?? base.types[0], ticks: 1, share: shares[0] },
-        { type: base.types[1], label: OPPOSITE_LABEL[base.types[1]] ?? base.types[1], ticks: 1, share: shares[1] },
-        third,
-    ];
-    if (basketHasConflict(legs.map(l => l.type))) throw new Error(`Basket ${base.label} + ${third.label} holds contracts that cancel each other`);
-    return { number: base.first + (momentum ? 0 : 2) + (bull ? 0 : 1), base: base.label, regime: momentum ? 'momentum' : 'drift', direction: bull ? 'bullish' : 'bearish', legs, blind: base.blind };
-};
-/** The smallest total stake that still gives every contract at least MIN_LEG_STAKE. */
-export const basketMinTotal = (legs: TBasketLeg[]): number => Math.ceil((MIN_LEG_STAKE / Math.min(...legs.map(l => l.share))) * 100) / 100;
-/** Splits a total stake by the legs' shares, to the cent; the last leg takes the rounding remainder so the legs add up to the total. */
-export const basketStakes = (total: number, legs: TBasketLeg[]): number[] => {
-    const parts = legs.slice(0, -1).map(l => Number((total * l.share).toFixed(2)));
-    return [...parts, Number((total - parts.reduce((a, b) => a + b, 0)).toFixed(2))];
-};
-
-/**
- * Why a basket-mode AI is not buying, in one line, from what the backend is sending right now. Tells an old backend (no basket fields) apart from a
- * quiet market, and counts what removed the digit-pair entries it did see (no chart direction, third contract unsupported, replayed basket losing,
- * signal weaker than the minimum strength, base unticked).
- */
-export const basketDiagnosis = (
-    snapshots: Record<string, { signals: unknown[] }>,
-    config: { basket_keys?: string[]; min_confidence?: number },
-): string => {
-    const keys = new Set(config.basket_keys ?? ALL_BASKET_KEYS);
-    type S = { pair_key?: string; pair_types?: string[]; entry?: boolean; basket_entry?: boolean; basket_setup?: number | null; confidence?: number; basket?: { setup?: number | null; third_bias?: number | null } };
-    let pair = 0, entries = 0, old_backend = 0, unticked = 0, no_direction = 0, third = 0, replay = 0, weak = 0, ready = 0;
-    for (const snap of Object.values(snapshots)) {
-        for (const raw of snap.signals as S[]) {
-            if (!raw.pair_types || !raw.pair_key || !ALL_BASKET_KEYS.includes(raw.pair_key)) continue;
-            pair += 1;
-            if (raw.basket_setup === undefined) old_backend += 1;
-            if (!raw.entry) continue;
-            entries += 1;
-            if (!keys.has(raw.pair_key)) unticked += 1;
-            else if (raw.basket_entry !== true) {
-                if (raw.basket_setup === null || raw.basket_setup === undefined) no_direction += 1;
-                else if ((raw.basket?.third_bias ?? 100) < 55) third += 1;
-                else replay += 1;
-            } else if ((config.min_confidence ?? 0) > 0 && (raw.confidence ?? 0) < (config.min_confidence ?? 0)) weak += 1;
-            else ready += 1;
-        }
-    }
-    if (pair === 0) return 'The backend sent no digit-pair signals at all. Is the backend running and connected?';
-    if (old_backend === pair) return 'The backend is an OLD version: it sends no basket fields (basket_entry / basket_setup), so no basket can be bought. Deploy the backend from this version (Render), then restart the AI.';
-    if (entries === 0) return 'No digit-pair entry on any market right now (the last digits are not clustering). Waiting.';
-    if (ready > 0) return `${ready} basket entr${ready === 1 ? 'y is' : 'ies are'} ready.`;
-    const parts = [
-        no_direction ? `${no_direction} had no chart direction` : '',
-        third ? `${third} had no support for the third contract` : '',
-        replay ? `${replay} were losing when replayed as a basket` : '',
-        weak ? `${weak} were weaker than the minimum signal strength (${config.min_confidence})` : '',
-        unticked ? `${unticked} were on an unticked base` : '',
-    ].filter(Boolean);
-    return `${entries} digit-pair entr${entries === 1 ? 'y' : 'ies'} seen, none is a basket entry: ${parts.join(', ')}.`;
-};
-
-/** What the recovery lock matches on: the pair a signal belongs to, or its contract type when it is a single contract. */
-const recoveryKey = (c: { pair_key?: string; contract_type: string }): string => pairKeyOf(c) ?? c.contract_type;
 
 /** The contract families the AI Trader tab lets you tick. Each is a pair of opposites; `trend` = needs a higher-high / lower-low on the 1-tick chart first. */
 export const CONTRACT_FAMILIES: { key: string; label: string; types: [string, string]; trend?: boolean }[] = [
     { key: 'even_odd', label: 'Even / Odd', types: ['DIGITEVEN', 'DIGITODD'] },
     { key: 'over_under', label: 'Over 4 / Under 5', types: ['DIGITOVER', 'DIGITUNDER'] },
     { key: 'rise_fall', label: 'Rise / Fall', types: ['CALL', 'PUT'], trend: true },
+    { key: 'touch', label: 'Touch / No Touch', types: ['ONETOUCH', 'NOTOUCH'] },
     { key: 'only_ups_downs', label: 'Only Ups / Only Downs', types: ['RUNHIGH', 'RUNLOW'], trend: true },
 ];
 export const ALL_FAMILY_KEYS = CONTRACT_FAMILIES.map(f => f.key);
@@ -299,13 +190,67 @@ export const planRun = (stop_loss: number, hours = 24, trades_per_hour = DEFAULT
     };
 };
 
+/** The share of the stop loss a full failed recovery ladder may use, so the stop loss stays a net and not the plan. */
+export const MARTINGALE_STOP_LOSS_SHARE = 0.6;
+
 /**
- * Both sides: a live trade fires the contract AND its opposite at once, but ONLY for Only Ups / Only Downs.
+ * The recovery stake: wins back everything lost so far in the ladder plus one base stake, at the payout the contract pays
+ * (profit per unit stake). Example at 0.83: after a 1.00 loss the next stake is (1 + 1) / 0.83 = 2.41.
+ */
+export const recoveryStake = (ladder_spent: number, base: number, payout_ratio = ASSUMED_PAYOUT_RATIO): number => {
+    const ratio = payout_ratio > 0.2 && payout_ratio < 2 ? payout_ratio : ASSUMED_PAYOUT_RATIO;
+    return Math.max(MIN_STAKE, Math.ceil(((ladder_spent + base) / ratio) * 100) / 100);
+};
+
+/** The stakes of a whole recovery ladder (every step lost): base, then each recovery stake. */
+export const recoveryLadder = (base: number, steps: number, payout_ratio = ASSUMED_PAYOUT_RATIO): number[] => {
+    const out: number[] = [];
+    let spent = 0;
+    let stake = base;
+    for (let i = 0; i < Math.max(1, steps); i++) {
+        out.push(Number(stake.toFixed(2)));
+        spent += stake;
+        stake = recoveryStake(spent, base, payout_ratio);
+    }
+    return out;
+};
+
+export type TMartingalePlan = { stake: number; ladder: number[]; worst_ladder: number; trimmed: boolean };
+
+/**
+ * Sizes the BASE stake so that a full failed ladder (`steps` losses in a row) costs at most MARTINGALE_STOP_LOSS_SHARE of the
+ * stop loss. A bigger stop loss gives a bigger base stake; a small account is held to the minimum stake (trimmed = true).
+ * A recovery ladder wins back its losses when ANY step wins; it does not change the odds of a single trade.
+ */
+export const planMartingale = (stop_loss: number, steps: number, share = MARTINGALE_STOP_LOSS_SHARE): TMartingalePlan => {
+    const budget = Math.max(0, Math.abs(stop_loss)) * share;
+    const unit = recoveryLadder(1, steps).reduce((a, b) => a + b, 0);
+    let stake = Math.floor((budget / unit) * 100) / 100;
+    let trimmed = false;
+    if (stake < MIN_STAKE) {
+        stake = MIN_STAKE;
+        trimmed = true;
+    }
+    const ladder = recoveryLadder(stake, steps);
+    return { stake, ladder, worst_ladder: Number(ladder.reduce((a, b) => a + b, 0).toFixed(2)), trimmed };
+};
+/** The virtual hook asks for two paper wins in a row, not one: one paper win is a coin flip's worth of evidence. */
+export const DEFAULT_VIRTUAL_CONFIRMATIONS = 2;
+export const MAX_VIRTUAL_CONFIRMATIONS = 5;
+/** Opposite mode: if this many paper trades in a row win, stop waiting for a loss and pick a fresh contract. */
+export const MAX_OPPOSITE_PAPER_WINS = 25;
+/** Hook mode, Even/Odd: the live trade follows the paper result (paper win -> same contract live; paper loss -> keep paper trading). */
+/**
+ * Both sides: a live trade released by the virtual hook fires the contract AND its opposite at once, but ONLY for Only Ups / Only Downs.
  * Every other contract (Even/Odd, Over 4/Under 5, Rise/Fall, Touch/No Touch) is bought on one side only.
  */
 const bothSidesType = (type: string): boolean => type === 'RUNHIGH' || type === 'RUNLOW'; // ONLY Only Ups / Only Downs fire both sides
+/** The Only Ups + Only Downs basket: both contracts are bought at the same instant, so no trend direction or entry run is waited for. */
+export const isBasketType = (type: string, both_sides?: boolean): boolean => both_sides !== false && bothSidesType(type);
 /** Two live legs that settle together as ONE trade (the stake ladder, stop loss and hook see the combined result). */
-type TPair = { pending: number; profit: number; stake: number; basket?: boolean; returned?: number; legs?: number; intended?: number };
+type TPair = { pending: number; profit: number; stake: number };
+const FOLLOW_HOOK_TYPES = new Set(['DIGITEVEN', 'DIGITODD']);
+const MAX_FOLLOW_PAPER_LOSSES = 25;
 
 /** Turns a risk preset + live balance into the absolute numbers shown/edited
  *  in the UI. Editing a field in the UI just overwrites one of these — the
@@ -313,31 +258,33 @@ type TPair = { pending: number; profit: number; stake: number; basket?: boolean;
 export const buildConfigFromPreset = (level: TRiskLevel, balance: number): TAutoPilotConfig => {
     const preset = RISK_PRESETS[level];
     const stop_loss = Number(((balance * preset.stop_loss_pct) / 100).toFixed(2));
-    // 24-hour plan, no recovery ladder: a loss never raises the stake. The base stake is sized by planRun so a bad run stays inside
-    // part of the stop loss; the reverse martingale (stake grows only after wins) is the default stake method.
-    const plan = planRun(stop_loss);
+    // 24-hour plan with RECOVERY: the base stake is sized so a full failed ladder fits inside part of the stop loss, a loss is
+    // followed by a recovery stake that wins the ladder back, and every ticked contract is read from the latest ticks.
+    const plan = planMartingale(stop_loss, preset.max_steps);
     return {
-        recovery_mode: 'martingale', // the stake grows only after a LOSS (x1.5); a win goes back to the base stake
+        recovery_mode: 'martingale',
+        recover_losses: true,
         stake: plan.stake,
-        max_trades_per_hour: 0, // no pacing: a signal is bought the next tick, not when a trades-per-hour timer allows
+        max_trades_per_hour: 60,
         streak_multiplier: preset.streak_multiplier,
         max_streak: preset.max_streak,
         martingale_multiplier: preset.martingale_multiplier,
         max_steps: preset.max_steps,
         stop_loss,
         take_profit: Number(((balance * preset.take_profit_pct) / 100).toFixed(2)),
-        protect_trades: 0,
+        auto_flip: true,
+        protect_trades: 0, // protection capped the first 10 stakes at the base stake, which switched recovery off
+        virtual_hook: true,
+        virtual_confirmations: DEFAULT_VIRTUAL_CONFIRMATIONS,
+        virtual_mode: 'hook',
+        follow_stream: true,
+        follow_ticks: DEFAULT_FOLLOW_TICKS,
+        entry_tick: DEFAULT_ENTRY_TICK,
+        entry_wait_ticks: DEFAULT_ENTRY_WAIT_TICKS,
         contract_families: ALL_FAMILY_KEYS,
-        both_sides: true,
-        basket_mode: true, // every digit-pair signal buys the 3-contract basket at once; martingale x1.5 only after a full sweep
-        basket_keys: ALL_BASKET_KEYS,
-        stay_on_market: true, // recover a loss on the same market and pair; switch only after switch_after_losses losses or switch_wait_seconds without an entry
-        switch_after_losses: DEFAULT_SWITCH_AFTER_LOSSES,
-        switch_wait_seconds: DEFAULT_SWITCH_WAIT_SECONDS,
-        min_confidence: DEFAULT_MIN_CONFIDENCE, // enter only on the strongest measured signals, best first
-        pairs_only: true, // the AI trades only the five pairs, both legs at the same moment
-        pair_keys: ALL_PAIR_KEYS,
-        overlap_pairs: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
+        rotate_contracts: true,
+        read_entries: true,
+        both_sides: true, // Only Ups / Only Downs only: buy both so one side's payout lands (see bothSidesType)
     };
 };
 
@@ -452,19 +399,51 @@ const OPPOSITE_LABEL: Record<string, string> = {
     RUNLOW: 'Only Downs',
 };
 
+/** Contracts the virtual hook can settle from live ticks. Others are only ever traded for real. */
+export const PAPER_SUPPORTED = new Set(['DIGITEVEN', 'DIGITODD', 'DIGITOVER', 'DIGITUNDER', 'CALL', 'PUT', 'ONETOUCH', 'NOTOUCH', 'RUNHIGH', 'RUNLOW']);
+
+/**
+ * Settles a paper (virtual) trade the way Deriv would. `entry` is the first tick after the virtual buy and `after` the
+ * ticks that followed it. Returns true = win, false = loss, null = not enough ticks yet.
+ * 1-tick contracts settle on the first tick after entry; Touch / No Touch run for `needed` ticks (touch ends it early).
+ */
+export const paperOutcome = (type: string, entry: number, after: number[], pip: number, needed = 1): boolean | null => {
+    if (isTouch(type)) {
+        const touched = after.slice(0, needed).some(q => q >= entry + 0.5);
+        if (touched) return type === 'ONETOUCH';
+        return after.length >= needed ? type === 'NOTOUCH' : null;
+    }
+    if (type === 'RUNHIGH' || type === 'RUNLOW') {
+        // Only Ups: EVERY tick after entry must be higher than the one before it (Only Downs: lower). One flat or wrong tick loses.
+        let previous = entry;
+        for (const q of after.slice(0, needed)) {
+            if (type === 'RUNHIGH' ? !(q > previous) : !(q < previous)) return false;
+            previous = q;
+        }
+        return after.length >= needed ? true : null;
+    }
+    if (after.length < 1) return null;
+    const exit = after[0];
+    const digit = Number(exit.toFixed(pip).slice(-1));
+    switch (type) {
+        case 'DIGITEVEN':
+            return digit % 2 === 0;
+        case 'DIGITODD':
+            return digit % 2 === 1;
+        case 'DIGITOVER':
+            return digit > 4;
+        case 'DIGITUNDER':
+            return digit < 5;
+        case 'CALL':
+            return exit > entry;
+        case 'PUT':
+            return exit < entry;
+        default:
+            return null;
+    }
+};
 
 /** Contracts that wait for a confirmed trend on the 1-tick chart: Rise needs a higher high, Fall a lower low. */
-/** How often the AI asks for a backend entry signal while it has none. */
-export const SIGNAL_POLL_MS = 100;
-export const DEFAULT_MAX_LATENCY_MS = 500;
-/** A signal first seen longer ago than this is a run that has already ended: it is not bought. */
-export const MAX_SIGNAL_AGE_MS = 1500;
-/** A buy that takes this many times the allowed latency to be confirmed landed late (probably on a later tick than the signal). */
-const LATE_BUY_FACTOR = 3;
-/** This many late buys among the last 10 pause buying for LATE_PAUSE_MS. */
-const LATE_BUYS_TO_PAUSE = 2;
-const LATE_PAUSE_MS = 60_000;
-const PING_EVERY_MS = 2000;
 export const DEFAULT_FOLLOW_TICKS = 2;
 export const MAX_FOLLOW_TICKS = 5;
 export const DEFAULT_ENTRY_TICK = 3;
@@ -733,27 +712,6 @@ export type TAutoPilotHooks = {
     onSettled?: (trade: TSettledTrade) => void;
     /** The AI's self-review of its past results: contracts it must skip and ones it ranks lower. Undefined = no gate. */
     gate?: () => TReviewGate | undefined;
-    /** How late the backend's frames arrive right now, in ms (0 on a good line). Used to refuse signals that reached the AI too late. */
-    feedLagMs?: () => number;
-};
-
-/**
- * The three ticks of a trade, for the log: the pattern that triggered it, the entry tick and the exit tick Deriv actually used.
- * The exit tick decides win or lose. Digit contracts show the last digit (a trailing 0 is kept: Deriv prints 100.50).
- */
-export const describeTicks = (candidate: TCandidate, contract: Record<string, unknown>): { signal: string; entry: string; exit: string; text: string } => {
-    const pattern = (candidate as { run?: { pattern?: string[] } }).run?.pattern ?? [];
-    const digits = candidate.contract_type.startsWith('DIGIT');
-    const shown = (v: unknown): string => {
-        const raw = String(v ?? '').trim();
-        if (!raw) return '?';
-        return digits ? raw.slice(-1) : raw;
-    };
-    const entry = shown(contract.entry_tick_display_value ?? contract.entry_tick ?? contract.entry_spot_display_value ?? contract.entry_spot);
-    const exit = shown(contract.exit_tick_display_value ?? contract.exit_tick ?? contract.exit_spot_display_value ?? contract.exit_spot);
-    const signal = pattern.join(', ');
-    const what = digits ? 'digit' : 'price';
-    return { signal, entry, exit, text: `${signal ? `signal ${signal} -> ` : ''}entry tick ${entry} -> exit tick ${exit} (${what} that decides the trade)` };
 };
 
 export type TSettledTrade = {
@@ -773,16 +731,18 @@ export type TSettledTrade = {
     mode: TRecoveryMode;
     confidence: number;
     strategy?: string;
-    tag?: 'flipped' | 'switched' | 'streak' | 'recovery';
-    /** The ticks of this trade as printed: the pattern that triggered it, then Deriv's entry and exit tick. */
-    signal_ticks?: string;
-    entry_tick?: string;
-    exit_tick?: string;
+    tag?: 'flipped' | 'switched' | 'streak';
 };
 
 export type TAutoPilotEvent = {
     ts: number;
-    phase: 'started' | 'entering' | 'settled' | 'stopped' | 'error' | 'waiting';
+    phase: 'started' | 'entering' | 'settled' | 'stopped' | 'error' | 'waiting' | 'virtual';
+    /** For phase 'virtual': the hook paused real trading ('start'), is about to paper trade ('paper'), settled one ('result'), or resumed real trading ('end'). */
+    virtual_state?: 'start' | 'paper' | 'result' | 'end';
+    virtual_losses?: number;
+    /** For phase 'virtual': paper wins in a row so far, and how many the contract needs before it goes live. */
+    virtual_wins?: number;
+    virtual_needed?: number;
     step?: number;
     symbol?: string;
     contract_type?: string;
@@ -791,7 +751,7 @@ export type TAutoPilotEvent = {
     stake?: number;
     result?: 'win' | 'loss';
     /** Why this entry is not a plain fresh pick: opposite side (flip), a different contract after 2 losses, or a growing win streak. */
-    tag?: 'flipped' | 'switched' | 'streak' | 'recovery';
+    tag?: 'flipped' | 'switched' | 'streak';
     profit?: number;
     total_profit?: number;
     reason?: string;
@@ -819,21 +779,11 @@ export class AutoPilotEngine {
     private win_streak = 0; // reverse martingale: wins in a row
     private streak_profit = 0; // reverse martingale: what the current win streak has made
     private entry_tag: TAutoPilotEvent['tag']; // why the trade being placed is not a plain fresh pick
+    private hook_release = false; // the next live entry was just released by the virtual hook (only those fire both sides)
     private last_live_at = 0; // when the last live buy went out (pacing)
+    private hook_pending = false; // a real loss just happened: the next entry is paper-traded first (virtual hook)
     private trade_count = 0; // settled trades in this run (capital protection counts these)
-    private rtts: number[] = []; // the last pings to Deriv, ms (Infinity = no answer)
-    private ping_timer: ReturnType<typeof setInterval> | null = null;
-    private seen_at = new Map<string, number>(); // signal key -> when the AI first saw it
-    private buy_log: boolean[] = []; // the last 10 buys: true = it landed late
-    private paused_until = 0;
-    private started_at = 0;
-    private last_slow_log = 0;
-    private last_market: string | null = null;
-    private lock: { symbol: string; key: string; since: number; losses: number } | null = null; // recovery: stay on this market and pair until released
-    private last_traded = new Map<string, number>(); // symbol -> when the AI last bought on it (market switching)
-    private used_runs = new Set<string>(); // symbol|type|run id of the backend signals already traded: one run is traded once
-    private poll_timer: ReturnType<typeof setTimeout> | null = null;
-    private waiting: { stake: number; tag?: TAutoPilotEvent['tag'] } | null = null; // set while the AI waits for a signal
+    private flip_origin: TCandidate | null = null; // auto flip: the contract we flipped away from
     private blocked = new Map<string, number>(); // symbol|type -> until: no trend confirmed on the 1-tick chart yet
 
     constructor(
@@ -858,6 +808,11 @@ export class AutoPilotEngine {
             this.hooks?.onLog?.('success', 'Reconnected to Deriv. Any open contract is being re-checked.');
     }
 
+    /** The virtual-hook rules are the active logic (hook on, mode 'hook'): no auto flip, no switching, paper first, live after proof. */
+    private _hookMode(): boolean {
+        return !!this.config.virtual_hook && (this.config.virtual_mode ?? 'hook') === 'hook';
+    }
+
     start() {
         this.running = true;
         this.step = 1;
@@ -868,17 +823,8 @@ export class AutoPilotEngine {
         this.busy = false;
         this.trade_count = 0;
         this.last_live_at = 0;
-        this.used_runs.clear();
-        this.seen_at.clear();
-        this.rtts = [];
-        this.buy_log = [];
-        this.paused_until = 0;
-        this.started_at = Date.now();
-        this._startPing();
-        this.used_runs.clear();
-        this.last_traded.clear();
-        this.last_market = null;
-        this.lock = null;
+        this.hook_pending = this._hookMode(); // hook rules: the run starts on paper, not with a real trade
+        this.flip_origin = null;
         this.blocked.clear();
         this._emit({ phase: 'started' });
         this._findAndEnter(this.config.stake);
@@ -891,10 +837,6 @@ export class AutoPilotEngine {
 
     stop(reason = 'stopped by user') {
         this.running = false;
-        if (this.ping_timer) clearInterval(this.ping_timer);
-        this.ping_timer = null;
-        if (this.poll_timer) clearTimeout(this.poll_timer);
-        this.poll_timer = null;
         this._emit({ phase: 'stopped', reason });
     }
 
@@ -907,6 +849,101 @@ export class AutoPilotEngine {
         } as TAutoPilotEvent);
     }
 
+    /** The best tradable contract right now (learner-guided when learning is on). Risk style plays no part in this. */
+    private _pick(raw_snapshots: TSnapshotMap): TCandidate | null {
+        // The AI's self-review comes first: skip contracts its own history proves are losing, rank lagging ones lower.
+        const gated = applyGate(raw_snapshots, this.hooks?.gate?.());
+        // Rise/Fall waits until the 1-tick chart confirms a trend: leave out the ones that were just refused for that.
+        const now = Date.now();
+        const unblocked: TSnapshotMap = {};
+        for (const [symbol, snap] of Object.entries(gated)) {
+            unblocked[symbol] = {
+                ...snap,
+                signals: snap.signals.filter(sig => (this.blocked.get(`${symbol}|${sig.contract_type}`) ?? 0) <= now),
+            };
+        }
+        // The contract families ticked on the AI Trader tab (undefined = no restriction).
+        const allowed = this._allowedTypes();
+        let pool = unblocked;
+        if (allowed) {
+            pool = {};
+            for (const [symbol, snap] of Object.entries(unblocked)) pool[symbol] = { ...snap, signals: snap.signals.filter(sig => allowed.has(sig.contract_type)) };
+        }
+        // Quick 1-tick contracts first; longer contracts only when no 1-tick one is available. When the owner has ticked Touch /
+        // No Touch or Only Ups / Downs, those are wanted on purpose, so the 1-tick-first rule is lifted.
+        const wants_longer = !!allowed && ['ONETOUCH', 'NOTOUCH', 'RUNHIGH', 'RUNLOW'].some(t => allowed.has(t));
+        const snapshots = wants_longer ? pool : preferOneTick(pool);
+        const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
+        return learner
+            ? learner.pickBest(candidatesFromSnapshots<TDigitSignal>(snapshots, AUTOPILOT_CONTRACT_TYPES) as TCandidate[])
+            : pickBestGlobalCandidate(snapshots, !wants_longer);
+    }
+
+    /** The best tradable contract that is NOT the one that just lost (nor its opposite side). Null if there is none. */
+    private _pickSwitch(lost: TCandidate): TCandidate | null {
+        const skip = new Set([lost.contract_type, FLIP_PARTNER[lost.contract_type]].filter(Boolean));
+        const snapshots = this.getSnapshots();
+        const others: TSnapshotMap = {};
+        for (const [symbol, snap] of Object.entries(snapshots)) {
+            others[symbol] = { ...snap, signals: snap.signals.filter(sig => !skip.has(sig.contract_type)) };
+        }
+        return this._pick(others);
+    }
+
+    /** Entry reader on: the contract and the market come from the latest ticks. Nothing readable -> the classic pick below. */
+    private _findAndEnter(stake: number, tag?: TAutoPilotEvent['tag']) {
+        if (!this.running || this.busy) return;
+        if (this.config.read_entries === true) {
+            this.busy = true;
+            void this._bestByReading(null).then(best => {
+                this.busy = false;
+                if (!this.running) return;
+                if (best) {
+                    this._enter(best, stake, tag);
+                    return;
+                }
+                this._findAndEnterClassic(stake, tag);
+            });
+            return;
+        }
+        this._findAndEnterClassic(stake, tag);
+    }
+
+    private _findAndEnterClassic(stake: number, tag?: TAutoPilotEvent['tag']) {
+        if (!this.running || this.busy) return;
+
+        const learner = this.learner && this.learner.mode !== 'off' ? this.learner : undefined;
+        const candidate = this._pick(this.getSnapshots());
+        if (!candidate && this._hookMode() && this._allowedTypes()) {
+            // No signal for a ticked contract right now: the hook can still paper-test it, so build the candidate directly.
+            this.busy = true;
+            void this._nextHookCandidate(null).then(c => {
+                this.busy = false;
+                if (!this.running) return;
+                if (c) this._enter(c, stake, tag);
+                else setTimeout(() => this._findAndEnter(stake, tag), 1500);
+            });
+            return;
+        }
+        if (!candidate) {
+            if (Date.now() - this.last_wait_emit > 30_000) {
+                this.last_wait_emit = Date.now();
+                this._emit({
+                    phase: 'waiting',
+                    reason:
+                        learner?.mode === 'edge_gate'
+                            ? 'no market/contract has a proven edge yet'
+                            : 'no market has a tradable 1-tick signal right now (contracts Deriv refused or priced too low are skipped)',
+                });
+            }
+            // Nothing meets the bar right now — try again shortly rather than
+            // erroring out; live signals come and go every second.
+            setTimeout(() => this._findAndEnter(stake, tag), 1500);
+            return;
+        }
+        this._enter(candidate, stake, tag);
+    }
+
     /** The contract types the ticked families allow, or null when no restriction is set. */
     private _allowedTypes(): Set<string> | null {
         const keys = this.config.contract_families;
@@ -915,272 +952,244 @@ export class AutoPilotEngine {
     }
 
     /**
-     * Signal execution. The backend reads the tick stream and marks a contract as an ENTRY signal the moment 3 or more ticks in
-     * a row favour it (Even 2,4,6; Odd 1,3,7; Over 4 5,8,9; Under 5 2,1,4; Rise/Fall, Only Ups/Downs and Touch/No Touch the same
-     * way) in a market whose bias favours it. The AI buys the strongest such signal as soon as it is received: no paper test, no
-     * second wait on its own tick stream. The same run of ticks is never traded twice.
+     * Hook rules, contract rotation: the candidate for the NEXT paper test. With rotation on (default) and more than one family
+     * ticked, it is the next ticked family after the one just traded, on the market with the best signal for it (or the same
+     * market when there is none). Rise/Fall and Only Ups/Downs take the side the 1-tick chart confirms (higher-high -> Rise /
+     * Only Ups, lower-low -> Fall / Only Downs); with no trend that family is skipped this round. Null = keep the same contract.
      */
-    private _pickSignal(): TCandidate | null {
-        const gated = applyGate(this.getSnapshots(), this.hooks?.gate?.());
-        const allowed = this._allowedTypes();
-        const now = Date.now();
-        const found: { candidate: TCandidate; confluence: boolean; idle: number; pair: boolean }[] = [];
-        const pairs_only = this.config.pairs_only === true;
-        const pair_keys = new Set(this.config.pair_keys ?? ALL_PAIR_KEYS);
-        const basket = this.config.basket_mode === true;
-        const basket_keys = new Set(this.config.basket_keys ?? ALL_BASKET_KEYS);
-        // Recovery lock: after a loss only the same market and the same pair/contract may be bought, until a switch condition is met.
-        if (this.lock) {
-            const wait_ms = Math.max(0, this.config.switch_wait_seconds ?? DEFAULT_SWITCH_WAIT_SECONDS) * 1000;
-            if (wait_ms > 0 && now - this.lock.since > wait_ms) {
-                this.hooks?.onLog?.('info', `No new entry on ${this.lock.symbol} for ${Math.round(wait_ms / 1000)}s: switching market.`);
-                this.lock = null;
-            }
+    private async _nextHookCandidate(prev: TCandidate | null): Promise<TCandidate | null> {
+        const keys = this.config.contract_families;
+        const families = CONTRACT_FAMILIES.filter(f => !keys || keys.includes(f.key));
+        if (!families.length) return null;
+        if (prev && (!keys || this.config.rotate_contracts === false || families.length < 2)) return null;
+        if (this.config.read_entries === true) {
+            const best = await this._bestByReading(prev);
+            if (!this.running) return null;
+            if (best) return best;
         }
-        const lock = this.lock;
-        for (const [symbol, snap] of Object.entries(gated)) {
-            if (lock && symbol !== lock.symbol) continue;
-            for (const sig of snap.signals) {
-                if (sig.family !== 'run_bias' || !sig.entry) continue;
-                if (sig.contract_type === 'ONETOUCH' || sig.contract_type === 'NOTOUCH') continue; // Touch / No Touch are not traded by the AI
-                if ((this.config.min_confidence ?? 0) > 0 && (sig.confidence ?? 0) < (this.config.min_confidence ?? 0)) continue; // not strong enough
-                if (lock && recoveryKey(sig as { pair_key?: string; contract_type: string }) !== lock.key) continue; // recover with the same pair/contract
-                // A PAIR signal: the sequence favours two contracts at once (0,2,4 = Even + Under 5; 5,7,9 = Odd + Over 4; rising + odd = Rise + Odd; falling + even = Fall + Even).
-                const pair_types = (sig as { pair_types?: string[] }).pair_types;
-                if (basket) {
-                    // 3-contract basket: only a digit-pair signal of a ticked base, with a chart direction (bullish / bearish) for the third contract.
-                    // The backend judges the entry on the whole basket (digit pair + third contract + replayed basket result): `basket_entry`.
-                    const bk = (sig as { pair_key?: string }).pair_key;
-                    const dir = (sig as { trend?: string }).trend;
-                    if (!pair_types || !bk || !basket_keys.has(bk) || (dir !== 'bullish' && dir !== 'bearish')) continue;
-                    if ((sig as { basket_entry?: boolean }).basket_entry !== true) continue;
-                } else if (pairs_only) {
-                    // Pairs only: nothing but a ticked pair is traded, never a single contract.
-                    const pk = pairKeyOf(sig as { pair_key?: string; contract_type: string });
-                    if (!pk || !pair_keys.has(pk)) continue;
-                    if (pair_types && pair_types.length !== 2) continue;
-                } else {
-                    if (pair_types && (this.config.overlap_pairs === false || pair_types.length !== 2)) continue;
-                    if (allowed && !allowed.has(sig.contract_type)) continue;
-                    if (pair_types && allowed && !allowed.has(pair_types[1])) continue;
-                }
-                if (pair_types && (this.blocked.get(`${symbol}|${pair_types[1]}`) ?? 0) > now) continue;
-                if (pair_types && tradeTicks(symbol, pair_types[1]) === null) continue;
-                if ((this.blocked.get(`${symbol}|${sig.contract_type}`) ?? 0) > now) continue;
-                if (sig.run_id !== undefined && this.used_runs.has(`${symbol}|${sig.contract_type}|${sig.run_id}`)) continue;
-                const ticks = tradeTicks(symbol, sig.contract_type);
-                if (ticks === null) continue;
-                // A signal is for the very next tick: one the AI has been looking at for too long is a run that has already ended.
-                const key = `${symbol}|${sig.contract_type}|${sig.run_id}`;
-                const first = this.seen_at.get(key) ?? now;
-                if (!this.seen_at.has(key)) {
-                    if (this.seen_at.size > 500) this.seen_at.clear();
-                    this.seen_at.set(key, now);
-                }
-                if (now - first > MAX_SIGNAL_AGE_MS) continue;
-                const second = pair_types ? pair_types[1] : null;
-                const candidate = (
-                    second
-                        ? {
-                              ...sig,
-                              symbol,
-                              duration_ticks: ticks,
-                              label: OPPOSITE_LABEL[sig.contract_type] ?? sig.label,
-                              pair_with: {
-                                  ...sig,
-                                  symbol,
-                                  duration_ticks: ticks,
-                                  contract_type: second,
-                                  prediction: second === 'DIGITUNDER' ? 5 : second === 'DIGITOVER' ? 4 : undefined,
-                                  label: OPPOSITE_LABEL[second] ?? second,
-                              },
-                          }
-                        : { ...sig, symbol, duration_ticks: ticks }
-                ) as TCandidate;
-                found.push({
-                    candidate,
-                    pair: !!second,
-                    confluence: sig.confluence === true,
-                    idle: now - (this.last_traded.get(symbol) ?? 0), // how long this market has not been traded: a market never traded is the idlest
-                });
-            }
+        const start = prev ? families.findIndex(f => f.types.includes(prev.contract_type)) : -1;
+        for (let i = 1; i <= families.length; i++) {
+            const family = families[(start + i + families.length) % families.length];
+            const candidate = await this._candidateForFamily(family, prev?.symbol);
+            if (!this.running) return null;
+            if (candidate) return candidate;
         }
-        if (!found.length) return null;
-        // Market switching: when several markets have an entry at the same time, the one that agrees on every run length (confluence)
-        // goes first, then a PAIR (the digit sequence favours two contracts at once), then the market traded LEAST recently, and only then
-        // the strongest bias. The strongest bias alone kept picking the same market, because a market's bias changes slowly.
-        const best_first = (this.config.min_confidence ?? 0) > 0; // quality gate on: the strongest measured signal goes first
-        found.sort((a, b) => (best_first ? b.candidate.confidence - a.candidate.confidence : 0) || Number(b.confluence) - Number(a.confluence) || Number(b.pair) - Number(a.pair) || b.idle - a.idle || b.candidate.confidence - a.candidate.confidence);
-        return found[0].candidate;
-    }
-
-    private _startPing() {
-        if (this.ping_timer) clearInterval(this.ping_timer);
-        const ping = () => {
-            const t0 = Date.now();
-            this.connection
-                .send({ ping: 1 })
-                .then(() => this.rtts.push(Date.now() - t0))
-                .catch(() => this.rtts.push(Infinity))
-                .finally(() => {
-                    if (this.rtts.length > 5) this.rtts.shift();
-                    this.signalReceived(); // a waiting AI looks again now that the connection has been measured
-                });
-        };
-        ping();
-        this.ping_timer = setInterval(ping, PING_EVERY_MS);
-    }
-
-    /** The middle of the last pings to Deriv, in ms (0 = nothing measured yet, Infinity = Deriv is not answering). */
-    latencyMs(): number {
-        if (!this.rtts.length) return 0;
-        const sorted = [...this.rtts].sort((a, b) => a - b);
-        return sorted[Math.floor(sorted.length / 2)];
-    }
-
-    /** Why the AI must not buy right now because of the connection (null = the connection is fine). */
-    private _connectionProblem(): string | null {
-        const limit = this.config.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS;
-        if (limit <= 0) return null;
-        const now = Date.now();
-        if (now < this.paused_until) return `trades have been landing late, paused for ${Math.ceil((this.paused_until - now) / 1000)}s`;
-        if (!this.rtts.length && now - this.started_at < 3000) return 'measuring the connection'; // never buy blind: wait for the first ping
-        const rtt = this.latencyMs();
-        if (rtt > limit) return Number.isFinite(rtt) ? `your connection to Deriv is slow (${Math.round(rtt)} ms, limit ${limit} ms)` : 'Deriv is not answering';
-        const last = this.rtts[this.rtts.length - 1];
-        if (last !== undefined && last > limit * 2) return `your connection just stalled (${Number.isFinite(last) ? Math.round(last) + ' ms' : 'no answer'})`;
-        const lag = this.hooks?.feedLagMs?.() ?? 0;
-        if (lag > limit) return `the signal feed is arriving ${Math.round(lag)} ms late`;
         return null;
     }
 
-    /** Called after every buy with how long Deriv took to confirm it: two late buys in the last ten pause buying for a minute. */
-    private _noteBuy(ms: number) {
-        const limit = this.config.max_latency_ms ?? DEFAULT_MAX_LATENCY_MS;
-        if (limit <= 0) return;
-        this.buy_log.push(ms > limit * LATE_BUY_FACTOR);
-        if (this.buy_log.length > 10) this.buy_log.shift();
-        if (this.buy_log.filter(Boolean).length >= LATE_BUYS_TO_PAUSE) {
-            this.paused_until = Date.now() + LATE_PAUSE_MS;
-            this.buy_log = [];
-            this.hooks?.onLog?.('error', `Buys are being confirmed late (${Math.round(ms)} ms): signals last one tick, so these trades land on the wrong tick. Pausing for ${LATE_PAUSE_MS / 1000}s.`);
-        }
-    }
-
-    /** The panel calls this the moment a new snapshot arrives from the backend: a waiting AI looks at it at once instead of at its next poll. */
-    signalReceived() {
-        if (!this.running || this.busy || !this.waiting) return;
-        this._findAndEnter(this.waiting.stake, this.waiting.tag);
-    }
-
-    /** After a loss: keep the AI on this market and pair, or release it once this market has lost switch_after_losses times in a row. */
-    private _holdMarket(candidate: TCandidate) {
-        if (this.config.stay_on_market !== true) return;
-        const losses = this.lock && this.lock.symbol === candidate.symbol ? this.lock.losses + 1 : 1;
-        const limit = Math.max(1, Math.floor(this.config.switch_after_losses ?? DEFAULT_SWITCH_AFTER_LOSSES));
-        if (losses >= limit) {
-            this.lock = null;
-            this.hooks?.onLog?.('info', `${losses} loss${losses > 1 ? 'es' : ''} in a row on ${candidate.symbol}: ${candidate.symbol} is not working, the AI may switch market now.`);
-            return;
-        }
-        this.lock = { symbol: candidate.symbol, key: recoveryKey(candidate as unknown as { pair_key?: string; contract_type: string }), since: Date.now(), losses };
-        this.hooks?.onLog?.('info', `Loss on ${candidate.symbol}: recovering on the same market and pair (switch after ${limit} losses in a row or ${this.config.switch_wait_seconds ?? DEFAULT_SWITCH_WAIT_SECONDS}s without an entry).`);
-    }
-
-    /** Looks for a backend entry signal; with none yet it asks again shortly (signals come and go with every tick). */
-    private _findAndEnter(stake: number, tag?: TAutoPilotEvent['tag']) {
-        if (!this.running || this.busy) return;
-        if (this.poll_timer) clearTimeout(this.poll_timer);
-        this.poll_timer = null;
-        const candidate = this._pickSignal();
-        const problem = candidate ? this._connectionProblem() : null;
-        if (candidate && problem) {
-            // A signal is only good for the very next tick. With this connection it would land late, so it is dropped (never bought late).
-            const run_id = (candidate as { run_id?: number | string }).run_id;
-            const measuring = problem === 'measuring the connection'; // only the first moments of a run: wait, do not throw the signal away
-            if (run_id !== undefined && !measuring) this.used_runs.add(`${candidate.symbol}|${candidate.contract_type}|${run_id}`);
-            if (!measuring && Date.now() - this.last_slow_log > 15_000) {
-                this.last_slow_log = Date.now();
-                this.hooks?.onLog?.('info', `Signal on ${candidate.symbol} not bought: ${problem}. Waiting for the connection to recover.`);
-                this._emit({ phase: 'waiting', reason: `not buying: ${problem}` });
-            }
-            this.waiting = { stake, tag };
-            this.poll_timer = setTimeout(() => this._findAndEnter(stake, tag), problem === 'measuring the connection' ? 50 : 300);
-            return;
-        }
-        this.waiting = candidate ? null : { stake, tag };
-        if (!candidate) {
-            if (Date.now() - this.last_wait_emit > 30_000) {
-                this.last_wait_emit = Date.now();
-                if (this.config.basket_mode === true && Date.now() - this.started_at < 10_000) {
-                    this.last_wait_emit = Date.now() - 20_000; // the first snapshots may still be arriving: look again in 10 seconds
-                } else if (this.config.basket_mode === true) {
-                    // Say WHY nothing is being bought, so a silent AI is never a mystery (an old backend, no direction, a locked market ...).
-                    const why = basketDiagnosis(this.getSnapshots() as Record<string, { signals: unknown[] }>, this.config);
-                    const lock = this.lock ? ` Recovering on ${this.lock.symbol}: only that market and pair may be bought (switch after ${this.config.switch_wait_seconds ?? DEFAULT_SWITCH_WAIT_SECONDS}s without an entry).` : '';
-                    this.hooks?.onLog?.(/OLD version|no digit-pair signals at all/.test(why) ? 'error' : 'info', `Not buying yet: ${why}${lock}`);
-                    this._emit({ phase: 'waiting', reason: `${why}${lock}` });
-                } else this._emit({ phase: 'waiting', reason: 'waiting for the backend to signal an entry (3 or more ticks in a row in favour of a contract)' });
-            }
-            this.poll_timer = setTimeout(() => this._findAndEnter(stake, tag), SIGNAL_POLL_MS);
-            return;
-        }
-        this._enter(candidate, stake, tag);
-    }
-
-    /** Is the signal still on the backend's feed right now (same contract, market and run)? A run that already ended is not bought. */
-    private _stillValid(candidate: TCandidate): boolean {
-        const run_id = (candidate as { run_id?: number | string }).run_id;
-        const snap = this.getSnapshots()[candidate.symbol];
-        if (!snap) return true;
-        return snap.signals.some(sg => sg.family === 'run_bias' && sg.entry && sg.contract_type === candidate.contract_type && (run_id === undefined || sg.run_id === run_id));
-    }
-
     /**
-     * Buys the signalled contract on the very next tick: no price check first, no chart request. The backend has already confirmed the
-     * trend on the 1-tick chart for Rise/Fall and Only Ups/Downs (the signal carries it); only a signal without that confirmation
-     * falls back to asking for the chart.
+     * Entry reader. Reads the latest ticks of every market for every ticked contract and returns the contract whose entry is
+     * closest to firing (see entryScore). Signal confidence is not used. Rise/Fall and Only Ups/Downs need their trend first;
+     * Touch / No Touch need Deriv to price them. Ties go to the family after the one just traded, so every contract gets turns.
      */
-    private _enter(candidate: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag']) {
-        const run_id = (candidate as { run_id?: number | string }).run_id;
-        if (run_id !== undefined) {
-            if (this.used_runs.size > 500) this.used_runs.clear();
-            this.used_runs.add(`${candidate.symbol}|${candidate.contract_type}|${run_id}`);
+    private async _bestByReading(prev: TCandidate | null): Promise<TCandidate | null> {
+        const keys = this.config.contract_families;
+        let families = CONTRACT_FAMILIES.filter(f => !keys || keys.includes(f.key));
+        if (!families.length) return null;
+        if (prev) {
+            const at = families.findIndex(f => f.types.includes(prev.contract_type));
+            if (at >= 0) families = [...families.slice(at + 1), ...families.slice(0, at + 1)];
         }
-        const mate = (candidate as { pair_with?: TCandidate & { run_id?: number | string } }).pair_with;
-        if (mate) {
-            // The pair uses up the run, and also the single Even / Under 5 (or Odd / Over 4) entries of the same moment: no double buying.
-            if (run_id !== undefined) this.used_runs.add(`${mate.symbol}|${mate.contract_type}|${run_id}`);
-            for (const sg of this.getSnapshots()[candidate.symbol]?.signals ?? []) {
-                if (sg.family === 'run_bias' && sg.entry && sg.run_id !== undefined && (sg.contract_type === candidate.contract_type || sg.contract_type === mate.contract_type)) {
-                    this.used_runs.add(`${candidate.symbol}|${sg.contract_type}|${sg.run_id}`);
+        const symbols = Object.keys(this.getSnapshots());
+        if (!symbols.length) return null;
+        const target = Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(this.config.entry_tick ?? DEFAULT_ENTRY_TICK)));
+        const history = new Map<string, { prices: number[]; pip: number }>();
+        await Promise.all(
+            symbols.map(async symbol => {
+                try {
+                    const res = await this.connection.send({ ticks_history: symbol, count: Math.max(30, TREND_WINDOW), end: 'latest', style: 'ticks' });
+                    const prices: number[] = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+                    history.set(symbol, { prices, pip: Number.isInteger(res?.pip_size) ? Number(res.pip_size) : 2 });
+                } catch {
+                    /* a market whose ticks cannot be read is simply not read */
+                }
+            })
+        );
+        if (!this.running) return null;
+        const now = Date.now();
+        const scored: { score: number; symbol: string; type: string; order: number }[] = [];
+        let order = 0;
+        for (const family of families) {
+            for (const symbol of symbols) {
+                const h = history.get(symbol);
+                if (!h || h.prices.length < 11) continue;
+                for (const type of family.types) {
+                    if (tradeTicks(symbol, type) === null) continue;
+                    if ((this.blocked.get(`${symbol}|${type}`) ?? 0) > now) continue;
+                    const need = TREND_NEEDED[type];
+                    if (need && !isBasketType(type, this.config.both_sides) && detectTrend(h.prices.slice(-TREND_WINDOW)) !== need) continue;
+                    const prediction = type === 'DIGITOVER' ? 4 : type === 'DIGITUNDER' ? 5 : undefined;
+                    scored.push({ score: entryScore(type, prediction, h.prices, h.pip, target), symbol, type, order: order++ });
                 }
             }
         }
-        if (this.last_market && this.last_market !== candidate.symbol) {
-            this.hooks?.onLog?.('info', `Switching market: ${this.last_market} -> ${candidate.symbol} (${candidate.label}, the entry came on ${candidate.symbol}).`);
-        }
-        this.last_market = candidate.symbol;
-        this.last_traded.set(candidate.symbol, Date.now());
-        const need = TREND_NEEDED[candidate.contract_type];
-        if (!need || (candidate as { trend?: string }).trend === need) {
-            this._enterNow(candidate, wanted_stake, tag);
-            return;
-        }
-        this.busy = true;
-        void this._trendOk(candidate).then(trend_ok => {
-            this.busy = false;
-            if (!this.running) return;
-            if (trend_ok && this._stillValid(candidate)) {
-                this._enterNow(candidate, wanted_stake, tag);
-                return;
+        scored.sort((a, b) => b.score - a.score || a.order - b.order);
+        for (const pick of scored.slice(0, 8)) {
+            if (isTouch(pick.type) && !(await this._probeTouch(pick.symbol, pick.type))) {
+                if (!this.running) return null;
+                continue;
             }
-            this.hooks?.onLog?.('info', `Signal on ${candidate.symbol} for ${candidate.label} skipped: ${trend_ok ? 'the run already ended' : 'the 1-tick chart shows no confirmed trend'}.`);
-            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
-            this._findAndEnter(wanted_stake, tag);
+            const ticks = tradeTicks(pick.symbol, pick.type);
+            if (ticks === null) continue;
+            const kind = pick.type.startsWith('DIGIT') ? 'digits' : isTouch(pick.type) ? 'touch' : pick.type.startsWith('RUN') ? 'only_up_down' : 'rise_fall';
+            this.hooks?.onLog?.('info', `Entry reader: ${OPPOSITE_LABEL[pick.type] ?? pick.type} on ${pick.symbol} reads best from the latest ticks (score ${pick.score.toFixed(2)}).`);
+            return {
+                symbol: pick.symbol,
+                family: kind,
+                contract_type: pick.type,
+                duration_ticks: ticks,
+                prediction: pick.type === 'DIGITOVER' ? 4 : pick.type === 'DIGITUNDER' ? 5 : isTouch(pick.type) ? TOUCH_BARRIER : undefined,
+                label: OPPOSITE_LABEL[pick.type] ?? pick.type,
+                confidence: 1,
+                basis: 'Entry reader: chosen from the latest ticks.',
+            } as TCandidate;
+        }
+        return null;
+    }
+
+    /** Touch / No Touch entry: resolves true the moment the latest ticks fit the contract (a fast market for Touch, a calm one for No Touch). */
+    private async _awaitReading(candidate: TCandidate): Promise<boolean> {
+        const type = candidate.contract_type;
+        let buffer: number[] = [];
+        let last_epoch: number | undefined;
+        try {
+            const res = await this.connection.send({ ticks_history: candidate.symbol, count: 30, end: 'latest', style: 'ticks' });
+            buffer = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            const times: number[] = ((res?.history?.times ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            last_epoch = times[times.length - 1];
+        } catch {
+            return false; // cannot see the stream, so no live entry
+        }
+        if (touchReading(type, buffer)) return true;
+        return new Promise<boolean>(resolve => {
+            let done = false;
+            let sub: number | null = null;
+            const finish = (ok: boolean) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                if (sub !== null) void this.connection.unsubscribe(sub);
+                resolve(ok);
+            };
+            const timer = setTimeout(() => finish(false), 90_000);
+            sub = this.connection.subscribe({ ticks: candidate.symbol }, (data, err) => {
+                if (done) return;
+                if (err || !this.running) return finish(false);
+                const tick = data?.tick;
+                if (!tick) return;
+                const epoch = Number(tick.epoch);
+                if (Number.isFinite(epoch)) {
+                    if (last_epoch !== undefined && epoch <= last_epoch) return;
+                    last_epoch = epoch;
+                }
+                const q = Number(tick.quote);
+                if (!Number.isFinite(q)) return;
+                buffer = [...buffer, q].slice(-30);
+                if (touchReading(type, buffer)) finish(true);
+            });
         });
     }
 
+    private async _candidateForFamily(family: (typeof CONTRACT_FAMILIES)[number], prefer_symbol?: string): Promise<TCandidate | null> {
+        const snapshots = this.getSnapshots();
+        const symbols = Object.keys(snapshots).filter(sym => family.types.some(t => tradeTicks(sym, t) !== null));
+        if (!symbols.length) return null;
+        let best_real: TCandidate | null = null;
+        for (const sym of symbols) {
+            for (const sig of snapshots[sym].signals) {
+                if (family.types.includes(sig.contract_type) && (!best_real || sig.confidence > best_real.confidence)) best_real = { symbol: sym, ...sig };
+            }
+        }
+        let symbol = best_real?.symbol ?? (prefer_symbol && symbols.includes(prefer_symbol) ? prefer_symbol : symbols[0]);
+        let type: string = best_real?.contract_type ?? family.types[0];
+        if (isTouch(type)) {
+            // Only a market where Deriv actually prices the touch contract (5 or 10 ticks, barrier 0.5) is used.
+            let priced: string | null = null;
+            for (const sym of [symbol, ...symbols.filter(s => s !== symbol)].slice(0, 6)) {
+                if (await this._probeTouch(sym, type)) {
+                    priced = sym;
+                    break;
+                }
+                if (!this.running) return null;
+            }
+            if (!priced) return null;
+            symbol = priced;
+        }
+        if (family.trend && !family.types.every(t => isBasketType(t, this.config.both_sides))) {
+            let trend: string = 'none';
+            try {
+                const res = await this.connection.send({ ticks_history: symbol, count: TREND_WINDOW, end: 'latest', style: 'ticks' });
+                trend = detectTrend(((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite));
+            } catch {
+                trend = 'none';
+            }
+            if (trend === 'none') return null; // no confirmed trend: this family waits for its next turn
+            type = trend === 'bullish' ? family.types[0] : family.types[1];
+        }
+        const ticks = tradeTicks(symbol, type);
+        if (ticks === null) return null;
+        if (best_real && best_real.contract_type === type && best_real.symbol === symbol) return { ...best_real, symbol, duration_ticks: ticks };
+        const kind = type.startsWith('DIGIT') ? 'digits' : type === 'ONETOUCH' || type === 'NOTOUCH' ? 'touch' : type.startsWith('RUN') ? 'only_up_down' : 'rise_fall';
+        return {
+            symbol,
+            family: kind,
+            contract_type: type,
+            duration_ticks: ticks,
+            prediction: type === 'DIGITOVER' ? 4 : type === 'DIGITUNDER' ? 5 : type === 'ONETOUCH' || type === 'NOTOUCH' ? TOUCH_BARRIER : undefined,
+            label: OPPOSITE_LABEL[type] ?? type,
+            confidence: 1,
+            basis: 'Contract rotation: the next ticked contract gets its paper test.',
+        } as TCandidate;
+    }
+
+    /**
+     * Touch / No Touch: asks Deriv for a price before any paper or live trade. A barrier of 0.5 can be too far (No Touch) or too
+     * near (Touch) on a quiet market, and Deriv then answers "This contract offers no return". 5 ticks is tried first, then 10 ticks
+     * with the same 0.5 barrier; if neither prices, the market/contract is skipped for 6 hours. True = priced and safe to use.
+     */
+    private async _probeTouch(symbol: string, type: string): Promise<boolean> {
+        const key = `${symbol}|${type}`;
+        const first = touch_ticks.get(key) ?? 5;
+        for (const ticks of first === 5 ? [5, 10] : [first]) {
+            try {
+                const res = await this.connection.send({
+                    proposal: 1,
+                    amount: this.config.stake,
+                    basis: 'stake',
+                    contract_type: type,
+                    currency: this.currency,
+                    underlying_symbol: symbol,
+                    duration: ticks,
+                    duration_unit: 't',
+                    barrier: TOUCH_BARRIER,
+                });
+                const ask = Number(res?.proposal?.ask_price);
+                const payout = Number(res?.proposal?.payout);
+                if (!res?.proposal || (ask > 0 && payout > 0 && payout / ask < MIN_PAYOUT_RATIO)) throw new Error('payout does not beat the stake');
+                if (ticks !== 5) touch_ticks.set(key, ticks);
+                else touch_ticks.delete(key);
+                return true;
+            } catch (err) {
+                if (!this.running) return false;
+                this.hooks?.onLog?.('info', `${OPPOSITE_LABEL[type] ?? type} on ${symbol} for ${ticks} tick(s), barrier ${TOUCH_BARRIER}: ${err instanceof Error ? err.message : 'not priced'}`);
+            }
+        }
+        markRefused(symbol, type);
+        this.hooks?.onLog?.('info', `${OPPOSITE_LABEL[type] ?? type} has no usable price on ${symbol} (5 or 10 ticks, barrier ${TOUCH_BARRIER}). Skipping it for 6 hours.`);
+        return false;
+    }
+
+    /** Hook rules: after a live trade, paper-test the next contract (rotation) or the same one again. */
+    private _hookNext(candidate: TCandidate, stake: number, tag?: TAutoPilotEvent['tag']) {
+        this.busy = true;
+        void this._nextHookCandidate(candidate).then(next => {
+            this.busy = false;
+            if (!this.running) return;
+            this._enter(next ?? candidate, stake, tag);
+        });
+    }
+
+    /** Rise/Fall: bought only once the 1-tick chart shows a higher high (Rise) or a lower low (Fall). */
     private async _trendOk(candidate: TCandidate): Promise<boolean> {
         const need = TREND_NEEDED[candidate.contract_type];
         if (!need) return true;
@@ -1191,6 +1200,371 @@ export class AutoPilotEngine {
         } catch {
             return false; // no chart, no trend confirmation, no trade
         }
+    }
+
+    /**
+     * Two-tick entry. Resolves true at the exact moment the matching run reaches `entry_tick` ticks (default 3: two agreeing ticks
+     * and the buy on the third), straight from the live tick stream. A run that is already past that length does not count, so the
+     * AI never buys on the 4th or 5th tick of the same run; it waits for the run to break and a new one to build. Resolves false
+     * after about 90 ticks (the caller then picks something else).
+     */
+    private async _awaitEntryTick(candidate: TCandidate): Promise<boolean> {
+        const target = Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(this.config.entry_tick ?? DEFAULT_ENTRY_TICK)));
+        const type = candidate.contract_type;
+        if (isTouch(type)) return this._awaitReading(candidate);
+        const prediction = candidate.prediction as number | undefined;
+        let pip = 2;
+        let run = 0;
+        let prev: number | undefined;
+        let last_epoch: number | undefined;
+        try {
+            const res = await this.connection.send({ ticks_history: candidate.symbol, count: target + 2, end: 'latest', style: 'ticks' });
+            const prices: number[] = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            const times: number[] = ((res?.history?.times ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            if (Number.isInteger(res?.pip_size)) pip = Number(res.pip_size);
+            if (tickAgrees(type, prediction, prices[prices.length - 1] ?? 0, undefined, pip) === null) return true; // no stream rule
+            run = trailingRun(type, prediction, prices, pip); // the run already under way, so the setup ticks are not missed
+            prev = prices[prices.length - 1];
+            last_epoch = times[times.length - 1];
+        } catch {
+            return false; // cannot see the stream, so no live entry
+        }
+        return new Promise<boolean>(resolve => {
+            let done = false;
+            let sub: number | null = null;
+            const finish = (ok: boolean) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                if (sub !== null) void this.connection.unsubscribe(sub);
+                resolve(ok);
+            };
+            const timer = setTimeout(() => finish(false), 180_000); // safety net if the stream goes quiet
+            const wait_ticks = Math.min(MAX_ENTRY_WAIT_TICKS, Math.max(MIN_ENTRY_WAIT_TICKS, Math.floor(this.config.entry_wait_ticks ?? DEFAULT_ENTRY_WAIT_TICKS)));
+            let seen = 0;
+            sub = this.connection.subscribe({ ticks: candidate.symbol }, (data, err) => {
+                if (done) return;
+                if (err || !this.running) return finish(false);
+                const tick = data?.tick;
+                if (!tick) return;
+                const epoch = Number(tick.epoch);
+                if (Number.isFinite(epoch)) {
+                    if (last_epoch !== undefined && epoch <= last_epoch) return; // a tick already counted from the history
+                    last_epoch = epoch;
+                }
+                const q = Number(tick.quote);
+                if (!Number.isFinite(q)) return;
+                if (Number.isInteger(Number(tick.pip_size))) pip = Number(tick.pip_size);
+                const a = tickAgrees(type, prediction, q, prev, pip);
+                prev = q;
+                run = a ? run + 1 : 0;
+                seen += 1;
+                if (run === target) return finish(true); // exactly the Nth matching tick: buy now, not on the 4th or 5th
+                if (seen >= wait_ticks) finish(false); // no entry in time: the caller skips this contract
+            });
+        });
+    }
+
+    /** Follow-the-stream rule: true when the latest ticks already point the contract's way (or no rule applies). */
+    private async _streamOk(candidate: TCandidate): Promise<boolean> {
+        if (this.config.follow_stream !== true) return true;
+        const n = Math.min(MAX_FOLLOW_TICKS, Math.max(1, Math.floor(this.config.follow_ticks ?? DEFAULT_FOLLOW_TICKS)));
+        try {
+            const res = await this.connection.send({ ticks_history: candidate.symbol, count: n + 1, end: 'latest', style: 'ticks' });
+            const prices: number[] = ((res?.history?.prices ?? []) as unknown[]).map(Number).filter(Number.isFinite);
+            const pip = Number.isInteger(res?.pip_size) ? Number(res.pip_size) : 2;
+            const ok = followsStream(candidate.contract_type, candidate.prediction as number | undefined, prices, pip, n);
+            return ok === null ? true : ok;
+        } catch {
+            return false; // cannot see the stream, so no live entry
+        }
+    }
+
+    /** One auto-flip step: the partner after a loss, the original after the next one. Null when flipping is off / blocked. */
+    private _autoFlipTarget(candidate: TCandidate): TCandidate | null {
+        if (!this.config.auto_flip) return null;
+        // The owner's switch rule wins over the self-review gate: the gate is meant to steer fresh picks, and applying it here
+        // silently cancelled the switch whenever the journal held losses for the partner contract.
+        const target = this.flip_origin ?? partnerCandidate(candidate.symbol, candidate);
+        const came_back = !!this.flip_origin;
+        this.flip_origin = came_back ? null : candidate;
+        return target;
+    }
+
+    /** One paper trade on live ticks: resolves true (win), false (loss) or null (could not be settled). No money moves. */
+    private _paperTrade(candidate: TCandidate): Promise<boolean | null> {
+        const type = candidate.contract_type;
+        const needed = isTouch(type)
+            ? touch_ticks.get(`${candidate.symbol}|${type}`) ?? 5
+            : type === 'RUNHIGH' || type === 'RUNLOW'
+              ? tradeTicks(candidate.symbol, type) ?? 2
+              : 1;
+        return new Promise(resolve => {
+            const quotes: number[] = [];
+            let pip = 2;
+            let done = false;
+            let sub: number | null = null;
+            const finish = (result: boolean | null) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                if (sub !== null) void this.connection.unsubscribe(sub);
+                resolve(result);
+            };
+            const timer = setTimeout(() => finish(null), 45_000);
+            sub = this.connection.subscribe({ ticks: candidate.symbol }, (data, err) => {
+                if (done) return;
+                if (err || !this.running) return finish(null);
+                const tick = data?.tick;
+                if (!tick) return;
+                quotes.push(Number(tick.quote));
+                if (Number.isFinite(Number(tick.pip_size))) pip = Number(tick.pip_size);
+                // quotes[0] may be a tick from before the virtual buy; the entry is the next one, like a real purchase.
+                if (quotes.length < 2) return;
+                const result = paperOutcome(type, quotes[1], quotes.slice(2), pip, needed);
+                if (result !== null) finish(result);
+            });
+        });
+    }
+
+    /**
+     * Real trading is paused after a loss. The contract the AI wants to trade next is paper-traded on live ticks and must
+     * win `virtual_confirmations` paper trades IN A ROW (default 2). A paper loss resets the count and switches contract
+     * (like real trades do), which then has to win its own run. Once a contract has passed, it is the one traded for
+     * real, on the same market, at the stake it would have used. Every paper result is also given to the learner.
+     */
+    private async _virtualHook(first: TCandidate, resume_stake: number) {
+        this.busy = true; // nothing else may place a real trade meanwhile
+        const hook_mode = this._hookMode();
+        // Hook rules: ONE paper trade before every live trade (win -> same contract live, loss -> opposite live).
+        const needed = hook_mode ? 1 : Math.min(MAX_VIRTUAL_CONFIRMATIONS, Math.max(1, Math.floor(this.config.virtual_confirmations ?? DEFAULT_VIRTUAL_CONFIRMATIONS)));
+        const opposite_mode = (this.config.virtual_mode ?? 'hook') === 'opposite';
+        let via_opposite = false; // the live trade is the OPPOSITE of the paper contract (so a trend contract may wait for its trend)
+        this.hooks?.onLog?.(
+            'info',
+            hook_mode
+                ? `Virtual hook: ${first.label} on ${first.symbol} is paper-traded first. A paper win buys ${first.label} for real; a paper loss buys the opposite (Even/Odd instead stays on paper until it wins) (stake ${resume_stake}).`
+                : opposite_mode
+                ? `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} is paper-traded; when a paper trade loses, the opposite contract is bought for real at stake ${resume_stake}.`
+                : `Virtual hook: real trading paused after a loss. ${first.label} on ${first.symbol} must win ${needed} paper trade${needed === 1 ? '' : 's'} in a row before it is traded for real again at stake ${resume_stake}.`
+        );
+        this._emit({ phase: 'virtual', virtual_state: 'start', virtual_losses: 0, virtual_wins: 0, virtual_needed: needed, symbol: first.symbol, label: first.label, contract_type: first.contract_type });
+        let candidate = first;
+        let losses = 0;
+        let wins = 0; // paper wins in a row for `candidate`
+        let failures = 0;
+        let trend_waits = 0;
+        let confirmed: TCandidate | null = null;
+        while (this.running) {
+            this._emit({
+                phase: 'virtual',
+                virtual_state: 'paper',
+                virtual_losses: losses,
+                virtual_wins: wins,
+                virtual_needed: needed,
+                symbol: candidate.symbol,
+                contract_type: candidate.contract_type,
+                label: candidate.label,
+            });
+            if (!(await this._trendOk(candidate))) {
+                if (!this.running) return;
+                trend_waits += 1;
+                if (trend_waits <= 20) {
+                    await sleep(1500);
+                    continue;
+                }
+                trend_waits = 0;
+                const other = this._pick(this.getSnapshots());
+                if (other) {
+                    candidate = other;
+                    wins = 0; // a different contract starts its own run
+                }
+                continue;
+            }
+            trend_waits = 0;
+            const result = await this._paperTrade(candidate);
+            if (!this.running) return;
+            if (result === null) {
+                failures += 1;
+                if (failures >= 3) break; // ticks are not arriving: do not stay paused forever
+                await sleep(1000);
+                continue;
+            }
+            failures = 0;
+            this.learner?.recordVirtual(candidate.contract_type, result); // the AI learns from its own paper trades too
+            wins = result ? wins + 1 : 0;
+            if (!result) losses += 1;
+            this._emit({
+                phase: 'virtual',
+                virtual_state: 'result',
+                virtual_losses: losses,
+                virtual_wins: wins,
+                virtual_needed: needed,
+                symbol: candidate.symbol,
+                contract_type: candidate.contract_type,
+                label: candidate.label,
+                result: result ? 'win' : 'loss',
+            });
+            if (hook_mode) {
+                if (!result && FOLLOW_HOOK_TYPES.has(candidate.contract_type)) {
+                    // Even/Odd follows the hook: a paper loss buys NOTHING live (and never the opposite). The same contract stays on paper
+                    // until it wins, then it is traded live. After too many paper losses in a row a fresh contract is picked and paper-tested.
+                    if (losses >= MAX_FOLLOW_PAPER_LOSSES) {
+                        this.hooks?.onLog?.('info', `Virtual hook: ${candidate.label} lost ${losses} paper trades in a row; picking a fresh contract to paper-test.`);
+                        this.hook_pending = true;
+                        break;
+                    }
+                    this.hooks?.onLog?.('info', `Virtual loss on ${candidate.label} (${candidate.symbol}): staying on paper until it wins, then trading it for real.`);
+                    continue;
+                }
+                if (!result) {
+                    // Rule 1: the paper trade lost, so the opposite contract is bought for real on the same market.
+                    confirmed = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
+                    confirmed = { ...confirmed, label: OPPOSITE_LABEL[confirmed.contract_type] ?? confirmed.label, basis: `Virtual hook: paper ${candidate.label} lost, buying the opposite.` };
+                    via_opposite = true;
+                    this.hooks?.onLog?.('info', `Virtual loss on ${candidate.label} (${candidate.symbol}): buying the opposite, ${confirmed.label}, for real.`);
+                    break;
+                }
+                if (wins >= needed) {
+                    // Rule 2: enough paper wins in a row, so the same contract is bought for real.
+                    confirmed = candidate;
+                    this.hooks?.onLog?.('success', `Virtual hook: ${candidate.label} on ${candidate.symbol} won ${wins} paper trade${wins === 1 ? '' : 's'} in a row: trading it for real now.`);
+                    break;
+                }
+                continue;
+            }
+            if (opposite_mode) {
+                if (!result) {
+                    // The paper trade lost: buy its OPPOSITE for real, same market, at the stake the AI would have used.
+                    confirmed = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
+                    confirmed = { ...confirmed, label: OPPOSITE_LABEL[confirmed.contract_type] ?? confirmed.label, basis: `Virtual hook: paper ${candidate.label} lost, buying the opposite.` };
+                    this.hooks?.onLog?.('info', `Virtual loss on ${candidate.label} (${candidate.symbol}): buying the opposite, ${confirmed.label}, for real.`);
+                    break;
+                }
+                if (wins >= MAX_OPPOSITE_PAPER_WINS) {
+                    this.hooks?.onLog?.('info', `Virtual hook: ${wins} paper wins in a row on ${candidate.label}; no loss to trade against. Picking a fresh contract.`);
+                    break;
+                }
+                this.hooks?.onLog?.('info', `Virtual win ${wins} on ${candidate.label} (${candidate.symbol}); still paper trading, waiting for a paper loss.`);
+                continue;
+            }
+            if (result) {
+                if (wins >= needed) {
+                    confirmed = candidate;
+                    this.hooks?.onLog?.('success', `Virtual hook: ${candidate.label} on ${candidate.symbol} won ${wins} paper trade${wins === 1 ? '' : 's'} in a row: trading it for real now.`);
+                    break;
+                }
+                this.hooks?.onLog?.('info', `Virtual win ${wins}/${needed} on ${candidate.label} (${candidate.symbol}); confirming again before going live.`);
+                continue; // same contract, same market: it has to pass again
+            }
+            this.hooks?.onLog?.('info', `Virtual loss #${losses} on ${candidate.label} (${candidate.symbol}); the count restarts on the next contract.`);
+            candidate = this._autoFlipTarget(candidate) ?? this._pick(this.getSnapshots()) ?? candidate;
+        }
+        this.flip_origin = null;
+        this.busy = false;
+        if (this.running) {
+            this._emit({ phase: 'virtual', virtual_state: 'end', virtual_losses: losses, virtual_wins: wins, virtual_needed: needed });
+            if (confirmed) {
+                this.hook_release = true;
+                this._enter(confirmed, resume_stake, opposite_mode || via_opposite ? 'flipped' : undefined);
+            }
+            else this._findAndEnter(resume_stake); // paper trading could not run: do not stay paused, pick fresh
+        }
+    }
+
+    private _enter(candidate: TCandidate, wanted_stake: number, tag?: TAutoPilotEvent['tag'], waits = 0) {
+        if (isBasketType(candidate.contract_type, this.config.both_sides)) {
+            // Only Ups + Only Downs fire together on the signal: no paper test, no trend wait, no entry-run wait (both sides are bought,
+            // so the direction does not matter). The pair is analysed on 2 ticks.
+            if (this.hook_pending) this.hooks?.onLog?.('info', 'Only Ups + Only Downs fire both sides straight away: no virtual hook, no trend wait.');
+            this.hook_pending = false;
+            this._enterNow(candidate, wanted_stake, tag);
+            return;
+        }
+        if (this.hook_pending) {
+            this.hook_pending = false;
+            if (PAPER_SUPPORTED.has(candidate.contract_type)) {
+                if (isTouch(candidate.contract_type)) {
+                    // Ask Deriv for a price first: no paper test (and no live buy) on a touch contract it would call "no return".
+                    this.busy = true;
+                    void this._probeTouch(candidate.symbol, candidate.contract_type).then(ok => {
+                        this.busy = false;
+                        if (!this.running) return;
+                        if (ok) {
+                            void this._virtualHook(candidate, wanted_stake);
+                        } else {
+                            this.hook_pending = true; // another contract is picked and paper-tested instead
+                            setTimeout(() => this._findAndEnter(wanted_stake, tag), 300);
+                        }
+                    });
+                    return;
+                }
+                void this._virtualHook(candidate, wanted_stake);
+                return;
+            }
+            this.hooks?.onLog?.('info', `Virtual hook skipped: ${candidate.label} cannot be paper-traded.`);
+        }
+        const stream_rule = this.config.follow_stream === true && followsStream(candidate.contract_type, candidate.prediction as number | undefined, [], 2, 1) !== null;
+        if (stream_rule) {
+            // Two-tick entry: wait on the live stream and buy the instant the matching run reaches its Nth tick (default: the third).
+            const target = Math.min(MAX_ENTRY_TICK, Math.max(MIN_ENTRY_TICK, Math.floor(this.config.entry_tick ?? DEFAULT_ENTRY_TICK)));
+            if (waits === 0) {
+                this.hooks?.onLog?.('info', `Waiting on ${candidate.symbol} for ${target - 1} matching ticks in a row, then buying ${candidate.label} on tick ${target}${this.hook_release ? ' (the virtual hook\'s decision)' : ''}.`);
+            }
+            this.busy = true;
+            void this._awaitEntryTick(candidate).then(async fired => {
+                const trend_ok = fired ? await this._trendOk(candidate) : false; // Rise/Fall also need the 1-tick chart's trend
+                this.busy = false;
+                if (!this.running) return;
+                if (fired && trend_ok) {
+                    this._enterNow(candidate, wanted_stake, tag);
+                    return;
+                }
+                // No entry found: either no matching run formed within the wait, or the run completed but Rise/Fall / Only Ups/Downs
+                // had no confirmed trend. SKIP this contract (nothing bought), set it aside, and look at the next one.
+                this.hooks?.onLog?.(
+                    'info',
+                    `No entry for ${candidate.label} on ${candidate.symbol} (${fired ? 'the run completed without a confirmed trend' : `no matching run in ${Math.min(MAX_ENTRY_WAIT_TICKS, Math.max(MIN_ENTRY_WAIT_TICKS, Math.floor(this.config.entry_wait_ticks ?? DEFAULT_ENTRY_WAIT_TICKS)))} ticks`}): skipping it for ${NO_ENTRY_SKIP_MS / 1000}s and picking another contract.`
+                );
+                this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + NO_ENTRY_SKIP_MS);
+                this.hook_release = false;
+                if (this._hookMode()) this.hook_pending = true; // a fresh contract is paper-tested before any real money
+                this._findAndEnter(wanted_stake, tag);
+            });
+            return;
+        }
+        if (!TREND_NEEDED[candidate.contract_type] && !stream_rule) {
+            this._enterNow(candidate, wanted_stake, tag);
+            return;
+        }
+        this.busy = true;
+        void Promise.all([this._trendOk(candidate), this._streamOk(candidate)]).then(([trend_ok, stream_ok]) => {
+            this.busy = false;
+            if (!this.running) return;
+            if (trend_ok && stream_ok) {
+                this._enterNow(candidate, wanted_stake, tag);
+                return;
+            }
+            // Waiting for the stream to line up is the point of the rule, so it waits in every mode (up to ~45 ticks).
+            const wait_limit = !stream_ok ? 45 : 20;
+            if ((!stream_ok || tag === 'flipped' || this._hookMode()) && waits < wait_limit) {
+                if (waits === 0) {
+                    const n = Math.min(MAX_FOLLOW_TICKS, Math.max(1, Math.floor(this.config.follow_ticks ?? DEFAULT_FOLLOW_TICKS)));
+                    this.hooks?.onLog?.(
+                        'info',
+                        !stream_ok
+                            ? `Waiting for the last ${n} tick${n === 1 ? '' : 's'} on ${candidate.symbol} to follow the same way (${candidate.label}) before buying.`
+                            : `Waiting for a ${TREND_NEEDED[candidate.contract_type] === 'bullish' ? 'higher-high' : 'lower-low'} trend on the 1-tick chart before ${candidate.label} on ${candidate.symbol}.`
+                    );
+                }
+                setTimeout(() => this._enter(candidate, wanted_stake, tag, waits + 1), !stream_ok ? 1000 : 1500);
+                return;
+            }
+            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 6000);
+            this.hook_release = false;
+            if (this._hookMode()) this.hook_pending = true; // a fresh contract is paper-tested before any real money
+            this._findAndEnter(wanted_stake, tag);
+        });
     }
 
     private _enterNow(candidate_in: TCandidate, wanted_stake_in: number, tag?: TAutoPilotEvent['tag']) {
@@ -1209,20 +1583,21 @@ export class AutoPilotEngine {
                 return;
             }
         }
-        if (this.config.basket_mode === true && BASKET_BASES.some(b => b.key === (candidate as { pair_key?: string }).pair_key)) {
-            this._enterBasket(candidate, wanted_stake_in, tag);
-            return;
-        }
-        // Quality gate: in 'Only trade a proven edge' mode NO live buy happens for a contract without a proven edge.
+        // Quality gate: in 'Only trade a proven edge' mode NO live buy happens for a contract without a proven edge, however it was
+        // picked (signal, virtual hook, opposite, recovery). Paper trading carries on at no cost and keeps adding evidence.
         if (this.learner?.mode === 'edge_gate' && !this.learner.isTradable(candidate.symbol, candidate.contract_type, (candidate as { bucket?: string }).bucket, candidate.duration_ticks)) {
+            this.hook_release = false;
             if (Date.now() - this.last_wait_emit > 30_000) {
                 this.last_wait_emit = Date.now();
-                this.hooks?.onLog?.('info', `Standing aside: ${candidate.label} has no proven edge over its payout, so no real money is staked.`);
-                this._emit({ phase: 'waiting', reason: 'no contract has a proven edge yet: standing aside' });
+                this.hooks?.onLog?.('info', `Standing aside: ${candidate.label} has no proven edge over its payout, so no real money is staked. Paper trading continues.`);
+                this._emit({ phase: 'waiting', reason: 'no contract has a proven edge yet: standing aside (paper trading only)' });
             }
+            if (this._hookMode()) this.hook_pending = true;
             setTimeout(() => this._findAndEnter(wanted_stake_in, tag), 4000);
             return;
         }
+        const from_hook = this.hook_release;
+        this.hook_release = false;
         // Capital protection: the first trades of a run never use more than the base stake.
         const protect = Math.max(0, Math.floor(this.config.protect_trades ?? 0));
         const wanted_stake = this.trade_count < protect ? Math.min(wanted_stake_in, this.config.stake) : wanted_stake_in;
@@ -1268,32 +1643,23 @@ export class AutoPilotEngine {
             this.hooks?.onLog?.('error', detail);
             markRefused(candidate.symbol, candidate.contract_type);
             if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+            if (this._hookMode()) this.hook_pending = true;
             setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
             return;
         }
         const tried_duration = Number(parameters.duration);
-        const pairs_only = this.config.pairs_only === true;
         // Both sides: the opposite contract is bought too, on the same market, same stake and same duration.
         let partner: TCandidate | null = null;
         let partner_parameters: Record<string, unknown> | null = null;
-        const overlap = (candidate as { pair_with?: TCandidate }).pair_with ?? null;
-        if (overlap) {
-            const live = this.connection.accountInfo?.balance;
-            if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
-                this.hooks?.onLog?.('info', `Pair skipped: two stakes of ${stake} ${this.currency} are more than the balance (${live.toFixed(2)}); buying ${candidate.label} alone.`);
-            } else {
-                try {
-                    partner_parameters = { ...buildTradeParameters(overlap, stake, this.currency), duration: tried_duration };
-                    partner = overlap;
-                } catch (err) {
-                    this.hooks?.onLog?.('info', `Pair skipped: ${err instanceof Error ? err.message : 'the second contract could not be built'}`);
-                }
-            }
-        } else if ((pairs_only || this.config.both_sides !== false) && bothSidesType(candidate.contract_type)) {
+        if (this.config.both_sides !== false && bothSidesType(candidate.contract_type)) {
             const opposite_type = FLIP_PARTNER[candidate.contract_type];
             const live = this.connection.accountInfo?.balance;
             if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
-                this.hooks?.onLog?.('info', `Both sides skipped: two stakes of ${stake} ${this.currency} are more than the balance (${live.toFixed(2)}).`);
+                // The basket is both sides or nothing: never trade one side of it alone.
+                this.hooks?.onLog?.('error', `Both sides need two stakes of ${stake} ${this.currency}, which is more than the balance (${live.toFixed(2)}). Stopping.`);
+                this.busy = false;
+                this.stop('balance is too low to fire both sides');
+                return;
             } else if (opposite_type) {
                 try {
                     const opposite: TCandidate = { ...candidate, prediction: opposite_type === 'DIGITOVER' ? 4 : opposite_type === 'DIGITUNDER' ? 5 : candidate.prediction, contract_type: opposite_type as TCandidate['contract_type'], label: OPPOSITE_LABEL[opposite_type] ?? opposite_type, basis: `Both sides: ${candidate.label} and ${OPPOSITE_LABEL[opposite_type] ?? opposite_type}.` };
@@ -1303,93 +1669,83 @@ export class AutoPilotEngine {
                     this.hooks?.onLog?.('info', `Both sides skipped: ${err instanceof Error ? err.message : 'the opposite contract could not be built'}`);
                 }
             }
-        }
-        if (pairs_only && !partner) {
-            // Pairs only: one leg alone is not the logic being tested. Nothing was sent to Deriv, so drop this signal.
-            this.busy = false;
-            if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
-            const live = this.connection.accountInfo?.balance;
-            if (typeof live === 'number' && Number.isFinite(live) && stake * 2 > live) {
-                this.hooks?.onLog?.('error', `A pair needs two stakes of ${stake} ${this.currency}, the balance is ${live.toFixed(2)}. Stopping.`);
-                this.stop('balance is too low for a pair of stakes');
+            if (!partner) {
+                // Nothing was sent: look for another contract rather than trading one side of a both-sides basket.
+                this.busy = false;
+                markRefused(candidate.symbol, candidate.contract_type);
+                if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
+                if (this._hookMode()) this.hook_pending = true;
+                setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
                 return;
             }
-            this.hooks?.onLog?.('info', `Pair on ${candidate.symbol} not bought: the second leg could not be built. Waiting for the next signal.`);
-            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
-            setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
-            return;
         }
         this.hooks?.onLog?.(
             'info',
             `Buying ${candidate.contract_type} on ${candidate.symbol}, ${tried_duration} tick(s), stake ${stake} ${this.currency}` +
                 (candidate.prediction !== undefined ? `, prediction ${candidate.prediction}` : '')
         );
-        // Straight to the buy: a single contract is bought at once (price = the stake is the most Deriv may charge, and a refusal comes back
-        // from the buy itself). Both sides: both legs are priced together first (a winning side must pay at least BOTH stakes), then both
-        // legs are bought together, so the second leg lands on the same tick as the first.
-        const buyLeg = async (params: Record<string, unknown>): Promise<string> => {
-            const t0 = Date.now();
-            const res = await this.connection.send({ buy: '1', price: stake, parameters: params });
-            this._noteBuy(Date.now() - t0);
-            const id = res?.buy?.contract_id;
-            if (!id) throw new Error('Buy did not return a contract id');
-            return id as string; // keep it exactly as Deriv sent it (a number): proposal_open_contract rejects a string contract_id
+        // Ask Deriv for a price first (the documented contracts_for -> proposal -> buy flow). A proposal
+        // costs nothing, so a bad duration/barrier/stake is caught here instead of as a failed buy, and a
+        // payout that cannot even cover the stake is never bought.
+        const checkQuote = (res: any) => {
+            const quote = res?.proposal;
+            if (!quote) throw new Error('Deriv returned no price for this contract');
+            const ask = Number(quote.ask_price);
+            const payout = Number(quote.payout);
+            if (ask > 0 && payout > 0 && payout / ask < MIN_PAYOUT_RATIO) {
+                throw Object.assign(new Error(`payout is only ${(payout / ask).toFixed(2)}x the stake`), { skip: true });
+            }
         };
-        const priced: Promise<void> =
-            partner && partner_parameters && !overlap && !pairs_only // in pairs-only mode both legs always go at once (no payout cover check); an overlap pair is not about a payout covering both stakes: no price check, both legs go at once
-                ? Promise.all([this.connection.send({ proposal: 1, ...parameters }), this.connection.send({ proposal: 1, ...partner_parameters })]).then(([a, b]) => {
-                      const need = Number((stake * 2).toFixed(2));
-                      const pay_a = Number(a?.proposal?.payout);
-                      const pay_b = Number(b?.proposal?.payout);
-                      if (!(pay_a >= need) || !(pay_b >= need)) {
-                          const low = Math.min(Number.isFinite(pay_a) ? pay_a : 0, Number.isFinite(pay_b) ? pay_b : 0);
-                          throw Object.assign(new Error(`both sides cost ${need.toFixed(2)} but a winning side would pay only ${low.toFixed(2)}`), { cover: true });
-                      }
-                  })
-                : Promise.resolve();
-        priced
-            .then(async () => {
-                if (!partner || !partner_parameters) {
-                    this._watch(candidate, stake, await buyLeg(parameters), tried_duration);
-                    return;
-                }
-                const [first, second] = await Promise.allSettled([buyLeg(parameters), buyLeg(partner_parameters)]);
-                if (first.status === 'rejected' && second.status === 'rejected') throw first.reason;
-                if (first.status === 'rejected' || second.status === 'rejected') {
-                    // Only one side got through: it runs alone.
-                    const alive = first.status === 'fulfilled' ? { c: candidate, id: first.value, lost: partner.label } : { c: partner, id: (second as PromiseFulfilledResult<string>).value, lost: candidate.label };
-                    this.hooks?.onLog?.('error', `Second side ${alive.lost} could not be bought. ${alive.c.label} runs alone.`);
-                    this._watch(alive.c, stake, alive.id, tried_duration);
-                    return;
-                }
+        const place = async () => {
+            if (!partner || !partner_parameters) {
+                checkQuote(await this.connection.send({ proposal: 1, ...parameters }));
+                const res = await this.connection.send({ buy: '1', price: stake, parameters });
+                const contract_id = res?.buy?.contract_id;
+                if (!contract_id) throw new Error('Buy did not return a contract id');
+                this._watch(candidate, stake, contract_id, tried_duration);
+                return;
+            }
+            // Both sides (Only Ups + Only Downs): both prices are asked for together, and if both are fine BOTH buys leave in the same
+            // instant. A bad price on either side buys neither.
+            const [quote_a, quote_b] = await Promise.all([
+                this.connection.send({ proposal: 1, ...parameters }),
+                this.connection.send({ proposal: 1, ...partner_parameters }),
+            ]);
+            checkQuote(quote_a);
+            checkQuote(quote_b);
+            const [first, second] = await Promise.allSettled([
+                this.connection.send({ buy: '1', price: stake, parameters }),
+                this.connection.send({ buy: '1', price: stake, parameters: partner_parameters }),
+            ]);
+            const first_id: string | null = first.status === 'fulfilled' ? (first.value?.buy?.contract_id ?? null) : null;
+            const second_id: string | null = second.status === 'fulfilled' ? (second.value?.buy?.contract_id ?? null) : null;
+            if (!first_id && !second_id) {
+                if (first.status === 'rejected') throw first.reason;
+                if (second.status === 'rejected') throw second.reason;
+                throw new Error('Buy did not return a contract id');
+            }
+            if (first_id && second_id) {
                 this.ladder_spent = Number((this.ladder_spent + stake).toFixed(2));
-                this.hooks?.onLog?.('info', `${overlap ? 'Overlap pair' : 'Both sides'} fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, stake ${stake} each.`);
+                this.hooks?.onLog?.('info', `Both sides fired together: ${candidate.label} + ${partner.label} on ${candidate.symbol}, ${tried_duration} ticks, stake ${stake} each.`);
                 const pair: TPair = { pending: 2, profit: 0, stake: Number((stake * 2).toFixed(2)) };
-                this._watch(candidate, stake, first.value, tried_duration, pair);
-                this._watch(partner, stake, second.value, tried_duration, pair);
-            })
+                this._watch(candidate, stake, first_id, tried_duration, pair);
+                this._watch(partner, stake, second_id, tried_duration, pair);
+                return;
+            }
+            // One side was refused after the other went through: the side that is open is still tracked, on its own.
+            const open_side = first_id ? candidate : partner;
+            const refused = second_id ? candidate : partner;
+            const why = (first_id ? second : first) as PromiseSettledResult<unknown>;
+            this.hooks?.onLog?.('error', `${refused.label} could not be bought (${why.status === 'rejected' ? String((why.reason as Error)?.message ?? why.reason) : 'no contract id'}). ${open_side.label} runs alone.`);
+            this._watch(open_side, stake, (first_id ?? second_id) as string, tried_duration);
+        };
+        place()
             .catch(err => {
                 this.busy = false;
                 const raw = String(err?.message || 'Failed to place trade');
                 if (/dropped/i.test(raw)) this.hooks?.onLog?.('error', 'The connection dropped while buying. Check Transactions: that contract may still be open.');
                 const detail = `${candidate.contract_type} on ${candidate.symbol} for ${tried_duration} tick(s): ${raw}`;
                 this.hooks?.onLog?.('error', detail);
-                // Both sides whose winning payout would not cover the two stakes: not worth buying right now. Rest this contract
-                // briefly (payouts move) and look for the next signal; nothing is marked as refused.
-                if (typeof err?.rest === 'number') {
-                    this.hooks?.onLog?.('info', `Skipped: ${raw}. Resting that contract and waiting for the next signal.`);
-                    this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + err.rest);
-                    if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
-                    setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
-                    return;
-                }
-                if (err?.cover === true) {
-                    this.hooks?.onLog?.('info', `Both sides skipped: ${raw}. Waiting for the next signal.`);
-                    this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 60_000);
-                    if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
-                    setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
-                    return;
-                }
                 // Touch / No Touch: Deriv refused 5 ticks here, so use 10 ticks with the same 0.5 barrier before giving up.
                 const touch_key = `${candidate.symbol}|${candidate.contract_type}`;
                 if (isTouch(candidate.contract_type) && tried_duration === 5 && !touch_ticks.has(touch_key) && /duration|tick|barrier|offered|no return|offers no/i.test(raw)) {
@@ -1408,6 +1764,7 @@ export class AutoPilotEngine {
                     this.hooks?.onLog?.('info', `Skipping ${candidate.symbol} ${candidate.contract_type} for 6 hours and trying another.`);
                     if (this.step === 1) this.ladder_spent = 0; else this.ladder_spent = Math.max(0, this.ladder_spent - stake);
                     // Search again. (Before this, the engine marked the combination and then went idle.)
+                    if (this._hookMode()) this.hook_pending = true;
                     setTimeout(() => this._findAndEnter(wanted_stake, tag), 500);
                     return;
                 }
@@ -1416,147 +1773,10 @@ export class AutoPilotEngine {
             });
     }
 
-    /**
-     * The 3-contract basket. All three `buy` requests are sent in the same event-loop tick with Promise.all. Each buy is wrapped so a refusal
-     * of one comes back as a value instead of rejecting the whole Promise.all: a contract that DID get bought is never left unwatched.
-     */
-    private _enterBasket(candidate: TCandidate, wanted_total: number, tag?: TAutoPilotEvent['tag']) {
-        const meta = candidate as { pair_key?: string; trend?: string; momentum?: boolean };
-        const setup = basketSetup(meta.pair_key, meta.trend, meta.momentum === true);
-        const retry = (ms: number) => setTimeout(() => this._findAndEnter(wanted_total, tag), ms);
-        if (!setup) {
-            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
-            retry(500);
-            return;
-        }
-        // The backend names the setup (1-16) it judged. If the AI would build a different one, the signal and the basket do not match: do not buy.
-        const announced = (candidate as { basket_setup?: number | null }).basket_setup;
-        if (announced !== undefined && announced !== setup.number) {
-            this.hooks?.onLog?.('error', `Basket skipped on ${candidate.symbol}: the backend judged setup ${announced} but this signal builds setup ${setup.number}.`);
-            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
-            retry(500);
-            return;
-        }
-        const min_total = basketMinTotal(setup.legs);
-        const total = Number(Math.max(wanted_total, min_total).toFixed(2));
-        if (total > wanted_total && this.step === 1) this.hooks?.onLog?.('info', `Basket total ${wanted_total} is too small for a ${Math.round(Math.min(...setup.legs.map(l => l.share)) * 100)}% contract (Deriv's minimum stake is ${MIN_LEG_STAKE}): using ${total} ${this.currency}.`);
-        const live_balance = this.connection.accountInfo?.balance;
-        if (typeof live_balance === 'number' && Number.isFinite(live_balance) && total > live_balance) {
-            this.hooks?.onLog?.('error', `The basket total (${total} ${this.currency}) is more than the account balance (${live_balance.toFixed(2)}). Stopping.`);
-            this.stop('balance is too low for the basket');
-            return;
-        }
-        const stakes = basketStakes(total, setup.legs);
-        let built: { leg: TBasketLeg; stake: number; cand: TCandidate; params: Record<string, unknown> }[];
-        try {
-            built = setup.legs.map((leg, i) => {
-                const cand = {
-                    ...candidate,
-                    contract_type: leg.type,
-                    label: leg.label,
-                    duration_ticks: leg.ticks,
-                    prediction: leg.type === 'DIGITOVER' ? 4 : leg.type === 'DIGITUNDER' ? 5 : undefined,
-                    pair_with: undefined,
-                    basis: `Basket setup ${setup.number}: ${setup.base} + ${setup.legs[2].label} (${setup.direction} ${setup.regime}).`,
-                } as unknown as TCandidate;
-                return { leg, stake: stakes[i], cand, params: buildTradeParameters(cand, stakes[i], this.currency) };
-            });
-        } catch (err) {
-            // Not all three contracts can be built on this market (one is not offered): nothing was sent, no partial basket.
-            const detail = err instanceof Error ? err.message : 'Could not build the basket';
-            this.hooks?.onLog?.('info', `Basket skipped on ${candidate.symbol}: ${detail}`);
-            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
-            retry(500);
-            return;
-        }
-        this.busy = true;
-        this.lastCandidate = candidate;
-        this.last_live_at = Date.now();
-        this.entry_tag = tag;
-        this._emit({ phase: 'entering', symbol: candidate.symbol, contract_type: candidate.contract_type, label: `Setup ${setup.number}: ${setup.base} + ${setup.legs[2].label}`, confidence: candidate.confidence, stake: total, tag });
-        this.hooks?.onLog?.('info', `Basket setup ${setup.number} on ${candidate.symbol}: ${built.map(b => `${b.leg.label} ${b.stake}`).join(' + ')} = ${total} ${this.currency} (${setup.direction} ${setup.regime}, blind spot ${setup.blind}).`);
-        const buyLeg = async (b: (typeof built)[number]) => {
-            const t0 = Date.now();
-            try {
-                const res = await this.connection.send({ buy: '1', price: b.stake, parameters: b.params });
-                this._noteBuy(Date.now() - t0);
-                const id = res?.buy?.contract_id;
-                if (!id) throw new Error('Buy did not return a contract id');
-                return { ok: true as const, b, id: id as string };
-            } catch (err) {
-                return { ok: false as const, b, err };
-            }
-        };
-        // The three sends start synchronously inside this one call: same event-loop tick.
-        Promise.all(built.map(buyLeg)).then(results => {
-            const bought = results.filter((r): r is Extract<(typeof results)[number], { ok: true }> => r.ok);
-            const failed = results.filter(r => !r.ok);
-            if (!bought.length) {
-                const raw = String((failed[0] as { err?: { message?: string } })?.err?.message || 'Failed to place the basket');
-                this.busy = false;
-                this.hooks?.onLog?.('error', `Basket on ${candidate.symbol} not bought: ${raw}`);
-                if (REFUSAL_PATTERN.test(raw) && this.refused < 8) {
-                    this.refused += 1;
-                    this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
-                    retry(500);
-                    return;
-                }
-                this._emit({ phase: 'error', symbol: candidate.symbol, error: raw });
-                this.stop('trade placement failed');
-                return;
-            }
-            for (const f of failed) this.hooks?.onLog?.('error', `${f.b.leg.label} could not be bought (${String((f as { err?: { message?: string } }).err?.message ?? 'refused')}): the basket runs with ${bought.length} of 3 contracts.`);
-            const pair: TPair = { pending: bought.length, profit: 0, stake: Number(bought.reduce((a, r) => a + r.b.stake, 0).toFixed(2)), basket: true, returned: 0, legs: bought.length, intended: wanted_total };
-            this.ladder_spent = Number((this.ladder_spent + pair.stake).toFixed(2));
-            for (const r of bought) this._watch(r.b.cand, r.b.stake, r.id, r.b.leg.ticks, pair);
-        });
-    }
-
-    /** The basket's stake machine, run when the last of its contracts has settled. */
-    private _basketNext(pair: TPair, candidate: TCandidate, net_profit: number, tag?: TAutoPilotEvent['tag']) {
-        const base = this.config.stake;
-        const intended = pair.intended ?? base;
-        if (net_profit >= 0) {
-            // Net profit (or break-even): back to the baseline total stake.
-            this.lock = null;
-            if (this.step > 1 || intended !== base) this.hooks?.onLog?.('success', `Basket net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)}: total stake back to the base ${base}.`);
-            this.step = 1;
-            this._findAndEnter(base);
-            return;
-        }
-        this._holdMarket(candidate); // a net loss is recovered on the same market and pair (if enabled)
-        if ((pair.returned ?? 0) > 0) {
-            // Partial loss: some contracts paid but the net is negative. The total stake stays flat.
-            this.hooks?.onLog?.('info', `Partial loss (${pair.returned} of ${pair.legs} contracts paid, net ${net_profit.toFixed(2)}): total stake stays at ${intended}.`);
-            this._findAndEnter(intended);
-            return;
-        }
-        // Full sweep: every contract returned nothing. Total stake x multiplier for the next signal.
-        const mult = Math.max(1, this.config.martingale_multiplier ?? DEFAULT_LOSS_MULTIPLIER);
-        const max_steps = Math.max(1, Math.floor(this.config.max_steps ?? 4));
-        const next = Number((intended * mult).toFixed(2));
-        const room = Math.abs(this.config.stop_loss) + this.total_profit;
-        if (this.step >= max_steps) {
-            this.hooks?.onLog?.('info', `${this.step} full-sweep losses in a row: the ladder is full, total stake goes back to the base ${base}.`);
-            this.lock = null;
-        } else if (next > room) {
-            this.hooks?.onLog?.('info', `Next total stake ${next} is more than the stop loss still allows (${room.toFixed(2)}): back to the base ${base}.`);
-        } else {
-            this.step += 1;
-            this.hooks?.onLog?.('info', `Full sweep (all ${pair.legs} contracts returned 0): total stake x${mult} -> ${next} (step ${this.step} of ${max_steps}).`);
-            this._findAndEnter(next, 'recovery');
-            return;
-        }
-        this.step = 1;
-        this._findAndEnter(base);
-    }
-
     private _watch(candidate: TCandidate, stake: number, contract_id: string, duration: number, pair?: TPair) {
         const entry_step = this.step;
         const entry_tag = this.entry_tag;
-        // Deriv validates contract_id as an integer; ids from Deriv are numbers, so a stringified one is turned back into a number.
-        const cid = Number.isFinite(Number(contract_id)) ? Number(contract_id) : contract_id;
-        const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id: cid }, (data, err) => {
+        const sub_id = this.connection.subscribe({ proposal_open_contract: 1, contract_id }, (data, err) => {
             if (err) {
                 this.busy = false;
                 this._emit({ phase: 'error', symbol: candidate.symbol, error: err.message });
@@ -1571,8 +1791,7 @@ export class AutoPilotEngine {
             this.connection.unsubscribe(sub_id);
             const profit = Number(contract.profit ?? 0);
             const won = profit > 0;
-            const ticks = describeTicks(candidate, contract as Record<string, unknown>);
-            this.hooks?.onLog?.(won ? 'success' : 'error', `${won ? 'Won' : 'Lost'} ${Math.abs(profit).toFixed(2)} ${this.currency} on ${candidate.symbol} ${candidate.contract_type}: ${ticks.text}`);
+            this.hooks?.onLog?.(won ? 'success' : 'error', `${won ? 'Won' : 'Lost'} ${Math.abs(profit).toFixed(2)} ${this.currency} on ${candidate.symbol} ${candidate.contract_type}`);
             if (this.learner && this.learner.mode !== 'off') {
                 this.learner.record({
                     symbol: candidate.symbol,
@@ -1600,13 +1819,10 @@ export class AutoPilotEngine {
                 duration_ticks: duration,
                 step: entry_step,
                 base_stake: this.config.stake,
-                mode: stakeMode(this.config.recovery_mode),
+                mode: this.config.recovery_mode ?? 'reverse',
                 confidence: candidate.confidence,
                 strategy: (candidate as { strategy?: string }).strategy,
                 tag: entry_tag,
-                signal_ticks: ticks.signal,
-                entry_tick: ticks.entry,
-                exit_tick: ticks.exit,
             });
 
             this._emit({
@@ -1622,13 +1838,11 @@ export class AutoPilotEngine {
             let net_stake = stake;
             if (pair) {
                 pair.profit = Number((pair.profit + profit).toFixed(2));
-                if (pair.basket && Number(contract.sell_price ?? bought + profit) > 0) pair.returned = (pair.returned ?? 0) + 1; // this contract paid something back
                 pair.pending -= 1;
                 if (pair.pending > 0) return; // still waiting for the other side (busy stays on)
                 net_profit = pair.profit;
                 net_stake = pair.stake;
-                if (pair.basket) this.hooks?.onLog?.(net_profit >= 0 ? 'success' : 'error', `Basket closed: net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)} ${this.currency} on ${candidate.symbol} (${pair.returned} of ${pair.legs} contracts paid).`);
-                else this.hooks?.onLog?.(net_profit > 0 ? 'success' : 'error', `Both sides closed: net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)} ${this.currency} on ${candidate.symbol}.`);
+                this.hooks?.onLog?.(net_profit > 0 ? 'success' : 'error', `Both sides closed: net ${net_profit >= 0 ? '+' : ''}${net_profit.toFixed(2)} ${this.currency} on ${candidate.symbol}.`);
             }
             const net_won = net_profit > 0;
 
@@ -1650,20 +1864,18 @@ export class AutoPilotEngine {
                 return;
             }
 
-            if (pair?.basket) {
-                this._basketNext(pair, candidate, net_profit, entry_tag);
-                return;
-            }
-            const mode = stakeMode(this.config.recovery_mode);
+            const mode = this.config.recovery_mode ?? 'reverse';
             const base_stake = this.config.stake;
 
             if (net_won) {
                 this.consecutive_losses = 0;
-                this.lock = null; // a win frees the AI to take the best entry on any market
-                const next = (next_stake: number, tag?: TAutoPilotEvent['tag']) => this._findAndEnter(next_stake, tag);
+                this.flip_origin = null; // a win ends any auto-flip sequence: next entry is a fresh pick
+                const hook = this._hookMode();
+                this.hook_pending = hook; // hook rules: even after a live win, the next live trade is paper-tested first
+                // Hook rules: the same contract on the same market is tested on paper again, then bought live if the paper trade wins.
+                const next = (next_stake: number, tag?: TAutoPilotEvent['tag']) =>
+                    hook ? this._hookNext(candidate, next_stake, tag) : this._findAndEnter(next_stake, tag);
                 if (mode !== 'reverse') {
-                    // Martingale and flat: a win NEVER raises the stake. After a loss ladder the stake goes back to the base stake.
-                    if (mode === 'martingale' && this.step > 1) this.hooks?.onLog?.('success', `Win: stake goes back to the base stake ${base_stake}.`);
                     this.step = 1;
                     next(base_stake);
                     return;
@@ -1689,36 +1901,98 @@ export class AutoPilotEngine {
             }
 
             // ---- a loss ----
+            const hook_rules = this._hookMode();
+            this.hook_pending = !!this.config.virtual_hook; // the next entry is paper-traded first
             this.win_streak = 0;
             this.streak_profit = 0;
             this.consecutive_losses += 1;
-            this._holdMarket(candidate);
+            const must_switch = this.consecutive_losses >= SWITCH_AFTER_LOSSES;
+            if (must_switch) this.consecutive_losses = 0; // re-arm: the next switch is after 2 more losses
 
-            if (mode === 'martingale') {
-                // Martingale on loss only: next stake = the stake that just lost x the multiplier (default 1.5), at most max_steps in a row.
-                const per = pair ? 2 : 1;
-                const mult = Math.max(1, this.config.martingale_multiplier ?? DEFAULT_LOSS_MULTIPLIER);
-                const max_steps = Math.max(1, Math.floor(this.config.max_steps ?? 4));
-                const next_stake = Number(Math.max(base_stake, (net_stake / per) * mult).toFixed(2));
-                const room = Math.abs(this.config.stop_loss) + this.total_profit; // what the stop loss still allows
-                if (this.step >= max_steps) {
-                    this.hooks?.onLog?.('info', `${this.step} losses in a row: the ladder is full, stake goes back to the base stake ${base_stake}.`);
-                    this.lock = null;
-                } else if (next_stake * per > room) {
-                    this.hooks?.onLog?.('info', `Next stake ${next_stake} x${per} is more than the stop loss still allows (${room.toFixed(2)}): back to the base stake ${base_stake}.`);
-                } else {
-                    this.step += 1;
-                    this.hooks?.onLog?.('info', `Loss: stake x${mult} -> ${next_stake} (step ${this.step} of ${max_steps}).`);
-                    this._findAndEnter(next_stake, 'recovery');
+            // Switch to a different contract right now, instead of waiting for the market to turn.
+            const switchTo = (next_stake: number): boolean => {
+                // Hook rules: a live loss never flips or switches contract. It goes back to paper trading (the hook decides what comes next).
+                if (hook_rules) return false;
+                // Auto flip (the owner's pairs): loss -> partner contract, next loss -> back to the original.
+                const target = this._autoFlipTarget(candidate);
+                if (target) {
+                    this.hooks?.onLog?.('info', `Loss on ${candidate.label}: auto flip to ${target.label} on ${target.symbol}.`);
+                    this._enter(target, next_stake, 'flipped');
+                    return true;
+                }
+                if (!must_switch) return false;
+                const alt = this._pickSwitch(candidate);
+                if (!alt) {
+                    this.hooks?.onLog?.('info', `${SWITCH_AFTER_LOSSES} losses in a row on ${candidate.contract_type}, but no other contract is tradable right now.`);
+                    return false;
+                }
+                this.hooks?.onLog?.('info', `${SWITCH_AFTER_LOSSES} losses in a row on ${candidate.contract_type}: switching to ${alt.contract_type} on ${alt.symbol}.`);
+                this._enter(alt, next_stake, 'switched');
+                return true;
+            };
+
+            if (mode === 'reverse' || mode === 'flat') {
+                // The stake does NOT go up after a loss: back to the base stake.
+                this.step = 1;
+                if (switchTo(base_stake)) return;
+                if (hook_rules) {
+                    this._hookNext(candidate, base_stake); // paper-test first (the next ticked contract, or the same one)
                     return;
                 }
-                this.step = 1;
                 this._findAndEnter(base_stake);
                 return;
             }
-            // Reverse martingale / flat: the stake does NOT go up after a loss: back to the base stake, and the next signal is bought as it arrives.
-            this.step = 1;
-            this._findAndEnter(base_stake);
+
+            // Recovery stake: win back the whole ladder plus one base stake, at the payout this contract showed.
+            const recover = this.config.recover_losses === true && mode === 'martingale';
+            const shown_ratio = Number(contract.payout) / Number(contract.buy_price) - 1;
+            const dropLadder = (why: string) => {
+                // The ladder is out of steps or budget: accept the loss, back to the base stake, keep trading (the stop loss still ends the run).
+                this.hooks?.onLog?.('info', `Recovery ladder dropped (${why}): ${this.ladder_spent.toFixed(2)} ${this.currency} accepted as a loss, stake back to ${base_stake}.`);
+                this.step = 1;
+                this.ladder_spent = 0;
+                if (hook_rules) this._hookNext(candidate, base_stake);
+                else this._findAndEnter(base_stake);
+            };
+            if (this.step >= this.config.max_steps) {
+                if (recover) {
+                    dropLadder(`${this.config.max_steps} steps lost`);
+                    return;
+                }
+                this.stop('max recovery steps reached');
+                return;
+            }
+
+            const next_stake = recover
+                ? recoveryStake(this.ladder_spent, base_stake, shown_ratio)
+                : Number((net_stake / (pair ? 2 : 1) * this.config.martingale_multiplier).toFixed(2));
+            // Ladder budget: the whole recovery run may risk at most stop_loss in total.
+            if (this.ladder_spent + next_stake > Math.abs(this.config.stop_loss)) {
+                if (recover) {
+                    dropLadder('the next stake would pass the stop-loss budget');
+                    return;
+                }
+                this.stop('recovery ladder would exceed the stop-loss budget');
+                return;
+            }
+            if (recover) this.hooks?.onLog?.('info', `Recovery stake ${next_stake} ${this.currency}: wins back ${this.ladder_spent.toFixed(2)} lost plus one base stake.`);
+            this.step += 1;
+            if (switchTo(next_stake)) return;
+            if (hook_rules) {
+                this._hookNext(candidate, next_stake);
+                return;
+            }
+            if (mode === 'martingale') {
+                this._enter(candidate, next_stake); // same contract, same side, bigger stake
+                return;
+            }
+            const flip = pickFlipCandidate(this.getSnapshots(), candidate.symbol, candidate);
+            if (isBlocked(this.hooks?.gate?.(), flip.symbol, flip.contract_type, (flip as { strategy?: string }).strategy)) {
+                this.hooks?.onLog?.('info', `The opposite side (${flip.contract_type}) is skipped: its own results are clearly negative. Picking another contract.`);
+                this._findAndEnter(next_stake);
+                return;
+            }
+            this._enter(flip, next_stake, 'flipped');
         });
     }
 }

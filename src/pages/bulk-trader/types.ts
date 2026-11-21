@@ -52,6 +52,11 @@ export type TStrategyConfig = {
     barrier_offset?: number;
     /** Multipliers only: the multiplier (x). Blank = pick automatically from what Deriv offers for the market. */
     mult_value?: number;
+    /**
+     * Strategies that share this id are ONE basket: they buy at the same instant (the Only Ups + Only Downs pair), never wait for a
+     * trend direction, never auto-flip, and stop together. The stop loss / take profit then apply to the basket's combined result.
+     */
+    sync_group?: string;
 };
 
 export type TStrategyStatus = {

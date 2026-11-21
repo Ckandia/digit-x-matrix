@@ -27,7 +27,6 @@ export function attachSignalHub(httpServer, marketFeed, { path = '/ws/signals', 
         ws.send(
             JSON.stringify({
                 type: 'snapshot',
-                ts: Date.now(),
                 data: marketFeed.getAllSnapshots(),
             })
         );
@@ -48,7 +47,6 @@ export function attachSignalHub(httpServer, marketFeed, { path = '/ws/signals', 
             if (!snapshot) return;
             const payload = JSON.stringify({
                 type: 'update',
-                ts: Date.now(), // the server's clock when the frame left: the app measures how late frames arrive (slow internet)
                 symbol,
                 data: snapshot,
             });

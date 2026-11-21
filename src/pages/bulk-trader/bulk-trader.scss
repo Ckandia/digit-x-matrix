@@ -673,3 +673,14 @@
     border-radius: 6px;
     padding: 6px 10px;
 }
+
+.bulk-trader__basket-note {
+    margin: 8px 0 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 190, 80, 0.35);
+    background: rgba(255, 190, 80, 0.08);
+    font-size: 12px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}

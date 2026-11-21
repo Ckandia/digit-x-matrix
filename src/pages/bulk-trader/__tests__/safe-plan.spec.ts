@@ -4,7 +4,9 @@ import {
     EXPECTED_LOSS_PER_STAKE,
     MIN_STAKE,
     planRun,
+    planMartingale,
     ALL_FAMILY_KEYS,
+    MARTINGALE_STOP_LOSS_SHARE,
     PLAN_STOP_LOSS_SHARE,
     SAFE_FAMILY_KEYS,
     SPREAD_PER_STAKE,
@@ -69,22 +71,25 @@ describe('24-hour run plan', () => {
     });
 });
 
-describe('24-hour defaults (no recovery ladder)', () => {
-    it('presets use the loss-only martingale (x1.5), the run-plan base stake, no pacing and every contract family', () => {
+describe('24-hour defaults (recovery)', () => {
+    it('presets use the recovery martingale, a ladder-sized base stake, every contract and the entry reader', () => {
         const c = buildConfigFromPreset('moderate', 10000);
         expect(c.recovery_mode).toBe('martingale');
-        expect(c.stake).toBe(planRun(c.stop_loss).stake);
-        expect(c.max_trades_per_hour).toBe(0); // a signal is bought the next tick, not when a timer allows
+        expect(c.recover_losses).toBe(true);
+        expect(c.stake).toBe(planMartingale(c.stop_loss, c.max_steps).stake);
         expect(c.contract_families).toEqual(ALL_FAMILY_KEYS);
-        expect(ALL_FAMILY_KEYS).toEqual(['even_odd', 'over_under', 'rise_fall', 'only_ups_downs']); // Touch / No Touch are gone
+        expect(c.read_entries).toBe(true);
         expect(c.protect_trades).toBe(0);
-        expect(c.both_sides).toBe(true);
-        expect('recover_losses' in c).toBe(false);
+        expect(c.both_sides).toBe(true); // applies only to Only Ups / Only Downs, which the default families exclude
         expect(SAFE_FAMILY_KEYS).toEqual(['even_odd', 'over_under']);
     });
-});
 
-let rid = 0; // every read of a signal gets a fresh run id
+    it('a full failed ladder fits inside the stop-loss share, so one bad run cannot reach the stop loss alone', () => {
+        const c = buildConfigFromPreset('moderate', 10000);
+        const plan = planMartingale(c.stop_loss, c.max_steps);
+        expect(plan.worst_ladder).toBeLessThanOrEqual(c.stop_loss * MARTINGALE_STOP_LOSS_SHARE + 1);
+    });
+});
 
 describe('pacing: max live trades per hour', () => {
     class Conn {
@@ -119,11 +124,11 @@ describe('pacing: max live trades per hour', () => {
         buys_ = () => this.sent.filter(r => r.buy);
     }
     const snapshots: TSnapshotMap = {
-        R_PACE: { stats: {} as never, signals: [{ family: 'run_bias', strategy: 'run_bias', entry: true, contract_type: 'DIGITEVEN', label: 'Even', confidence: 90, basis: '', get run_id() { return ++rid; } } as never] },
+        R_PACE: { stats: {} as never, signals: [{ family: 'digits', contract_type: 'DIGITEVEN', label: 'Even', confidence: 90, basis: '' } as never] },
     };
     const make = (per_hour: number) => {
         const conn = new Conn();
-        const config: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 1.2, max_steps: 5, stop_loss: 10000, take_profit: 10000, protect_trades: 0, max_trades_per_hour: per_hour };
+        const config: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 1.2, max_steps: 5, stop_loss: 10000, take_profit: 10000, auto_flip: false, protect_trades: 0, virtual_hook: false, follow_stream: false, max_trades_per_hour: per_hour };
         const engine = new AutoPilotEngine(conn as never, 'USD', config, () => snapshots, () => undefined, new LearningEngine(`pace-${Math.random()}`, 'learn'));
         return { conn, engine };
     };
