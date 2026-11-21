@@ -1,5 +1,3 @@
-> Update (Nov 2026): Only Ups / Only Downs now fire together as one both-sides basket with no trend wait (see FIXES-AND-SETUP.md). Older notes below about them being trend-gated no longer apply.
-
 # Fix: "This contract offers no return" (October 2026)
 
 - Cause: Deriv prices a Touch / No Touch with a 0.5 barrier at almost no profit when the barrier is far (No Touch) or very near (Touch) for a quiet market

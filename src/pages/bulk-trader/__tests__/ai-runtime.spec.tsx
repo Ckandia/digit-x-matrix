@@ -46,7 +46,7 @@ const fakeConnection = (loginid = 'VRTC1') =>
         refreshBalance: jest.fn().mockResolvedValue(1000),
     }) as never;
 
-const fakeEngine = (running = true) => ({ isRunning: running, stop: jest.fn() }) as never;
+const fakeEngine = (running = true) => ({ isRunning: running, stop: jest.fn(), signalReceived: jest.fn() }) as never; // signalReceived: the panel nudges a waiting AI on every new snapshot
 
 beforeEach(() => {
     mockConnect.mockResolvedValue({ authorize: { loginid: 'VRTC1', currency: 'USD', balance: 1000, type: 'demo' } });

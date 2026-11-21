@@ -18,7 +18,7 @@ const shortName = (symbol: string) => symbol.replace(/^1HZ(\d+)V$/, 'V$1 (1s)');
 
 /**
  * The backend's two-tick scan: for every 1-second market, how often each contract's pattern showed up on two consecutive ticks
- * (% of the last ~500 ticks' two-tick windows). Cells marked "above chance" are the ones the AI may paper-test through the virtual hook.
+ * (% of the last ~500 ticks' two-tick windows). Cells marked "above chance" show up more often than the market's own tick rates would give.
  */
 export const PairFrequencyCard = ({ snapshots }: { snapshots: TSnapshotMap }) => {
     const symbols = Object.keys(snapshots)
@@ -68,7 +68,7 @@ export const PairFrequencyCard = ({ snapshots }: { snapshots: TSnapshotMap }) =>
                     </div>
                     <div>
                         {localize(
-                            'Even/Odd/Over 4/Under 5: both of the two ticks follow the pattern. Rise/Fall: the second tick ends above/below the entry. Only Up/Down: both ticks rise/fall. Touch/No Touch: the price does/does not reach +0.5 within the two ticks. Green = clearly above what chance alone gives; the AI paper-tests those through the virtual hook and trades live only on a paper win.'
+                            'Even/Odd/Over 4/Under 5: both of the two ticks follow the pattern. Rise/Fall: the second tick ends above/below the entry. Only Up/Down: both ticks rise/fall. Touch/No Touch: the price does/does not reach +0.5 within the two ticks. Green = clearly above what chance alone gives.'
                         )}
                     </div>
                 </>

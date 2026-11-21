@@ -26,19 +26,18 @@ assert.deepEqual([st.runs, st.ticks_in_runs, st.longest, st.current], [2, 7, 4, 
 st = runStats(flags10, 2);
 assert.deepEqual([st.runs, st.ticks_in_runs], [3, 9]);
 
-// a run fires on its 2-tick level (fast rule: 2 consecutive ticks + the digit frequency), once per run; an old run does not fire
+// a run fires at 2 ticks AND at 3 ticks (two different run ids), never twice on the same level; an old run does not fire
 const biasedEven = [];
 for (let i = 0; i < 40; i++) biasedEven.push(2, 4, 6, 8, 0, 1); // long even runs (and 0 counts as even), a single odd between; Even wins after every replay
 const at = (breaker, digits) => computeRunSignals(computeRunBias(px([...biasedEven, breaker, ...digits]), 2), 'T');
-const entries = sigs => sigs.filter(s => s.entry && s.contract_type === 'DIGITEVEN' && !s.pair_types); // the single Even contract (a pair that starts with Even is a different signal)
+const entries = sigs => sigs.filter(s => s.entry && s.contract_type === 'DIGITEVEN');
 const two = entries(at(1, [2, 4]));
 assert.equal(two.length, 1, 'level 2 fires on the second tick of the run');
 assert.equal(two[0].run.min_run, 2);
 const three = entries(at(1, [2, 4, 6]));
 const levelsFiring = three.map(s => s.run.min_run).sort();
-assert.deepEqual(levelsFiring, [2], 'the FAST rule fires on the 2-tick level only: the AI does not wait for the 3rd tick, and the same run is not bought twice');
-assert.equal(three.length, 1);
-assert.equal(three[0].run_id, two[0].run_id, 'the run keeps its id when it grows from 2 to 3 ticks');
+assert.ok(levelsFiring.includes(3), 'level 3 fires on the third tick');
+assert.equal(new Set(three.map(s => s.run_id)).size, three.length, 'one run id per level');
 const stale = entries(at(1, [2, 4, 6, 8, 0, 2]));
 assert.equal(stale.length, 0, 'a run that is long past its levels no longer fires');
 for (const s of three) assert.ok(s.run.current <= s.run.min_run + FRESH_SLACK);
@@ -236,26 +235,37 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
     else assert.equal(s.run_id, undefined);
 }
 
-// ---- THE BASKET ENTRY: judged on the three contracts the AI buys -----------------------------------------------------------------------------
+// ---- THE BASKET ENTRY: judged on the contracts the AI buys (3 on drift; on momentum 4: the digit pair + Only Ups + Only Downs) ----------------------------------------------------------------------------
 {
     // setup numbers 1-16: base x (bullish momentum, bearish momentum, bullish drift, bearish drift)
     const expect = [
-        ['even_under5', 'bullish', true, 1, ['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH']],
-        ['even_under5', 'bearish', true, 2, ['DIGITEVEN', 'DIGITUNDER', 'RUNLOW']],
+        ['even_under5', 'bullish', true, 1, ['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW']],
+        ['even_under5', 'bearish', true, 2, ['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW']],
         ['even_under5', 'bullish', false, 3, ['DIGITEVEN', 'DIGITUNDER', 'CALL']],
         ['even_under5', 'bearish', false, 4, ['DIGITEVEN', 'DIGITUNDER', 'PUT']],
-        ['odd_over4', 'bullish', true, 5, ['DIGITODD', 'DIGITOVER', 'RUNHIGH']],
+        ['odd_over4', 'bullish', true, 5, ['DIGITODD', 'DIGITOVER', 'RUNHIGH', 'RUNLOW']],
         ['odd_over4', 'bearish', false, 8, ['DIGITODD', 'DIGITOVER', 'PUT']],
-        ['even_over4', 'bearish', true, 10, ['DIGITEVEN', 'DIGITOVER', 'RUNLOW']],
+        ['even_over4', 'bearish', true, 10, ['DIGITEVEN', 'DIGITOVER', 'RUNHIGH', 'RUNLOW']],
         ['even_over4', 'bullish', false, 11, ['DIGITEVEN', 'DIGITOVER', 'CALL']],
-        ['odd_under5', 'bullish', true, 13, ['DIGITODD', 'DIGITUNDER', 'RUNHIGH']],
+        ['odd_under5', 'bullish', true, 13, ['DIGITODD', 'DIGITUNDER', 'RUNHIGH', 'RUNLOW']],
         ['odd_under5', 'bearish', false, 16, ['DIGITODD', 'DIGITUNDER', 'PUT']],
     ];
     for (const [key, dir, mom, number, types] of expect) {
         const b = basketFor(key, dir, mom);
         assert.equal(b.number, number, `${key} ${dir} ${mom}`);
         assert.deepEqual(b.types, types);
-        assert.deepEqual(b.shares, mom ? [0.4, 0.4, 0.2] : [0.35, 0.35, 0.3]);
+        assert.deepEqual(b.shares, mom ? [0.4, 0.4, 0.1, 0.1] : [0.35, 0.35, 0.3]);
+        assert.equal(b.shares.length, b.types.length, 'one stake share per contract');
+        assert.ok(Math.abs(b.shares.reduce((x, y) => x + y, 0) - 1) < 1e-9, 'the shares add up to the whole stake');
+        assert.equal(b.keys.length, b.types.length);
+        assert.equal(b.profits.length, b.types.length);
+    }
+    // momentum buys BOTH Only Ups and Only Downs whatever the chart direction; drift buys Rise (bullish) or Fall (bearish) only
+    for (const k of BASKET_BASE_KEYS) {
+        assert.deepEqual(basketFor(k, 'bullish', true).types.slice(2), ['RUNHIGH', 'RUNLOW']);
+        assert.deepEqual(basketFor(k, 'bearish', true).types.slice(2), ['RUNHIGH', 'RUNLOW']);
+        assert.deepEqual(basketFor(k, 'bullish', false).types.slice(2), ['CALL']);
+        assert.deepEqual(basketFor(k, 'bearish', false).types.slice(2), ['PUT']);
     }
     const all = BASKET_BASE_KEYS.flatMap(k => [true, false].flatMap(m => ['bullish', 'bearish'].map(d => basketFor(k, d, m).number)));
     assert.deepEqual([...all].sort((a, b) => a - b), Array.from({ length: 16 }, (_, i) => i + 1), 'all 16 setups exist exactly once');
@@ -282,8 +292,31 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
     const flag2 = mom.map(p => pp2.digits.includes(lastDigit(p, 2)));
     const rm = replayBasket(pp2, flag2, mom, flags2, 4, 2, () => 'bullish');
     assert.equal(rm.n, 1);
-    // exit tick = entry (4) + 2 = 6 -> digit 4: Even wins, Over 4 loses; Only Ups: 100.22 > 100.20 and 100.24 > 100.22 -> wins
-    assert.ok(Math.abs(rm.avg_net - (0.4 * 0.95 - 0.4 + 0.2 * ONLY_RUN_PROFIT)) < 0.002, `momentum basket net ${rm.avg_net}`);
+    // digit legs settle on tick 5 (100.22, digit 2): Even wins, Over 4 loses; Only Ups settles on tick 6: 100.22 > 100.20 and 100.24 > 100.22 -> wins; Only Downs loses.
+    // BOTH Only contracts are bought (40/40/10/10): Only Ups pays 0.1 x 2.8, Only Downs costs 0.1
+    assert.ok(Math.abs(rm.avg_net - (0.4 * 0.95 - 0.4 + 0.1 * ONLY_RUN_PROFIT - 0.1)) < 0.002, `momentum basket net ${rm.avg_net}`);
+    assert.equal(rm.sweeps, 0);
+    // the SAME basket is bought in a bearish chart when the last 3 ticks fell: Even + Over 4 on 8,6,8,6 falling: Even wins, Over 4 loses,
+    // Only Downs wins (100.12 < 100.14 and 100.10 < 100.12), Only Ups loses: the same net as the rising case (digit legs settle on tick 5: 100.12, digit 2)
+    const fall = [100.28, 100.26, 100.18, 100.16, 100.14, 100.12, 100.1];
+    const flagsF = favourFlags(fall, 2);
+    const flagF = fall.map(p => pp2.digits.includes(lastDigit(p, 2)));
+    const rf = replayBasket(pp2, flagF, fall, flagsF, 4, 2, () => 'bearish');
+    assert.equal(rf.n, 1);
+    assert.ok(Math.abs(rf.avg_net - (0.4 * 0.95 - 0.4 + 0.1 * ONLY_RUN_PROFIT - 0.1)) < 0.002, `bearish momentum basket net ${rf.avg_net}`);
+    // a momentum full sweep needs all FOUR to lose. The digit legs settle on tick 5 (digit 1 of 100.21: Even and Over 4 lose); the Only legs settle on
+    // tick 6 and need two moves the same way: 100.20 -> 100.21 rises but 100.21 -> 100.20 falls back, so Only Ups and Only Downs both lose
+    const momSweep = [100.06, 100.08, 100.16, 100.18, 100.2, 100.21, 100.2];
+    const rs = replayBasket(pp2, momSweep.map(p => pp2.digits.includes(lastDigit(p, 2))), momSweep, favourFlags(momSweep, 2), 4, 2, () => 'bullish');
+    assert.equal(rs.n, 1);
+    assert.equal(rs.sweeps, 1, 'all four contracts lost');
+    assert.ok(Math.abs(rs.avg_net - -1) < 0.002, 'a full sweep loses the whole total stake');
+    // when one Only contract wins it is not a sweep even if the digit legs lose: digit 1 on tick 5 (both digit legs lose), and Only Ups wins (100.21 > 100.20, 100.23 > 100.21)
+    const onlyWins = [100.06, 100.08, 100.16, 100.18, 100.2, 100.21, 100.23];
+    const ro = replayBasket(pp2, onlyWins.map(p => pp2.digits.includes(lastDigit(p, 2))), onlyWins, favourFlags(onlyWins, 2), 4, 2, () => 'bullish');
+    assert.equal(ro.n, 1);
+    assert.equal(ro.sweeps, 0, 'Only Ups won, so it is not a full sweep');
+    assert.ok(Math.abs(ro.avg_net - (-0.4 - 0.4 + 0.1 * ONLY_RUN_PROFIT - 0.1)) < 0.002, `digits lose, Only Ups wins: net ${ro.avg_net}`);
     // the same pattern in a bearish chart builds a different basket: no 3-tick fall run, so drift = Even + Over 4 + FALL (35/35/30), exit tick 5 = 100.22:
     // Even wins (digit 2), Over 4 loses, Fall loses (100.22 is not below 100.20)
     const rb = replayBasket(pp2, flag2, mom, flags2, 4, 2, () => 'bearish');
@@ -298,8 +331,8 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
     assert.ok(Math.abs(sw.avg_net - -1) < 0.002, 'a full sweep loses the whole total stake');
 }
 
-// Property check over many random markets: a basket entry is always a digit-pair entry (2 consecutive ticks + the digit frequency) with a chart direction and a setup that matches
-// the AI's table; and the path is reachable (some market does produce one).
+// Property check over many random markets: a basket entry is always a digit-pair entry with a chart direction, a setup that matches the AI's table,
+// third-contract support and a basket replay that is not losing; and the path is reachable (some market does produce one).
 {
     let seed = 12345;
     const rnd = () => {
@@ -308,7 +341,8 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
     };
     let fired = 0;
     let looked = 0;
-    let loose = 0;
+    let fired_momentum = 0;
+    let fired_drift = 0;
     for (let m = 0; m < 400; m++) {
         let price = 1000;
         const drift = (rnd() - 0.5) * 0.4;
@@ -330,16 +364,24 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
             fired += 1;
             assert.ok(sg.entry, 'a basket entry is also a digit-pair entry');
             assert.ok(scan.trend === 'bullish' || scan.trend === 'bearish');
-            assert.equal(sg.basket.third, b.types[2]);
-            // FAST rule: 2 consecutive ticks + the digit frequency favouring the digit legs + a chart direction. Nothing else holds the basket back.
-            assert.equal(sg.run.min_run, 2, 'a basket fires on the 2-tick level');
-            assert.ok(sg.digit_freq && sg.digit_freq.favoured, 'the digit frequency favours the digit legs');
-            if (!(sg.basket.third_bias >= 55) || (sg.basket.outcomes >= 10 && sg.basket.avg_net < 0)) loose += 1; // would have waited under the old rules
+            assert.equal(sg.basket.third, b.types.slice(2).join('+'));
+            assert.equal(sg.basket.legs, b.types.length);
+            if (sg.basket.regime === 'momentum') {
+                fired_momentum += 1;
+                assert.equal(sg.basket.third, 'RUNHIGH+RUNLOW', 'momentum buys Only Ups and Only Downs together');
+                assert.equal(sg.basket.legs, 4);
+                assert.equal(sg.basket.third_bias, null, 'no side is picked, so there is no third-contract support to measure');
+            } else {
+                fired_drift += 1;
+                assert.equal(sg.basket.legs, 3);
+                assert.ok(sg.basket.third_bias >= 55, 'drift: the third contract (Rise / Fall) has its own support');
+            }
+            assert.ok(sg.basket.outcomes < 10 || sg.basket.avg_net >= 0, 'a basket that was losing after this pattern is not an entry');
             assert.equal(sg.momentum, sg.basket.regime === 'momentum');
         }
     }
     assert.ok(looked > 0 && fired > 0, `basket entries must be reachable (looked ${looked}, fired ${fired})`);
-    assert.ok(loose > 0, `the AI no longer waits for the third contract's bias or the basket replay (${loose} of ${fired} entries would have waited before)`);
+    assert.ok(fired_momentum > 0 && fired_drift > 0, `both regimes must be reachable (momentum ${fired_momentum}, drift ${fired_drift})`);
 }
 
 console.log('runBias checks passed');

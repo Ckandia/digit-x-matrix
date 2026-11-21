@@ -1,4 +1,3 @@
-import { PaperLearningCard } from './PaperLearningCard';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { localize } from '@deriv-com/translations';
 import { useApiBase } from '@/hooks/useApiBase';
@@ -132,9 +131,6 @@ const SignalBanner = ({
     );
 };
 
-/** Only Ups / Only Downs always run as one basket that fires both contracts together. */
-export const isRunBasket = (type: string): boolean => type === 'RUNHIGH' || type === 'RUNLOW';
-
 const newStrategy = (overrides: Partial<TStrategyConfig> = {}): TStrategyConfig => ({
     ...DEFAULT_STRATEGY,
     client_id: makeId(),
@@ -248,10 +244,7 @@ const BulkTrader = () => {
     const stats = snapshot?.stats;
     const signals = snapshot?.signals ?? [];
     const opposite_type = FLIP_PAIR[contractType];
-    // Only Ups / Only Downs are analysed on 2 ticks and always run as ONE basket: both contracts fire at the same instant.
-    const run_basket = isRunBasket(contractType);
-    const both_sides_on = bothSides || run_basket;
-    const relevant_contract_types = both_sides_on && opposite_type ? [contractType, opposite_type] : [contractType];
+    const relevant_contract_types = bothSides && opposite_type ? [contractType, opposite_type] : [contractType];
     const topSignal = signals.find(s => (relevant_contract_types as string[]).includes(s.contract_type));
 
     const stopPolling = useCallback(() => {
@@ -342,15 +335,6 @@ const BulkTrader = () => {
                 mult_value: multValue,
             };
             const primary_type = override_contract_type ?? contractType;
-
-            if (isRunBasket(primary_type)) {
-                // The basket: Only Ups and Only Downs buy at the same instant, with no trend wait and no auto flip (both sides are
-                // already held), and the stop loss / take profit are judged on the two legs together.
-                const sync_group = `basket-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-                return (['RUNHIGH', 'RUNLOW'] as const).map(type =>
-                    newStrategy({ ...base, auto_flip: false, sync_group, contract_type: type, label: CONTRACT_TYPE_LABELS[type] })
-                );
-            }
 
             if (bothSides && FLIP_PAIR[primary_type]) {
                 const secondary_type = FLIP_PAIR[primary_type] as TStrategyConfig['contract_type'];
@@ -468,7 +452,6 @@ const BulkTrader = () => {
                 </p>
             </div>
 
-            <PaperLearningCard />
 
             {!backend_configured && (
                 <div className='bulk-trader__notice bulk-trader__notice--warning'>
@@ -653,7 +636,7 @@ const BulkTrader = () => {
                                 />
                                 <small>
                                     {localize('Total stake this burst: {{t}}', {
-                                        t: (stake * Math.max(1, maxTrades) * (both_sides_on ? 2 : 1)).toFixed(2),
+                                        t: (stake * Math.max(1, maxTrades) * (bothSides ? 2 : 1)).toFixed(2),
                                     })}
                                 </small>
                             </label>
@@ -692,32 +675,17 @@ const BulkTrader = () => {
                         <label className='bulk-trader__toggle'>
                             <input
                                 type='checkbox'
-                                checked={both_sides_on}
+                                checked={bothSides}
                                 onChange={e => setBothSides(e.target.checked)}
-                                disabled={is_running || !opposite_type || run_basket}
+                                disabled={is_running || !opposite_type}
                             />
                             <span className='bulk-trader__toggle-track' />
                             <span className='bulk-trader__toggle-label'>
                                 {localize('Both Sides')}
-                                <em
-                                    title={
-                                        run_basket
-                                            ? localize('Only Ups and Only Downs always fire together at the same instant (2 ticks).')
-                                            : localize('Runs this strategy and its opposite side at the same time.')
-                                    }
-                                >
-                                    i
-                                </em>
+                                <em title={localize('Runs this strategy and its opposite side at the same time.')}>i</em>
                             </span>
                         </label>
                     </div>
-                    {run_basket && (
-                        <p className='bulk-trader__basket-note'>
-                            {localize(
-                                'Only Ups + Only Downs basket: both contracts are bought at the same instant on the same market, with no trend wait and no auto flip. Stop loss and take profit apply to the two together. Both lose when the ticks are mixed, so expect most baskets to lose both stakes and a rare one to pay out.'
-                            )}
-                        </p>
-                    )}
 
                     <button
                         type='button'
@@ -837,11 +805,7 @@ const BulkTrader = () => {
                                     title={start_disabled_title}
                                     onClick={() => guardedStart(contractType)}
                                 >
-                                    {isStarting
-                                        ? localize('Starting…')
-                                        : run_basket
-                                          ? localize('Bulk Only Ups + Only Downs (both, together)')
-                                          : `${localize('Bulk')} ${CONTRACT_TYPE_LABELS[contractType]}`}
+                                    {isStarting ? localize('Starting…') : `${localize('Bulk')} ${CONTRACT_TYPE_LABELS[contractType]}`}
                                 </button>
 
                                 <button
@@ -854,26 +818,24 @@ const BulkTrader = () => {
                                     {localize('AI')}: {topSignal ? topSignal.label : localize('—')}
                                 </button>
 
-                                {!run_basket && (
-                                    <button
-                                        type='button'
-                                        className={[
-                                            'bulk-trader__action-btn',
-                                            'bulk-trader__action-btn--negative',
-                                            opposite_matches_signal && 'bulk-trader__action-btn--signal-match',
-                                            start_not_ready && 'bulk-trader__action-btn--not-ready',
-                                        ]
-                                            .filter(Boolean)
-                                            .join(' ')}
-                                        disabled={start_disabled}
-                                        title={start_disabled_title}
-                                        onClick={() => guardedStart(opposite_type)}
-                                    >
-                                        {isStarting
-                                            ? localize('Starting…')
-                                            : `${localize('Bulk')} ${CONTRACT_TYPE_LABELS[opposite_type]}`}
-                                    </button>
-                                )}
+                                <button
+                                    type='button'
+                                    className={[
+                                        'bulk-trader__action-btn',
+                                        'bulk-trader__action-btn--negative',
+                                        opposite_matches_signal && 'bulk-trader__action-btn--signal-match',
+                                        start_not_ready && 'bulk-trader__action-btn--not-ready',
+                                    ]
+                                        .filter(Boolean)
+                                        .join(' ')}
+                                    disabled={start_disabled}
+                                    title={start_disabled_title}
+                                    onClick={() => guardedStart(opposite_type)}
+                                >
+                                    {isStarting
+                                        ? localize('Starting…')
+                                        : `${localize('Bulk')} ${CONTRACT_TYPE_LABELS[opposite_type]}`}
+                                </button>
                             </>
                         ) : (
                             <button

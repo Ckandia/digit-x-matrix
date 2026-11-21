@@ -30,83 +30,6 @@ const DURATION_ERROR = /duration|barrier|offered|tick|no return/i;
 
 const round2 = (n: number) => Number(n.toFixed(2));
 
-/** The longest a basket leg waits for the other leg before the whole basket stops (it never trades one side alone). */
-export const SYNC_WAIT_MS = 60_000;
-
-/**
- * A basket of strategies that must buy at the same instant (Only Ups + Only Downs). Each leg calls ready() right before its buy;
- * nothing is sent until every live leg has arrived, then all of them are released in the same turn so the buys leave together.
- */
-export class SyncGroup {
-    readonly members = new Set<StrategyEngine>();
-    private waiting = new Map<StrategyEngine, () => void>();
-    private timer: ReturnType<typeof setTimeout> | null = null;
-
-    constructor(readonly id: string) {}
-
-    join(engine: StrategyEngine) {
-        this.members.add(engine);
-    }
-
-    /** Resolves when every live member of the basket is ready to buy. */
-    ready(engine: StrategyEngine): Promise<void> {
-        return new Promise(resolve => {
-            this.waiting.set(engine, resolve);
-            this._release();
-            if (this.waiting.size > 0 && !this.timer) {
-                this.timer = setTimeout(() => {
-                    this.timer = null;
-                    if (this.waiting.size === 0) return;
-                    this.stopAll('the other side of the basket did not come back in time');
-                }, SYNC_WAIT_MS);
-            }
-        });
-    }
-
-    private _release() {
-        if (this.members.size === 0 || this.waiting.size < this.members.size) return;
-        if (this.timer) clearTimeout(this.timer);
-        this.timer = null;
-        const releases = [...this.waiting.values()];
-        this.waiting.clear();
-        for (const release of releases) release(); // all legs continue in this same turn: the buys leave together
-    }
-
-    leave(engine: StrategyEngine) {
-        this.members.delete(engine);
-        this.waiting.delete(engine);
-        this._release();
-        if (this.members.size === 0) {
-            if (this.timer) clearTimeout(this.timer);
-            this.timer = null;
-            syncGroups.delete(this.id);
-        }
-    }
-
-    /** One leg ended (stop condition, error, user stop): the rest of the basket ends with it. */
-    stopAll(reason: string) {
-        // A leg that still has a contract open finishes it first (its result is tracked), then stops; the others stop at once.
-        for (const member of [...this.members]) member.stopWhenIdle(reason);
-    }
-
-    /** The combined result of the basket, which is what its stop loss / take profit are judged against. */
-    netProfit(): number {
-        let total = 0;
-        for (const member of this.members) total += member.total_profit;
-        return total;
-    }
-}
-
-const syncGroups = new Map<string, SyncGroup>();
-const groupFor = (id: string): SyncGroup => {
-    let g = syncGroups.get(id);
-    if (!g) {
-        g = new SyncGroup(id);
-        syncGroups.set(id, g);
-    }
-    return g;
-};
-
 /**
  * Runs a single contract strategy (digits, Rise/Fall, Higher/Lower, Touch/No Touch, Multipliers)
  * against a shared DerivClientConnection. Places one contract at a time; on settlement, applies the
@@ -143,11 +66,6 @@ export class StrategyEngine {
     private _open_multipliers = new Set<string>();
     private _ticks_override: Partial<Record<TBulkContractType, number>> = {};
     private _auto_multiplier: number | null = null;
-    private _group: SyncGroup | null = null;
-    /** Set when the basket ended while this leg still had a contract open: it stops as soon as that contract settles. */
-    private _stop_after_trade: string | null = null;
-    /** True while a buy request is in flight (the contract is not open yet, but it is about to be). */
-    private _buying = false;
 
     constructor(connection: DerivClientConnection, config: TStrategyConfig, currency?: string) {
         this.id = uuidv4();
@@ -159,24 +77,6 @@ export class StrategyEngine {
         this.current_stake = config.stake;
         this.current_contract_type = config.contract_type;
         this.original_contract_type = config.contract_type;
-        if (config.sync_group) {
-            this._group = groupFor(config.sync_group);
-            this._group.join(this);
-        }
-    }
-
-    /** True when this strategy is one leg of a basket that buys both sides at the same instant. */
-    get inBasket(): boolean {
-        return this._group !== null;
-    }
-
-    /** This leg is finished: take it out of the basket and end the other leg(s) too, so no side is ever left trading alone. */
-    private _endBasket(reason: string) {
-        const group = this._group;
-        if (!group) return;
-        this._group = null;
-        group.leave(this);
-        group.stopAll(reason);
     }
 
     toJSON(): TStrategyStatus {
@@ -225,22 +125,6 @@ export class StrategyEngine {
         this._monitor?.stop();
         this._monitor = null;
         this._sellOpenMultipliers();
-        if (this._group) {
-            const group = this._group;
-            this._group = null;
-            group.leave(this);
-        }
-    }
-
-    /** Stops now if nothing is open; otherwise as soon as the open contract has settled and been counted. */
-    stopWhenIdle(reason: string) {
-        const open = this._buying || this._active_poc_sub != null || this._burst_subs.length > 0;
-        if (open && this.status === 'running') {
-            this._stop_after_trade = reason;
-            tradeBus.log('info', `${this.label}: the basket ended (${reason}); stopping once the open contract settles`);
-            return;
-        }
-        this.stop(reason);
     }
 
     /** A multiplier has no expiry, so stopping the strategy must close the ones still open. */
@@ -259,7 +143,6 @@ export class StrategyEngine {
     /** Waits (without trading) until the 1-tick chart confirms the trend this contract needs. */
     private async _confirmTrend(spec: TBulkSpec): Promise<boolean> {
         if (!spec.trend) return true;
-        if (this._group) return true; // a both-sides basket does not need a direction: one leg wins whichever way it goes
         if (!this._monitor) {
             this._monitor = new TickTrendMonitor(this.connection, this.config.symbol);
             await this._monitor.start();
@@ -351,7 +234,6 @@ export class StrategyEngine {
         if (count < 1) {
             this.status = 'error';
             this.error = 'Balance is too small for even one trade at this stake';
-            this._endBasket(this.error);
             return;
         }
 
@@ -373,11 +255,6 @@ export class StrategyEngine {
             'info',
             `${this.label}: burst of ${count} x ${spec.label} (${this._describe(spec, parameters)}, stake ${stake}) on ${this.config.symbol}`
         );
-        if (this._group) {
-            tradeBus.log('info', `${this.label}: waiting for the other side of the basket, then both fire together`);
-            await this._group.ready(this);
-            if (this._stopRequested) return;
-        }
         const sendChunk = async (n: number) => {
             // All n requests leave in the same instant; Promise.allSettled only waits for the replies.
             const replies = await Promise.allSettled(
@@ -427,7 +304,6 @@ export class StrategyEngine {
         if (ids.length === 0) {
             this.status = 'error';
             this.error = first_error || 'No buys were accepted';
-            this._endBasket(this.error);
             return;
         }
         if (spec.family === 'multiplier') ids.forEach(id => this._open_multipliers.add(id));
@@ -473,12 +349,10 @@ export class StrategyEngine {
 
     private _checkStopConditions(): string | null {
         const { take_profit, stop_loss, max_trades } = this.config;
-        // A basket is judged on its combined result (both legs together), the way the pair really pays out.
-        const net = this._group ? this._group.netProfit() : this.total_profit;
-        if (typeof take_profit === 'number' && net >= take_profit) {
+        if (typeof take_profit === 'number' && this.total_profit >= take_profit) {
             return 'take profit reached';
         }
-        if (typeof stop_loss === 'number' && net <= -Math.abs(stop_loss)) {
+        if (typeof stop_loss === 'number' && this.total_profit <= -Math.abs(stop_loss)) {
             return 'stop loss reached';
         }
         if (typeof max_trades === 'number' && this.trades >= max_trades) {
@@ -510,7 +384,6 @@ export class StrategyEngine {
             this._monitor?.stop();
             this._monitor = null;
             tradeBus.log('info', `${this.label}: stopped (${stop_reason}), net ${this.total_profit.toFixed(2)}`);
-            this._endBasket(stop_reason);
             return;
         }
 
@@ -527,26 +400,16 @@ export class StrategyEngine {
             tried = attempts[i];
             try {
                 const parameters = await this._parameters(spec, this.current_stake, tried);
-                if (this._group) {
-                    await this._group.ready(this); // both legs reach this line, then both buys leave in the same turn
-                    if (this._stopRequested) return;
-                }
                 tradeBus.log(
                     'info',
                     `${this.label}: buying ${spec.label} on ${this.config.symbol}, ${this._describe(spec, parameters)}, stake ${this.current_stake}` +
                         (spec.needs_prediction ? `, prediction ${this.config.prediction}` : '')
                 );
-                this._buying = true;
-                let buy_response: any;
-                try {
-                    buy_response = await this.connection.send({
-                        buy: '1',
-                        price: this.current_stake,
-                        parameters,
-                    });
-                } finally {
-                    this._buying = false;
-                }
+                const buy_response = await this.connection.send({
+                    buy: '1',
+                    price: this.current_stake,
+                    parameters,
+                });
                 const contract_id = buy_response?.buy?.contract_id;
                 if (!contract_id) throw new Error('Buy did not return a contract id');
                 if (tried !== undefined && attempts.length > 1) this._ticks_override[spec.key] = tried;
@@ -555,8 +418,7 @@ export class StrategyEngine {
             } catch (err: any) {
                 last_error = err?.message || 'Failed to place trade';
                 const has_next = i < attempts.length - 1;
-                // A basket leg never retries on its own: the other leg already bought at this duration, and both must match.
-                if (this._group || !(has_next && DURATION_ERROR.test(last_error))) break;
+                if (!(has_next && DURATION_ERROR.test(last_error))) break;
                 tradeBus.log('info', `${this.label}: ${spec.label} refused at ${tried} ticks (${last_error}); trying ${attempts[i + 1]} ticks`);
             }
         }
@@ -568,7 +430,6 @@ export class StrategyEngine {
             'error',
             `${this.label}: ${spec.label} on ${this.config.symbol}${tried !== undefined ? ` for ${tried} tick(s)` : ''} failed: ${this.error}`
         );
-        this._endBasket(`${this.label} failed: ${this.error}`);
     }
 
     private _watchContract(contract_id: string, spec: TBulkSpec) {
@@ -580,7 +441,6 @@ export class StrategyEngine {
                     this.status = 'error';
                     this.error = err.message;
                     tradeBus.log('error', `${this.label}: lost track of contract ${contract_id}: ${err.message}`);
-                    this._endBasket(`lost track of a contract: ${err.message}`);
                     return;
                 }
                 const contract = data?.proposal_open_contract;
@@ -604,10 +464,6 @@ export class StrategyEngine {
                 this._applyMoneyManagement(won);
                 this._applyAutoFlip(won);
 
-                if (this._stop_after_trade) {
-                    this.stop(this._stop_after_trade);
-                    return;
-                }
                 if (this._stopRequested) return;
                 const cooldown = this.config.fast_execution ? FAST_TRADE_COOLDOWN_MS : TRADE_COOLDOWN_MS;
                 setTimeout(() => this._placeNextTrade(), cooldown);
@@ -617,7 +473,7 @@ export class StrategyEngine {
 
     /** After a loss: switch to the partner contract; after the next loss, back to the original. */
     private _applyAutoFlip(won: boolean) {
-        if (!this.config.auto_flip || won || this._group) return; // a basket already holds both sides: flipping would double one of them
+        if (!this.config.auto_flip || won) return;
         const next = nextAfterLoss(this.original_contract_type, this.current_contract_type);
         if (next !== this.current_contract_type) {
             tradeBus.log('info', `${this.label}: loss, switching ${specOf(this.current_contract_type).label} -> ${specOf(next).label}`);

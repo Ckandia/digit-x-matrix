@@ -33,14 +33,15 @@ class Conn {
     buys_ = () => this.sent.filter(r => r.buy);
 }
 
+let rid = 0; // every read of a signal gets a fresh run id, so each recovery trade has a new run to trade
 const snapshots: TSnapshotMap = {
-    R_EG: { stats: {} as never, signals: [{ family: 'digits', contract_type: 'DIGITEVEN', label: 'Even', confidence: 90, basis: '' } as never] },
+    R_EG: { stats: {} as never, signals: [{ family: 'run_bias', strategy: 'run_bias', entry: true, contract_type: 'DIGITEVEN', label: 'Even', confidence: 90, basis: '', get run_id() { return ++rid; } } as never] },
 };
 
 const run = (mode: 'off' | 'learn' | 'edge_gate', cfg: Partial<TAutoPilotConfig> = {}) => {
     const conn = new Conn();
     const learner = new LearningEngine(`eg-${mode}-${Math.random()}`, mode);
-    const config: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 1.2, max_steps: 5, stop_loss: 10000, take_profit: 10000, auto_flip: true, protect_trades: 0, virtual_hook: false, follow_stream: false, ...cfg };
+    const config: TAutoPilotConfig = { recovery_mode: 'flat', stake: 1, martingale_multiplier: 1.2, max_steps: 5, stop_loss: 10000, take_profit: 10000, protect_trades: 0, ...cfg };
     const engine = new AutoPilotEngine(conn as never, 'USD', config, () => snapshots, () => undefined, learner);
     return { conn, engine, learner };
 };
@@ -59,14 +60,6 @@ describe('quality gate: only trade a proven edge', () => {
         h.engine.start();
         await wait(80);
         expect(h.conn.buys_().length).toBeGreaterThan(0);
-        h.engine.stop();
-    });
-
-    it('also blocks the virtual-hook route to a live buy (the old gap)', async () => {
-        const h = run('edge_gate', { virtual_hook: true, virtual_mode: 'opposite' });
-        h.engine.start();
-        await wait(80);
-        expect(h.conn.buys_()).toHaveLength(0);
         h.engine.stop();
     });
 

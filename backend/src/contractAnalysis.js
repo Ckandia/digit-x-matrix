@@ -23,13 +23,14 @@ export const PRICE_WINDOW_SIZE = 500; // matches the digit window, so the two-ti
 export const MIN_SAMPLE_FOR_CONTRACT_SIGNAL = 60;
 
 export function createPriceWindow() {
-    return { prices: [], last_updated: null };
+    return { prices: [], total: 0, last_updated: null }; // total = every tick ever pushed (the window slides, this keeps counting)
 }
 
 export function pushPrice(window, price) {
     const value = Number(price);
     if (!Number.isFinite(value)) return window;
     window.prices.push(value);
+    window.total = (window.total || 0) + 1;
     if (window.prices.length > PRICE_WINDOW_SIZE) window.prices.shift();
     window.last_updated = new Date().toISOString();
     return window;

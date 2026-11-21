@@ -73,6 +73,7 @@ const openFeed = () => {
         socket.onmessage = event => {
             try {
                 const parsed = JSON.parse(event.data);
+                noteFrame(parsed.ts);
                 if (parsed.type === 'snapshot') {
                     setState({ snapshots: only1s(parsed.data as TSnapshotMap) });
                 } else if (parsed.type === 'update' && parsed.symbol && isOneSecondSymbol(parsed.symbol)) {
@@ -118,6 +119,30 @@ export const retainSignals = (): (() => void) => {
         holders -= 1;
         if (holders === 0) closeFeed();
     };
+};
+
+/**
+ * How late the backend's frames arrive, in ms. The two clocks differ, so the absolute gap means nothing; what counts is how much
+ * LARGER it is than the smallest gap seen lately (the best the connection can do). On a good line this is ~0, on a slow one it grows.
+ */
+let best_gap = Infinity;
+let best_gap_at = 0;
+let recent_gap = 0;
+let recent_gap_at = 0;
+const noteFrame = (ts: unknown) => {
+    if (typeof ts !== 'number') return;
+    const now = Date.now();
+    const gap = now - ts;
+    if (gap < best_gap || now - best_gap_at > 120_000) {
+        best_gap = gap; // re-learned every 2 minutes so clock drift cannot pile up
+        best_gap_at = now;
+    }
+    recent_gap = gap;
+    recent_gap_at = now;
+};
+export const getFeedLagMs = (): number => {
+    if (!isFinite(best_gap) || Date.now() - recent_gap_at > 5000) return 0;
+    return Math.max(0, recent_gap - best_gap);
 };
 
 /** The latest snapshots, read by the AI engine on every pick. */
