@@ -1,3 +1,6 @@
+## Self-review gate no longer blocks baskets (Nov 2026)
+- Basket mode bypasses the self-review gate (it blocked Even/Odd baskets via contract_type). Details in FIXES-AND-SETUP.md.
+
 ## Tie closed + cover leg (latest, Nov 2026)
 - Exact 2-2 digit ties go to the side holding the most frequent digit. Optional 4th basket contract: Differs from the least frequent digit (`basket_cover`, off by default); softens sweeps (partial loss keeps the stake flat). Details in FIXES-AND-SETUP.md. Backend must be redeployed.
 

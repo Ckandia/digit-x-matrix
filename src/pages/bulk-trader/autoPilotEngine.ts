@@ -929,7 +929,10 @@ export class AutoPilotEngine {
      * second wait on its own tick stream. The same run of ticks is never traded twice.
      */
     private _pickSignal(): TCandidate | null {
-        const gated = applyGate(this.getSnapshots(), this.hooks?.gate?.());
+        // The self-review gate blocks single contracts by their past results ("All markets DIGITEVEN"). A basket signal carries its first digit contract
+        // as contract_type, so the gate used to block every Even / Odd basket for good while the log said "basket entry is ready". The basket is not judged
+        // by that single-contract history: in basket mode the raw signals are used.
+        const gated = this.config.basket_mode === true ? this.getSnapshots() : applyGate(this.getSnapshots(), this.hooks?.gate?.());
         const allowed = this._allowedTypes();
         const now = Date.now();
         const found: { candidate: TCandidate; confluence: boolean; idle: number; pair: boolean }[] = [];

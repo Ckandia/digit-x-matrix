@@ -1,5 +1,6 @@
 import { AutoPilotEngine, TAutoPilotConfig, buildConfigFromPreset, BASKET_BASES, basketSetup, basketStakes, basketMinTotal, basketHasConflict, basketDiagnosis } from '../autoPilotEngine';
 import type { TSnapshotMap } from '../analysis-types';
+import { typeKey } from '../../journal/selfReview';
 
 jest.mock('uuid', () => ({ v4: () => 'test-id' }));
 
@@ -234,6 +235,21 @@ describe('the basket is bought in one go', () => {
         expect(next.length).toBeGreaterThan(0);
         expect(Number(next.reduce((a, b) => a + b.price, 0).toFixed(2))).toBe(10); // not 15: no x1.5 after a partial loss
         h.engine.stop();
+    });
+
+    it('the self-review gate (skip "All markets DIGITEVEN / DIGITODD") never blocks a basket; it still blocks single contracts', async () => {
+        const gate = { blocked: new Set([typeKey('DIGITEVEN', 'run_bias'), typeKey('DIGITODD', 'run_bias')]), watch: new Set<string>() };
+        const run = async (signals: unknown[], cfg: Partial<TAutoPilotConfig>) => {
+            const conn = new Conn();
+            const snapshots: TSnapshotMap = { R_G1: { stats: {} as never, signals: signals as never } };
+            const engine = new AutoPilotEngine(conn as never, 'USD', { ...base, ...cfg }, () => snapshots, () => undefined, undefined, { onLog: () => undefined, gate: () => gate } as never);
+            engine.start();
+            await wait(150);
+            engine.stop();
+            return conn.buys_();
+        };
+        expect(await run([basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)], bk)).toHaveLength(3);
+        expect(await run([sig({ type: 'DIGITEVEN', label: 'Even' })], { recovery_mode: 'flat' })).toHaveLength(0); // outside basket mode the gate still works
     });
 
     it('a digit-pair entry the backend did NOT judge a basket entry is not bought', async () => {
