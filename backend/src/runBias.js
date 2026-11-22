@@ -498,6 +498,7 @@ export function computeRunSignals(scan, symbol) {
                 basket_setup: basket ? basket.setup : undefined, // 1-16: which of the 16 setups this signal is (the AI cross-checks it)
                 basket: basket ?? undefined,
                 trend: scan.trend, // the 1-tick chart trend (bullish / bearish / none)
+                cover_digit: basket && scan.digits ? scan.digits.least.digit : undefined, // the digit the optional Differs cover contract bets against (the least frequent one)
                 basket_direction: basket ? basket.direction : undefined, // the direction the basket's third contract leans (the trend, else the last tick's move)
                 momentum: (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS),
                 duration_ticks: 1,

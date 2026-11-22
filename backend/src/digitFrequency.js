@@ -12,7 +12,8 @@
 //   the least frequent digit supports a contract when it is NOT one of its digits (a rare odd digit leaves the even digits to appear).
 // The AI does NOT wait for all four: when DIGIT_MIN_SUPPORT (2) of the four key digits support a contract, that is a BIAS towards it and
 // the frequency is IN FAVOUR. The opposite contract (Even/Odd, Over 4/Under 5) can have the same count, so a 2-2 tie goes to the contract
-// whose digits filled more of the window (its share); a tie on that too favours neither, so the AI never leans both ways.
+// whose digits filled more of the window (its share); if that is tied too, the contract that holds the 1st (most frequent) digit wins. So
+// one of every opposite pair is always favoured once two key digits point to it, and the AI never leans both ways.
 // Strength % (what the AI ranks by): 20 for 2 supporting digits, 40 for 3, 60 for 4, plus 2 points for every % the contract's digits
 // are above half of the window, capped at 100.
 //
@@ -73,7 +74,8 @@ export function digitFrequency(digits) {
     for (const c of DIGIT_CONTRACTS) {
         const mine = contracts[c.key];
         const other = contracts[c.opposite];
-        const leads = mine.support > other.support || (mine.support === other.support && mine.share > other.share);
+        const holds_first = c.digits.includes(first.digit);
+        const leads = mine.support > other.support || (mine.support === other.support && (mine.share > other.share || (mine.share === other.share && holds_first)));
         mine.favoured = mine.support >= DIGIT_MIN_SUPPORT && leads;
         mine.strength = mine.favoured ? Math.round(clamp((mine.support - 1) * 20 + Math.max(0, mine.share - 50) * 2, 0, 100)) : 0;
     }

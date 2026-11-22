@@ -46,7 +46,8 @@ assert.deepEqual(two.key_digits, [2, 1, 4, 8]);
 assert.equal(two.contracts.even.support, 2);
 assert.equal(two.contracts.odd.support, 2);
 assert.equal(two.contracts.even.share, two.contracts.odd.share, 'even 44 vs odd 44 of 88');
-assert.equal(two.contracts.even.favoured || two.contracts.odd.favoured, false, 'an exact tie favours neither: the AI never leans both ways');
+assert.equal(two.contracts.even.favoured, true, 'an exact tie on support AND share goes to the side that holds the 1st (most frequent) digit: 2 is Even');
+assert.equal(two.contracts.odd.favoured, false, 'and the AI still never leans both ways');
 const lean = digitFrequency([...rep(2, 12), ...rep(4, 11), ...rep(0, 10), ...rep(6, 10), ...rep(8, 3), ...rep(1, 11), ...rep(3, 9), ...rep(5, 8), ...rep(7, 8), ...rep(9, 8)]);
 assert.equal(lean.contracts.even.support, 2);
 assert.equal(lean.contracts.even.favoured, true, '2 supporting digits and a bigger share: Even is favoured');
@@ -120,6 +121,8 @@ assert.equal(flatBasket.basket_entry, true, 'and so does the basket: the three c
 assert.equal(flatBasket.basket_direction, 'bearish');
 assert.equal(flatBasket.basket_setup, 4, 'Even + Under 5 with a falling last tick = setup 4 (bearish drift: Fall)');
 assert.equal(noTrend('none', [10, 11]).basket_setup, 3, 'a rising last tick = setup 3 (bullish drift: Rise)');
+assert.equal(flatBasket.cover_digit, pairScan.digits.least.digit, 'the basket signal names the least frequent digit for the optional Differs cover');
+assert.ok(Number.isInteger(flatBasket.cover_digit) && flatBasket.cover_digit >= 0 && flatBasket.cover_digit <= 9);
 assert.equal(noTrend('bullish', [10, 9]).basket_direction, 'bullish', 'a confirmed trend still decides the direction');
 
 // ---- property check on random digit windows: the bias never leans both ways, and it follows the key digits exactly
@@ -141,6 +144,8 @@ assert.equal(noTrend('bullish', [10, 9]).basket_direction, 'bullish', 'a confirm
                 assert.ok(me.strength >= 20, 'and clears the default minimum signal strength');
             } else assert.equal(me.strength, 0);
         }
+        assert.equal(f.contracts.even.favoured || f.contracts.odd.favoured, true, 'one of Even / Odd is always favoured: no dead zone');
+        assert.equal(f.contracts.over4.favoured || f.contracts.under5.favoured, true, 'one of Over 4 / Under 5 is always favoured: no dead zone');
         assert.ok(f.counts[f.first.digit] >= f.counts[f.second.digit] && f.counts[f.second.digit] >= f.counts[f.third.digit], 'ranking is by frequency');
         assert.ok(f.counts[f.least.digit] <= Math.min(...f.counts), 'the least digit has the fewest appearances');
     }

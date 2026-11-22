@@ -93,6 +93,8 @@ export type TDigitSignal = {
     trend?: string;
     /** Basket bases only: the direction the third contract leans: the confirmed trend, else the way the last tick moved. No confirmed trend is needed to buy. */
     basket_direction?: string;
+    /** Basket bases only: the least frequent digit of the window. The optional Differs cover leg bets that this digit does NOT come next. */
+    cover_digit?: number;
     /** run_bias family only: every analysed run length of this contract (2 AND 3 ticks for the digit contracts) favours it at once. */
     confluence?: boolean;
     /** run_bias family only: which run of ticks this is (the tick count when it started), so one run is traded once. */

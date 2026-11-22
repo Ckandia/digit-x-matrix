@@ -1,3 +1,6 @@
+## Tie closed + cover leg (latest, Nov 2026)
+- Exact 2-2 digit ties go to the side holding the most frequent digit. Optional 4th basket contract: Differs from the least frequent digit (`basket_cover`, off by default); softens sweeps (partial loss keeps the stake flat). Details in FIXES-AND-SETUP.md. Backend must be redeployed.
+
 # Project memory: Digit X Matrix (read this first)
 
 Where things stand (latest first). This file is the project's memory: Claude's own memory feature is off in Settings, so the progress is saved here and in FIXES-AND-SETUP.md.

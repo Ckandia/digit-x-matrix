@@ -35,6 +35,7 @@ const BUILT_IN: TRules = {
     DIGITODD: { min: 1, max: 10 },
     DIGITOVER: { min: 1, max: 10 },
     DIGITUNDER: { min: 1, max: 10 },
+    DIGITDIFF: { min: 1, max: 10 }, // the basket's optional Differs cover leg
     ASIANU: { min: 5, max: 10 },
     ASIAND: { min: 5, max: 10 },
     RUNHIGH: { min: 2, max: 5 },

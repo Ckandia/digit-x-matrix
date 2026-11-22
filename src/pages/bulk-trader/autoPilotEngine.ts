@@ -110,6 +110,8 @@ export type TAutoPilotConfig = {
     basket_mode?: boolean;
     /** Which bases the basket may fire on (keys of BASKET_BASES). Undefined = all four. */
     basket_keys?: string[];
+    /** Basket only: add a 4th cover contract, Differs from the least frequent digit (wins about 9 times in 10 for a small payout). Off by default. */
+    basket_cover?: boolean;
     /**
      * Recover on the SAME market and the SAME pair/contract after a loss (default on in the presets). Without it the AI prefers the market
      * traded least recently, so after a loss it moved to another market and another contract. It may switch only when one of the two
@@ -152,7 +154,9 @@ export const ALL_BASKET_KEYS = BASKET_BASES.map(b => b.key);
 export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.2];
 export const BASKET_DRIFT_SHARES = [0.35, 0.35, 0.3];
 export const MIN_LEG_STAKE = 0.35; // Deriv's smallest stake per contract
-export type TBasketLeg = { type: string; label: string; ticks: number; share: number };
+export const BASKET_COVER_MOMENTUM_SHARES = [0.35, 0.35, 0.15, 0.15];
+export const BASKET_COVER_DRIFT_SHARES = [0.3, 0.3, 0.25, 0.15];
+export type TBasketLeg = { type: string; label: string; ticks: number; share: number; digit?: number };
 export type TBasketSetup = { number: number; base: string; regime: 'momentum' | 'drift'; direction: 'bullish' | 'bearish'; legs: TBasketLeg[]; blind: string };
 const BASKET_CONFLICTS: [string, string][] = [
     ['DIGITEVEN', 'DIGITODD'],
@@ -164,11 +168,12 @@ const BASKET_CONFLICTS: [string, string][] = [
 ];
 /** A basket never holds two contracts that cannot both win (Even + Odd, Rise + Fall ...). */
 export const basketHasConflict = (types: string[]): boolean => BASKET_CONFLICTS.some(([a, b]) => types.includes(a) && types.includes(b));
-export const basketSetup = (pair_key: string | undefined, direction: string | undefined, momentum: boolean): TBasketSetup | null => {
+export const basketSetup = (pair_key: string | undefined, direction: string | undefined, momentum: boolean, cover_digit?: number): TBasketSetup | null => {
     const base = BASKET_BASES.find(b => b.key === pair_key);
     if (!base || (direction !== 'bullish' && direction !== 'bearish')) return null;
     const bull = direction === 'bullish';
-    const shares = momentum ? BASKET_MOMENTUM_SHARES : BASKET_DRIFT_SHARES;
+    const cover = Number.isInteger(cover_digit) && (cover_digit as number) >= 0 && (cover_digit as number) <= 9;
+    const shares = cover ? (momentum ? BASKET_COVER_MOMENTUM_SHARES : BASKET_COVER_DRIFT_SHARES) : momentum ? BASKET_MOMENTUM_SHARES : BASKET_DRIFT_SHARES;
     const third: TBasketLeg = momentum
         ? { type: bull ? 'RUNHIGH' : 'RUNLOW', label: bull ? 'Only Ups' : 'Only Downs', ticks: 2, share: shares[2] }
         : { type: bull ? 'CALL' : 'PUT', label: bull ? 'Rise' : 'Fall', ticks: 1, share: shares[2] };
@@ -177,6 +182,8 @@ export const basketSetup = (pair_key: string | undefined, direction: string | un
         { type: base.types[1], label: OPPOSITE_LABEL[base.types[1]] ?? base.types[1], ticks: 1, share: shares[1] },
         third,
     ];
+    // The optional cover: Differs from the least frequent digit. It never conflicts with the other legs (it wins unless that one digit lands).
+    if (cover) legs.push({ type: 'DIGITDIFF', label: `Differs ${cover_digit}`, ticks: 1, share: shares[3], digit: cover_digit });
     if (basketHasConflict(legs.map(l => l.type))) throw new Error(`Basket ${base.label} + ${third.label} holds contracts that cancel each other`);
     return { number: base.first + (momentum ? 0 : 2) + (bull ? 0 : 1), base: base.label, regime: momentum ? 'momentum' : 'drift', direction: bull ? 'bullish' : 'bearish', legs, blind: base.blind };
 };
@@ -450,6 +457,7 @@ const OPPOSITE_LABEL: Record<string, string> = {
     NOTOUCH: 'No Touch',
     RUNHIGH: 'Only Ups',
     RUNLOW: 'Only Downs',
+    DIGITDIFF: 'Differs',
 };
 
 
@@ -1422,8 +1430,8 @@ export class AutoPilotEngine {
      * of one comes back as a value instead of rejecting the whole Promise.all: a contract that DID get bought is never left unwatched.
      */
     private _enterBasket(candidate: TCandidate, wanted_total: number, tag?: TAutoPilotEvent['tag']) {
-        const meta = candidate as { pair_key?: string; trend?: string; basket_direction?: string; momentum?: boolean };
-        const setup = basketSetup(meta.pair_key, meta.basket_direction ?? meta.trend, meta.momentum === true);
+        const meta = candidate as { pair_key?: string; trend?: string; basket_direction?: string; momentum?: boolean; cover_digit?: number };
+        const setup = basketSetup(meta.pair_key, meta.basket_direction ?? meta.trend, meta.momentum === true, this.config.basket_cover === true ? meta.cover_digit : undefined);
         const retry = (ms: number) => setTimeout(() => this._findAndEnter(wanted_total, tag), ms);
         if (!setup) {
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
@@ -1456,7 +1464,7 @@ export class AutoPilotEngine {
                     contract_type: leg.type,
                     label: leg.label,
                     duration_ticks: leg.ticks,
-                    prediction: leg.type === 'DIGITOVER' ? 4 : leg.type === 'DIGITUNDER' ? 5 : undefined,
+                    prediction: leg.type === 'DIGITOVER' ? 4 : leg.type === 'DIGITUNDER' ? 5 : leg.type === 'DIGITDIFF' ? leg.digit : undefined,
                     pair_with: undefined,
                     basis: `Basket setup ${setup.number}: ${setup.base} + ${setup.legs[2].label} (${setup.direction} ${setup.regime}).`,
                 } as unknown as TCandidate;
@@ -1506,7 +1514,7 @@ export class AutoPilotEngine {
                 this.stop('trade placement failed');
                 return;
             }
-            for (const f of failed) this.hooks?.onLog?.('error', `${f.b.leg.label} could not be bought (${String((f as { err?: { message?: string } }).err?.message ?? 'refused')}): the basket runs with ${bought.length} of 3 contracts.`);
+            for (const f of failed) this.hooks?.onLog?.('error', `${f.b.leg.label} could not be bought (${String((f as { err?: { message?: string } }).err?.message ?? 'refused')}): the basket runs with ${bought.length} of ${setup.legs.length} contracts.`);
             const pair: TPair = { pending: bought.length, profit: 0, stake: Number(bought.reduce((a, r) => a + r.b.stake, 0).toFixed(2)), basket: true, returned: 0, legs: bought.length, intended: wanted_total };
             this.ladder_spent = Number((this.ladder_spent + pair.stake).toFixed(2));
             for (const r of bought) this._watch(r.b.cand, r.b.stake, r.id, r.b.leg.ticks, pair);

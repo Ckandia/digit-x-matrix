@@ -664,6 +664,18 @@ const AiAgentPanel = ({
                                     {localize(base.label)} ({localize('blind spot')} {base.blind})
                                 </label>
                             ))}
+                        {config?.basket_mode === true && (
+                            <label style={{ display: 'block', marginLeft: 18 }}>
+                                <input
+                                    type='checkbox'
+                                    checked={config.basket_cover === true}
+                                    disabled={status === 'connecting'}
+                                    onChange={e => setConfig({ ...config, basket_cover: e.target.checked })}
+                                />{' '}
+                                <strong>{localize('Add a cover contract: Differs')}</strong>{' '}
+                                <InfoNote text={localize('A 4th contract in the basket: Differs from the least frequent digit (stakes 35/35/15/15 with Only Ups / Downs, 30/30/25/15 with Rise / Fall). It wins about 9 times in 10 but pays only a few percent, so it softens a losing basket instead of turning it into a win. Because it usually returns something, a losing basket then counts as a partial loss and the total stake stays the same instead of growing x1.5. It does not change the odds: every contract still has a negative expected value.')} />
+                            </label>
+                        )}
                     </div>
                     <div className='ai-agent-panel__hint'>
                         <label style={{ display: 'block' }}>

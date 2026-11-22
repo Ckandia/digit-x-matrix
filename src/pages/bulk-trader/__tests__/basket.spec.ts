@@ -122,6 +122,23 @@ describe('the 16 basket setups', () => {
     });
 });
 
+describe('the optional cover leg', () => {
+    it('adds Differs from the cover digit; shares add up to 1; no cover without a valid digit', () => {
+        const m = basketSetup('even_under5', 'bullish', true, 7)!;
+        expect(m.legs.map(l => l.type)).toEqual(['DIGITEVEN', 'DIGITUNDER', 'RUNHIGH', 'DIGITDIFF']);
+        expect(m.legs.map(l => l.share)).toEqual([0.35, 0.35, 0.15, 0.15]);
+        const d = basketSetup('odd_over4', 'bearish', false, 0)!;
+        expect(d.legs.map(l => l.share)).toEqual([0.3, 0.3, 0.25, 0.15]);
+        expect(d.legs[3].digit).toBe(0);
+        expect(d.number).toBe(basketSetup('odd_over4', 'bearish', false)!.number);
+        expect(basketSetup('even_under5', 'bullish', true, undefined)!.legs).toHaveLength(3);
+        expect(basketSetup('even_under5', 'bullish', true, 10)!.legs).toHaveLength(3);
+        expect(basketStakes(10, m.legs)).toEqual([3.5, 3.5, 1.5, 1.5]);
+        expect(basketMinTotal(m.legs)).toBe(2.34);
+        expect(basketHasConflict(m.legs.map(l => l.type))).toBe(false);
+    });
+});
+
 describe('the basket is bought in one go', () => {
     it('one signal = three buys sent in the same tick, with the split stakes and the right durations', async () => {
         const h = make({ R_B1: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, bk);
@@ -175,6 +192,47 @@ describe('the basket is bought in one go', () => {
         expect(types).toHaveLength(3);
         expect([...types].sort()).toEqual(['DIGITEVEN', 'DIGITUNDER', 'PUT']); // setup 3/4 = bearish drift: Fall
         expect(h.conn.log.filter(x => x === 'ticks_history')).toHaveLength(0); // no chart request before the buy
+        h.engine.stop();
+    });
+
+    it('cover on: a 4th contract, Differs from the least frequent digit, is bought in the same go; cover off keeps 3', async () => {
+        const on = make({ R_B10: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true, { cover_digit: 7 })] }, { ...bk, stake: 10, basket_cover: true });
+        on.engine.start();
+        await wait(150);
+        const buys = on.conn.buys_();
+        expect(buys).toHaveLength(4);
+        const diff = buys.find(b => b.parameters.contract_type === 'DIGITDIFF');
+        expect(diff.parameters.barrier).toBe('7');
+        expect(diff.parameters.duration).toBe(1);
+        expect(diff.price).toBe(1.5); // 15% of 10
+        expect(Number(buys.reduce((a, b) => a + b.price, 0).toFixed(2))).toBe(10); // the four stakes add up to the total
+        on.engine.stop();
+        const off = make({ R_B11: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true, { cover_digit: 7 })] }, { ...bk, stake: 10 });
+        off.engine.start();
+        await wait(150);
+        expect(off.conn.buys_()).toHaveLength(3);
+        off.engine.stop();
+    });
+
+    it('cover on but the signal has no cover digit: the plain 3-contract basket', async () => {
+        const h = make({ R_B12: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true)] }, { ...bk, basket_cover: true });
+        h.engine.start();
+        await wait(150);
+        expect(h.conn.buys_()).toHaveLength(3);
+        h.engine.stop();
+    });
+
+    it('a cover that wins turns a sweep of the other three into a partial loss: the total stake stays flat', async () => {
+        const h = make({ R_B13: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true, { cover_digit: 3 })] }, { ...bk, stake: 10, basket_cover: true });
+        h.engine.start();
+        await wait(150);
+        const buys = h.conn.buys_();
+        expect(buys).toHaveLength(4);
+        buys.forEach((b, i) => h.conn.settle(100 + i + 1, b.parameters.contract_type === 'DIGITDIFF' ? 0.12 : -b.price, b.price));
+        await wait(150);
+        const next = h.conn.buys_().slice(4);
+        expect(next.length).toBeGreaterThan(0);
+        expect(Number(next.reduce((a, b) => a + b.price, 0).toFixed(2))).toBe(10); // not 15: no x1.5 after a partial loss
         h.engine.stop();
     });
 
