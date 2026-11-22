@@ -252,6 +252,14 @@ describe('the basket is bought in one go', () => {
         expect(await run([sig({ type: 'DIGITEVEN', label: 'Even' })], { recovery_mode: 'flat' })).toHaveLength(0); // outside basket mode the gate still works
     });
 
+    it('a single-contract basket signal (one confirmed contract, the basket it belongs to) is bought as a normal basket', async () => {
+        const h = make({ R_B20: [basketSig('even_over4', ['DIGITEVEN', 'DIGITOVER'], 'none', false, { single_basket: true, trigger_contract: 'DIGITEVEN', basket_direction: 'bullish', basket_setup: 11 })] }, bk);
+        h.engine.start();
+        await wait(150);
+        expect([...h.conn.buys_().map(b => b.parameters.contract_type)].sort()).toEqual(['CALL', 'DIGITEVEN', 'DIGITOVER']);
+        h.engine.stop();
+    });
+
     it('a digit-pair entry the backend did NOT judge a basket entry is not bought', async () => {
         const h = make({ R_B7: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', true, { basket_entry: false })] }, bk);
         h.engine.start();

@@ -1,3 +1,6 @@
+## Single-contract basket (Nov 2026)
+- One confirmed digit contract (2 ticks + digit frequency) buys the basket it belongs to; partner = favoured contract of the other class. `SINGLE_BASKET=off` disables. Details in FIXES-AND-SETUP.md.
+
 ## Self-review gate no longer blocks baskets (Nov 2026)
 - Basket mode bypasses the self-review gate (it blocked Even/Odd baskets via contract_type). Details in FIXES-AND-SETUP.md.
 

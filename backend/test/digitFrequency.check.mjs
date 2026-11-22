@@ -1,7 +1,7 @@
 // Pure checks for the digit frequency. Run: npm run check:digits
 import assert from 'node:assert/strict';
 import { digitFrequency, DIGIT_MIN_SUPPORT } from '../src/digitFrequency.js';
-import { computeRunBias, computeRunSignals, basketDirection } from '../src/runBias.js';
+import { computeRunBias, computeRunSignals, basketDirection, basketFor } from '../src/runBias.js';
 
 const rep = (d, k) => new Array(k).fill(d);
 
@@ -94,7 +94,7 @@ const forced = (even, under5) => {
     const x = JSON.parse(JSON.stringify(pairScan));
     x.digits.contracts.even.favoured = even;
     x.digits.contracts.under5.favoured = under5;
-    return computeRunSignals(x, 'T').some(sg => sg.entry && sg.pair_key === 'even_under5');
+    return computeRunSignals(x, 'T').some(sg => sg.entry && sg.pair_key === 'even_under5' && !sg.single_basket);
 };
 assert.equal(forced(true, true), true, 'Even + Under 5 fires when the frequency favours both legs');
 assert.equal(forced(true, false), false, 'Even + Under 5 needs the frequency to favour Under 5 as well');
@@ -150,5 +150,45 @@ assert.equal(noTrend('bullish', [10, 9]).basket_direction, 'bullish', 'a confirm
         assert.ok(f.counts[f.least.digit] <= Math.min(...f.counts), 'the least digit has the fewest appearances');
     }
     assert.ok(favouredAny > 0);
+}
+
+// ---- ONE confirmed contract starts a basket: the basket it belongs to, the legs need not agree
+{
+    const x = JSON.parse(JSON.stringify(pairScan));
+    // only Even is favoured (Under 5 is NOT, Over 4 is): the pair entry needs both digit legs, so only the single path can fire
+    x.digits.contracts.even.favoured = true;
+    x.digits.contracts.odd.favoured = false;
+    x.digits.contracts.under5.favoured = false;
+    x.digits.contracts.over4.favoured = true;
+    x.digits.contracts.under5.strength = 0;
+    x.trend = 'none';
+    x.direction = 'bullish';
+    x.rise_run = 0;
+    x.fall_run = 0;
+    const sigs = computeRunSignals(x, 'T');
+    assert.equal(sigs.some(sg => sg.entry && sg.pair_key && !sg.single_basket), false, 'no full-pair entry: Under 5 is not favoured');
+    const one = sigs.filter(sg => sg.single_basket);
+    assert.equal(one.length, 1, 'exactly one single-contract basket per market per look');
+    const sb = one[0];
+    assert.equal(sb.entry && sb.basket_entry, true);
+    assert.ok(['even_over4', 'odd_over4'].includes(sb.pair_key), `the partner is the FAVOURED contract of the other class (Over 4), got ${sb.pair_key}`);
+    assert.equal(sb.pair_key, 'even_over4', 'Even belongs to Even + Over 4 here');
+    assert.equal(sb.trigger_contract, 'DIGITEVEN');
+    assert.deepEqual(sb.pair_types, ['DIGITEVEN', 'DIGITOVER']);
+    assert.equal(sb.basket_direction, 'bullish');
+    assert.equal(sb.basket_setup, basketFor('even_over4', 'bullish', false).number);
+    assert.ok(sb.run_id.endsWith(':single'));
+    assert.ok(Number.isInteger(sb.cover_digit));
+    // with a full pair basket on the same market, the single one is not added (no double buy on the same ticks)
+    const both = computeRunSignals(JSON.parse(JSON.stringify(pairScan)), 'T');
+    const y = JSON.parse(JSON.stringify(pairScan));
+    y.digits.contracts.even.favoured = true; y.digits.contracts.under5.favoured = true;
+    y.digits.contracts.odd.favoured = false; y.digits.contracts.over4.favoured = false;
+    const withPair = computeRunSignals(y, 'T');
+    if (withPair.some(sg => sg.pair_key && !sg.single_basket && sg.basket_entry)) assert.equal(withPair.some(sg => sg.single_basket), false, 'a full pair basket already buys these ticks');
+    // nothing favoured, nothing fires
+    const z = JSON.parse(JSON.stringify(pairScan));
+    for (const k of ['even', 'odd', 'over4', 'under5']) z.digits.contracts[k].favoured = false;
+    assert.equal(computeRunSignals(z, 'T').some(sg => sg.single_basket), false, 'no favoured contract, no basket');
 }
 console.log('digitFrequency checks passed');

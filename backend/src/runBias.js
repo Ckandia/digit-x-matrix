@@ -23,6 +23,7 @@ export const MIN_RUN = 2; // the shortest run any contract is analysed on
 export const RUN_WINDOW = 300; // ticks the bias is measured on (the freshest, so it follows the market)
 export const MIN_RUN_SAMPLE = 60; // ticks needed before anything is reported
 export const MIN_ENTRY_BIAS_EDGE = 5; // bias must be at least 55 for an entry signal
+export const SINGLE_BASKET_ON = (process.env.SINGLE_BASKET ?? 'on') !== 'off'; // ONE confirmed digit contract is enough to buy the basket it belongs to
 export const MOMENTUM_TICKS = 3; // the last 3 ticks all moved the trend's way = momentum (Only Ups / Only Downs); otherwise drift (Rise / Fall)
 export const FRESH_SLACK = 1; // a level still fires when the run is at most this many ticks past it (a late poll), never on an old run
 const MAX_EXTRA_SIGNALS = 3; // per symbol, besides the entry signals
@@ -412,6 +413,7 @@ export function computeRunSignals(scan, symbol) {
     if (!scan || !scan.rows.length) return [];
     const entries = [];
     const extras = [];
+    const singles = []; // digit-contract entries (fast rule) that can start a basket on their own
     for (const row of scan.rows) {
         const def = RUN_CONTRACTS.find(c => c.key === row.key);
         // Confluence: EVERY analysed run length of this contract (2 AND 3 ticks for Even/Odd and Over 4/Under 5) favours it at once.
@@ -453,6 +455,7 @@ export function computeRunSignals(scan, symbol) {
                 basis: `Run bias: ${row.label} had ${level.runs} runs of ${level.min_run}+ ticks on ${symbol} over the last ${scan.n} ticks (bias ${level.bias}%, run now ${row.current}). Replayed entry and exit ticks after the same pattern: ${level.wins}/${level.outcomes} won${level.hit === null ? '' : ` (${level.hit}%)`}.${dc ? ` Digit frequency: ${dc.support}/4 key digits (${scan.digits.key_digits.join(',')}) support it, ${dc.share}% of ticks ended on its digits${dc.favoured ? `, strength ${dc.strength}%` : ', not in its favour'}.` : ''}`,
             };
             (entry ? entries : extras).push(signal);
+            if (entry && fast && dc?.favoured) singles.push({ row, level, dc, signal });
         }
     }
     // Pair signals: the sequence favours two contracts at once, so both are bought together.
@@ -515,6 +518,57 @@ export function computeRunSignals(scan, symbol) {
                 run: { current: row.current, runs: level.runs, ticks_in_runs: level.ticks_in_runs, longest: row.longest, bias: level.bias, min_run: level.min_run, outcomes: level.outcomes, avg_net: level.avg_net, pattern: row.pattern },
                 basis: `Pair: the last ${pp.cross ? 'ticks' : 'digits'} favour ${pp.label} at once (${pp.cross ? 'price move and digit together' : pp.digits.join(', ')}) on ${symbol}: bias ${level.bias}%, run now ${row.current}, replayed net ${level.avg_net ?? 'n/a'} per pair over ${level.outcomes} entries.`,
             });
+        }
+    }
+    // SINGLE-CONTRACT BASKET: ONE confirmed digit contract (2 ticks in a row + the digit frequency in its favour) is enough. The basket it belongs to is
+    // built around it: that contract, the favoured contract of the other digit class (Even/Odd <-> Over 4/Under 5) and the third contract
+    // (Only Ups/Downs or Rise/Fall) leaning the way the chart moves. The legs do not have to agree with each other. Skipped when a full pair
+    // basket is already on for this market (it buys the same ticks), and one per market per look: the strongest, then the most recent run.
+    if (SINGLE_BASKET_ON && singles.length && !entries.some(e => e.pair_key && e.basket_entry === true)) {
+        const classOf = key => (key === 'even' || key === 'odd' ? 'parity' : 'size');
+        const candidates = [];
+        for (const { row, level, dc, signal } of singles) {
+            const others = (classOf(row.key) === 'parity' ? ['over4', 'under5'] : ['even', 'odd']).map(k => ({ key: k, c: scan.digits.contracts[k] }));
+            others.sort((a, b) => Number(b.c.favoured) - Number(a.c.favoured) || b.c.support - a.c.support || b.c.share - a.c.share);
+            const partner = others[0];
+            const pp = PAIR_PATTERNS.find(x => BASKET_BASE_KEYS.includes(x.key) && x.keys.includes(row.key) && x.keys.includes(partner.key));
+            if (!pp) continue;
+            const momentum = (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS);
+            const direction = scan.direction ?? scan.trend;
+            const setup = basketFor(pp.key, direction, momentum);
+            if (!setup) continue;
+            candidates.push({
+                family: 'run_bias',
+                strategy: 'run_bias',
+                contract_type: pp.types[0],
+                pair_types: pp.types,
+                pair_key: pp.key,
+                single_basket: true, // started by ONE confirmed contract (below), not by a full digit pair
+                trigger_contract: row.contract_type,
+                basket_entry: true,
+                basket_setup: setup.number,
+                basket: { setup: setup.number, direction, regime: momentum ? 'momentum' : 'drift', third: setup.third.type, third_bias: null, outcomes: 0, avg_net: null, entry: true },
+                trend: scan.trend,
+                cover_digit: scan.digits.least.digit,
+                basket_direction: direction,
+                momentum,
+                duration_ticks: 1,
+                prediction: pp.types[0] === 'DIGITOVER' ? 4 : undefined,
+                label: pp.label,
+                confidence: signal.confidence,
+                digit_freq: { favoured: dc.favoured, strength: dc.strength, legs: [row.key, partner.key], key_digits: scan.digits.key_digits },
+                entry: true,
+                confluence: signal.confluence,
+                run_id: `${row.run_start}:${level.min_run}:single`,
+                run: signal.run,
+                basis: `Single-contract basket: ${row.label} is confirmed on ${symbol} (2 ticks in a row, ${dc.support}/4 key digits support it); the AI buys the basket it belongs to: ${pp.label} + the third contract (${direction} ${momentum ? 'momentum' : 'drift'}).`,
+                _start: row.run_start,
+            });
+        }
+        if (candidates.length) {
+            candidates.sort((a, b) => b.confidence - a.confidence || b._start - a._start);
+            const { _start, ...best } = candidates[0];
+            entries.push(best);
         }
     }
     entries.sort((a, b) => b.confidence - a.confidence);
