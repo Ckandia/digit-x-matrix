@@ -154,6 +154,22 @@ export const ALL_BASKET_KEYS = BASKET_BASES.map(b => b.key);
 export const BASKET_MOMENTUM_SHARES = [0.4, 0.4, 0.2];
 export const BASKET_DRIFT_SHARES = [0.35, 0.35, 0.3];
 export const MIN_LEG_STAKE = 0.35; // Deriv's smallest stake per contract
+/** The backend's record of why it sent a basket signal (see buildAudit in backend/src/runBias.js). */
+export type TBasketAudit = {
+    ts: number; symbol: string; sample_size: number; counts: number[]; shares: number[]; ranked: number[]; key_digits: number[];
+    support: Record<string, number>; favoured: string[]; strength: Record<string, number>; run_current: Record<string, number>; run_bias: Record<string, number | null>;
+    run_bias_sample: number; two_tick: string; trigger: string; path: string; base: string; base_reason: string; trend: string; last5_moves: string[];
+    direction_class: string; direction_reason: string; third: string | null; regime: string | null; setup: number | null; shares_stake: number[] | null;
+};
+/** One signal, explained in three log lines: the market and digits, the bias and runs, the direction and the basket. */
+export const formatAudit = (a: TBasketAudit): string[] => {
+    const per = (o: Record<string, unknown>) => Object.entries(o).map(([k, v]) => `${k} ${v}`).join(', ');
+    return [
+        `Signal ${new Date(a.ts).toLocaleTimeString()} ${a.symbol}: last ${a.sample_size} ticks, digit counts 0-9 [${a.counts.join(' ')}], shares % [${a.shares.join(' ')}], ranked ${a.ranked.join('')}, key digits ${a.key_digits.join(',')}.`,
+        `Bias: support ${per(a.support)}; favoured ${a.favoured.join(' + ') || 'none'}; strength ${per(a.strength)}; run now ${per(a.run_current)}; run bias % ${per(a.run_bias)} (secondary, ${a.run_bias_sample} ticks). Two-tick table: ${a.two_tick}.`,
+        `Trigger ${a.trigger} via ${a.path === 'single' ? 'the single-contract path' : 'the full-pair path'}; base ${a.base} (${a.base_reason}); trend ${a.trend}, last 5 non-flat moves ${a.last5_moves.join(' ') || 'n/a'}, ${a.direction_class} (${a.direction_reason}); third ${a.third ?? 'NO DIRECTION'} ${a.regime ?? ''}; setup ${a.setup ?? 'none'}; stake shares ${a.shares_stake ? a.shares_stake.map(x => Math.round(x * 100) + '%').join('/') : 'n/a'}.`,
+    ];
+};
 export const BASKET_COVER_MOMENTUM_SHARES = [0.35, 0.35, 0.15, 0.15];
 export const BASKET_COVER_DRIFT_SHARES = [0.3, 0.3, 0.25, 0.15];
 export type TBasketLeg = { type: string; label: string; ticks: number; share: number; digit?: number };
@@ -228,7 +244,7 @@ export const basketDiagnosis = (
     if (entries === 0) return 'No digit-pair entry on any market right now (the last digits are not clustering). Waiting.';
     if (ready > 0) return `${ready} basket entr${ready === 1 ? 'y is' : 'ies are'} ready.`;
     const parts = [
-        no_direction ? `${no_direction} had no chart direction` : '',
+        no_direction ? `${no_direction} had NO DIRECTION (no confirmed trend, a trend that conflicts with the last 5 moves, or too few moves): no basket is forced` : '',
         third ? `${third} had no support for the third contract` : '',
         replay ? `${replay} were losing when replayed as a basket` : '',
         weak ? `${weak} were weaker than the minimum signal strength (${config.min_confidence})` : '',
@@ -928,6 +944,8 @@ export class AutoPilotEngine {
      * way) in a market whose bias favours it. The AI buys the strongest such signal as soon as it is received: no paper test, no
      * second wait on its own tick stream. The same run of ticks is never traded twice.
      */
+    private logged_rejects = new Set<string>();
+
     private _pickSignal(): TCandidate | null {
         // The self-review gate blocks single contracts by their past results ("All markets DIGITEVEN"). A basket signal carries its first digit contract
         // as contract_type, so the gate used to block every Even / Odd basket for good while the log said "basket entry is ready". The basket is not judged
@@ -962,10 +980,23 @@ export class AutoPilotEngine {
                     // 3-contract basket: only a digit-pair signal of a ticked base, with a chart direction (bullish / bearish) for the third contract.
                     // The backend judges the entry on the whole basket (digit pair + third contract + replayed basket result): `basket_entry`.
                     const bk = (sig as { pair_key?: string }).pair_key;
-                    // The third contract leans the way the backend says (the trend, else the last tick's move): no confirmed trend is needed.
-                    const dir = (sig as { basket_direction?: string }).basket_direction ?? (sig as { trend?: string }).trend;
-                    if (!pair_types || !bk || !basket_keys.has(bk) || (dir !== 'bullish' && dir !== 'bearish')) continue;
-                    if ((sig as { basket_entry?: boolean }).basket_entry !== true) continue;
+                    // The backend is the source of truth: it names the direction of the third contract (a LIVE trend + the last 5 non-flat moves) and the setup
+                    // number. The AI never works a direction or a setup out for itself: no direction from the backend = no basket.
+                    const b = sig as { basket_direction?: string; basket_setup?: number | null; basket_entry?: boolean; basket_reject?: string };
+                    if (!pair_types || !bk || !basket_keys.has(bk)) continue;
+                    if (b.basket_entry !== true) {
+                        if (b.basket_reject && sig.run_id !== undefined) {
+                            const rkey = `${symbol}|${sig.contract_type}|${sig.run_id}|rejected`;
+                            if (!this.logged_rejects.has(rkey)) {
+                                if (this.logged_rejects.size > 300) this.logged_rejects.clear();
+                                this.logged_rejects.add(rkey);
+                                const trig = (sig as { trigger_contract?: string }).trigger_contract ?? sig.contract_type;
+                                this.hooks?.onLog?.('info', `Signal rejected on ${symbol} (${OPPOSITE_LABEL[trig] ?? trig} confirmed, base ${bk}): ${b.basket_reject}. No basket is bought and the signal is not replayed.`);
+                            }
+                        }
+                        continue;
+                    }
+                    if ((b.basket_direction !== 'bullish' && b.basket_direction !== 'bearish') || !Number.isInteger(b.basket_setup)) continue;
                 } else if (pairs_only) {
                     // Pairs only: nothing but a ticked pair is traded, never a single contract.
                     const pk = pairKeyOf(sig as { pair_key?: string; contract_type: string });
@@ -1433,8 +1464,9 @@ export class AutoPilotEngine {
      * of one comes back as a value instead of rejecting the whole Promise.all: a contract that DID get bought is never left unwatched.
      */
     private _enterBasket(candidate: TCandidate, wanted_total: number, tag?: TAutoPilotEvent['tag']) {
-        const meta = candidate as { pair_key?: string; trend?: string; basket_direction?: string; momentum?: boolean; cover_digit?: number };
-        const setup = basketSetup(meta.pair_key, meta.basket_direction ?? meta.trend, meta.momentum === true, this.config.basket_cover === true ? meta.cover_digit : undefined);
+        const meta = candidate as { pair_key?: string; basket_direction?: string; momentum?: boolean; cover_digit?: number };
+        // Only the backend's direction is used (never the trend field, never a default): the AI builds the SAME setup the backend judged, or buys nothing.
+        const setup = basketSetup(meta.pair_key, meta.basket_direction, meta.momentum === true, this.config.basket_cover === true ? meta.cover_digit : undefined);
         const retry = (ms: number) => setTimeout(() => this._findAndEnter(wanted_total, tag), ms);
         if (!setup) {
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 5000);
@@ -1443,8 +1475,15 @@ export class AutoPilotEngine {
         }
         // The backend names the setup (1-16) it judged. If the AI would build a different one, the signal and the basket do not match: do not buy.
         const announced = (candidate as { basket_setup?: number | null }).basket_setup;
-        if (announced !== undefined && announced !== setup.number) {
-            this.hooks?.onLog?.('error', `Basket skipped on ${candidate.symbol}: the backend judged setup ${announced} but this signal builds setup ${setup.number}.`);
+        if (!Number.isInteger(announced) || announced !== setup.number) {
+            this.hooks?.onLog?.('error', `Basket skipped on ${candidate.symbol}: the backend judged setup ${announced ?? 'none'} but this signal builds setup ${setup.number}.`);
+            this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
+            retry(500);
+            return;
+        }
+        const audit = (candidate as { audit?: TBasketAudit }).audit;
+        if (audit && audit.symbol !== candidate.symbol) {
+            this.hooks?.onLog?.('error', `Basket skipped: the signal's audit record is for ${audit.symbol} but it was read on ${candidate.symbol}. Nothing is bought.`);
             this.blocked.set(`${candidate.symbol}|${candidate.contract_type}`, Date.now() + 300_000);
             retry(500);
             return;
@@ -1499,8 +1538,44 @@ export class AutoPilotEngine {
                 return { ok: false as const, b, err };
             }
         };
-        // The three sends start synchronously inside this one call: same event-loop tick.
-        Promise.all(built.map(buyLeg)).then(results => {
+        // ALL-OR-NOTHING. Every contract is priced first (a proposal for each leg, all requested together); only when EVERY quote is valid and the
+        // signal is still fresh are all the buys sent together, in the same event-loop tick. One missing, invalid or too expensive quote = nothing is bought.
+        // (A buy can still be refused after a good quote: that is reported loudly, and the legs that did go through are tracked.)
+        const run_key = `${candidate.symbol}|${candidate.contract_type}|${(candidate as { run_id?: number | string }).run_id}`;
+        const first_seen = this.seen_at.get(run_key) ?? Date.now();
+        const abort = (why: string) => {
+            this.busy = false;
+            this.hooks?.onLog?.('error', `Basket on ${candidate.symbol} NOT bought: ${why}. No contract was bought, and this signal is not replayed.`);
+            const rid = (candidate as { run_id?: number | string }).run_id;
+            if (rid !== undefined) this.used_runs.add(run_key);
+            this._emit({ phase: 'waiting', reason: `basket not bought: ${why}` });
+            retry(300);
+        };
+        const quoteLeg = async (b: (typeof built)[number]) => {
+            let res: { proposal?: { ask_price?: unknown; payout?: unknown } } | undefined;
+            try {
+                res = await this.connection.send({ proposal: 1, ...b.params });
+            } catch (err) {
+                throw new Error(`${b.leg.label} has no proposal (${err instanceof Error ? err.message : 'refused'})`);
+            }
+            const ask = Number(res?.proposal?.ask_price);
+            const payout = Number(res?.proposal?.payout);
+            if (!res?.proposal || !Number.isFinite(ask) || !Number.isFinite(payout)) throw new Error(`${b.leg.label} has no valid proposal`);
+            if (ask > b.stake + 0.011) throw new Error(`${b.leg.label} costs ${ask.toFixed(2)} but its stake is ${b.stake}`);
+            if (!(payout > ask)) throw new Error(`${b.leg.label} would pay ${payout.toFixed(2)} on a cost of ${ask.toFixed(2)}`);
+            return { b, ask, payout };
+        };
+        if (audit) for (const line of formatAudit(audit)) this.hooks?.onLog?.('info', line);
+        Promise.all(built.map(quoteLeg))
+            .then(quotes => {
+                this.hooks?.onLog?.('info', `Proposals valid: ${quotes.map(q => `${q.b.leg.label} ${q.ask.toFixed(2)} -> ${q.payout.toFixed(2)}`).join(', ')}. Sending all ${quotes.length} buys together.`);
+                if (!this.running) return abort('the AI was stopped while the proposals were coming in');
+                if (Date.now() - first_seen > MAX_SIGNAL_AGE_MS) return abort(`the signal expired (${Date.now() - first_seen} ms old, the limit is ${MAX_SIGNAL_AGE_MS} ms)`);
+                place();
+            })
+            .catch(err => abort(err instanceof Error ? err.message : 'a proposal failed'));
+        // The sends start synchronously inside this one call: same event-loop tick.
+        const place = () => Promise.all(built.map(buyLeg)).then(results => {
             const bought = results.filter((r): r is Extract<(typeof results)[number], { ok: true }> => r.ok);
             const failed = results.filter(r => !r.ok);
             if (!bought.length) {
@@ -1517,6 +1592,7 @@ export class AutoPilotEngine {
                 this.stop('trade placement failed');
                 return;
             }
+            this.hooks?.onLog?.(failed.length ? 'error' : 'success', `Atomic purchase result on ${candidate.symbol}: ${bought.length} of ${built.length} contracts bought${failed.length ? ' (a buy was refused AFTER its quote was valid)' : ''}.`);
             for (const f of failed) this.hooks?.onLog?.('error', `${f.b.leg.label} could not be bought (${String((f as { err?: { message?: string } }).err?.message ?? 'refused')}): the basket runs with ${bought.length} of ${setup.legs.length} contracts.`);
             const pair: TPair = { pending: bought.length, profit: 0, stake: Number(bought.reduce((a, r) => a + r.b.stake, 0).toFixed(2)), basket: true, returned: 0, legs: bought.length, intended: wanted_total };
             this.ladder_spent = Number((this.ladder_spent + pair.stake).toFixed(2));

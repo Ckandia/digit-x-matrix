@@ -1,6 +1,6 @@
 // Pure checks for the run-bias module: runs of 2 / 3+ ticks in a row in favour of a contract, analysed per level.
 import assert from 'node:assert/strict';
-import { PAIR_PATTERNS, BASKET_BASE_KEYS, ONLY_RUN_PROFIT, MOMENTUM_TICKS, basketFor, replayBasket, replayPair, computeRunBias, computeRunSignals, favourFlags, runStats, settleAt, replayOutcomes, lastDigit, inferDecimals, LEVELS, FRESH_SLACK, ENTRY_DELAY } from '../src/runBias.js';
+import { classifyDirection, PAIR_PATTERNS, BASKET_BASE_KEYS, ONLY_RUN_PROFIT, MOMENTUM_TICKS, basketFor, replayBasket, replayPair, computeRunBias, computeRunSignals, favourFlags, runStats, settleAt, replayOutcomes, lastDigit, inferDecimals, LEVELS, FRESH_SLACK, ENTRY_DELAY } from '../src/runBias.js';
 
 const px = digits => digits.map((d, i) => Number((100 + i * 0.1 + d / 100).toFixed(2)));
 const row = (prices, key) => computeRunBias(prices, 2).rows.find(r => r.key === key);
@@ -309,7 +309,9 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
     let fired = 0;
     let looked = 0;
     let loose = 0;
-    let noTrendFired = 0;
+    let rejected = 0;
+    let strong = 0;
+    let moderate = 0;
     for (let m = 0; m < 400; m++) {
         let price = 1000;
         const drift = (rnd() - 0.5) * 0.4;
@@ -325,15 +327,23 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
                 continue;
             }
             looked += 1;
-            const b = basketFor(sg.pair_key, sg.basket_direction ?? scan.trend, sg.momentum);
+            const b = basketFor(sg.pair_key, sg.basket_direction, sg.momentum);
             assert.equal(sg.basket_setup, b ? b.number : null, 'the signal names the same setup the AI will build');
-            if (!sg.basket_entry) continue;
+            if (!sg.basket_entry) {
+                if (sg.entry && !sg.basket_direction) {
+                    rejected += 1;
+                    assert.ok(/^NO DIRECTION/.test(sg.basket_reject), 'a pair entry with no direction says so');
+                    assert.equal(sg.basket_setup, null);
+                }
+                continue;
+            }
             fired += 1;
             assert.ok(sg.entry, 'a basket entry is also a digit-pair entry');
-            assert.ok(sg.basket_direction === 'bullish' || sg.basket_direction === 'bearish', 'the third contract always has a direction: the trend, else the last tick');
+            assert.ok(sg.basket_direction === 'bullish' || sg.basket_direction === 'bearish', 'the third contract always has a LIVE direction');
             assert.equal(sg.basket_direction, scan.direction);
-            if (scan.trend === 'bullish' || scan.trend === 'bearish') assert.equal(scan.direction, scan.trend, 'a confirmed trend decides the direction');
-            else noTrendFired += 1;
+            assert.equal(scan.trend, sg.basket_direction, 'a basket needs the confirmed trend to agree with the direction: no default, no last-tick guess');
+            assert.ok(sg.audit && sg.audit.setup === sg.basket_setup && sg.audit.path === (sg.single_basket ? 'single' : 'pair'), 'the audit record names the setup');
+            if (sg.momentum) strong += 1; else moderate += 1;
             assert.equal(sg.basket.third, b.types[2]);
             // FAST rule: 2 consecutive ticks + the digit frequency favouring the digit legs + a chart direction. Nothing else holds the basket back.
             assert.equal(sg.run.min_run, 2, 'a basket fires on the 2-tick level');
@@ -343,7 +353,8 @@ for (const s of computeRunSignals(scan, 'R_TEST')) {
         }
     }
     assert.ok(looked > 0 && fired > 0, `basket entries must be reachable (looked ${looked}, fired ${fired})`);
-    assert.ok(noTrendFired > 0, `baskets must also fire with no confirmed trend (${noTrendFired} of ${fired})`);
+    assert.ok(rejected > 0, `pair entries with no direction must be rejected, not defaulted (${rejected})`);
+    assert.ok(strong > 0 && moderate > 0, `both regimes must be reachable (strong ${strong}, moderate ${moderate})`);
     assert.ok(loose > 0, `the AI no longer waits for the third contract's bias or the basket replay (${loose} of ${fired} entries would have waited before)`);
 }
 

@@ -1,7 +1,7 @@
 // Pure checks for the digit frequency. Run: npm run check:digits
 import assert from 'node:assert/strict';
-import { digitFrequency, DIGIT_MIN_SUPPORT } from '../src/digitFrequency.js';
-import { computeRunBias, computeRunSignals, basketDirection, basketFor } from '../src/runBias.js';
+import { preferredBase, digitFrequency, DIGIT_MIN_SUPPORT } from '../src/digitFrequency.js';
+import { computeRunBias, computeRunSignals, classifyDirection, basketFor } from '../src/runBias.js';
 
 const rep = (d, k) => new Array(k).fill(d);
 
@@ -99,31 +99,71 @@ const forced = (even, under5) => {
 assert.equal(forced(true, true), true, 'Even + Under 5 fires when the frequency favours both legs');
 assert.equal(forced(true, false), false, 'Even + Under 5 needs the frequency to favour Under 5 as well');
 assert.equal(forced(false, true), false, 'and Even');
-// ---- no confirmed trend, no wait: the basket still fires, its third contract leaning the way the last tick moved
-assert.equal(basketDirection('bullish', [1, 0]), 'bullish', 'a confirmed trend wins');
-assert.equal(basketDirection('bearish', [1, 2]), 'bearish');
-assert.equal(basketDirection('none', [1, 2, 3, 2]), 'bearish', 'no trend: the last move was down');
-assert.equal(basketDirection('none', [1, 2, 3, 3]), 'bullish', 'a flat last tick is skipped: the last real move was up');
-assert.equal(basketDirection('none', [5, 5, 5]), 'bullish', 'no move at all: bullish');
-const noTrend = (trend, last) => {
+// ---- the directional (third) contract: live trend + the last five NON-FLAT moves; no default, no last-tick guess
+const walk = moves => { // builds prices from a list of 'u' / 'd' / 'f' steps
+    const out = [100];
+    for (const m of moves) out.push(Number((out[out.length - 1] + (m === 'u' ? 1 : m === 'd' ? -1 : 0)).toFixed(2)));
+    return out;
+};
+const dir = (trend, steps) => classifyDirection(trend, walk(steps));
+assert.equal(dir('bullish', 'ddduuuu').klass, 'strong_bullish', '3 up in a row + 4 of 5 up + bullish trend = Only Ups');
+assert.equal(dir('bullish', 'dduuuu').klass, 'strong_bullish', 'last 3 up and 4 of the last 5 up');
+assert.equal(dir('bearish', 'uuudddd').klass, 'strong_bearish');
+assert.equal(dir('bullish', 'uuduuu').momentum, true);
+assert.equal(dir('bullish', 'uduudu').klass, 'moderate_bullish', '3 of 5 up, not 3 in a row = Rise');
+assert.equal(dir('bullish', 'duuddu').klass, 'moderate_bullish', '3 of 5 up, last move up');
+assert.equal(dir('bullish', 'uuuuud').klass, 'moderate_bullish', '4 of 5 up but the LAST move is down: the last 3 are not all up, so it is Rise, not Only Ups');
+assert.equal(dir('bullish', 'uuuudu').klass, 'moderate_bullish', '4 of 5 up without 3 in a row at the end = Rise');
+assert.equal(dir('bearish', 'dudduu').klass, 'none', 'a bearish trend needs 3 of the last 5 moves DOWN');
+assert.equal(dir('bearish', 'duddud').klass, 'moderate_bearish', '3 of 5 down = Fall');
+assert.equal(dir('bullish', 'uuuudd').klass, 'none', 'a bullish trend whose last 2 moves are both down contradicts it (3 of 5 up but a reversal)');
+assert.equal(dir('bullish', 'dddduu').klass, 'none', 'only 2 of 5 up with a bullish trend = conflict = no direction');
+assert.equal(dir('bearish', 'uuuudd').klass, 'none');
+assert.equal(dir('none', 'uuuuuu').klass, 'none', 'no confirmed trend = NO DIRECTION even if every move is up');
+assert.equal(dir('none', 'uuuuuu').direction, null, 'and no invented direction: not bullish');
+assert.match(dir('none', 'uuuuuu').reason, /no confirmed trend/);
+assert.equal(dir('bullish', 'uuu').klass, 'none', 'fewer than 5 non-flat moves = insufficient data');
+assert.match(dir('bullish', 'uuu').reason, /insufficient/);
+assert.deepEqual(dir('bullish', 'uufufuuu').moves, ['u', 'u', 'u', 'u', 'u'].map(() => 'up'), 'flat ticks are ignored, never counted as up or down');
+assert.equal(dir('bullish', 'uufufuuu').klass, 'strong_bullish');
+assert.equal(dir('bullish', 'ufuffu').klass, 'none', 'flat ticks do not count: only 3 non-flat moves');
+assert.equal(classifyDirection('bullish', []).klass, 'none', 'no prices = none');
+for (const t of ['bullish', 'bearish', 'none']) for (const st of ['uuuuuu', 'dddddd', 'uduudu', 'dudduu', 'uuudud', 'dddudu']) {
+    const r = dir(t, st);
+    if (r.direction) assert.equal(r.direction, t, 'the direction is always the confirmed trend side: a bullish reading never picks a bearish contract');
+    assert.equal(r.momentum, r.klass.startsWith('strong'), 'strong = momentum (Only Ups/Downs), moderate = drift (Rise/Fall)');
+}
+const withDir = (trend, steps, mutate = () => {}) => {
     const x = JSON.parse(JSON.stringify(pairScan));
     x.digits.contracts.even.favoured = true;
     x.digits.contracts.under5.favoured = true;
     x.trend = trend;
-    x.direction = basketDirection(trend, last);
-    x.rise_run = 0;
-    x.fall_run = 0;
-    return computeRunSignals(x, 'T').find(sg => sg.entry && sg.pair_key === 'even_under5');
+    x.direction_info = dir(trend, steps);
+    x.direction = x.direction_info.direction;
+    mutate(x);
+    return computeRunSignals(x, 'T').find(sg => sg.entry && sg.pair_key === 'even_under5' && !sg.single_basket);
 };
-const flatBasket = noTrend('none', [10, 11, 10]);
-assert.ok(flatBasket, 'the digit pair fires with no confirmed trend');
-assert.equal(flatBasket.basket_entry, true, 'and so does the basket: the three contracts need not agree');
-assert.equal(flatBasket.basket_direction, 'bearish');
-assert.equal(flatBasket.basket_setup, 4, 'Even + Under 5 with a falling last tick = setup 4 (bearish drift: Fall)');
-assert.equal(noTrend('none', [10, 11]).basket_setup, 3, 'a rising last tick = setup 3 (bullish drift: Rise)');
-assert.equal(flatBasket.cover_digit, pairScan.digits.least.digit, 'the basket signal names the least frequent digit for the optional Differs cover');
-assert.ok(Number.isInteger(flatBasket.cover_digit) && flatBasket.cover_digit >= 0 && flatBasket.cover_digit <= 9);
-assert.equal(noTrend('bullish', [10, 9]).basket_direction, 'bullish', 'a confirmed trend still decides the direction');
+const noDir = withDir('none', 'uuuuuu');
+assert.ok(noDir, 'the digit pair still fires with no confirmed trend');
+assert.equal(noDir.basket_entry, false, 'but NO DIRECTION means no basket: the third contract is mandatory');
+assert.equal(noDir.basket_setup, null);
+assert.match(noDir.basket_reject, /^NO DIRECTION: no confirmed trend/);
+assert.equal(noDir.basket_direction, undefined, 'no invented direction');
+const strongB = withDir('bullish', 'ddduuuu');
+assert.equal(strongB.basket_entry, true);
+assert.equal(strongB.momentum, true);
+assert.equal(strongB.basket.third, 'RUNHIGH', 'strong bullish momentum = Only Ups');
+assert.equal(strongB.basket_setup, basketFor('even_under5', 'bullish', true).number);
+assert.equal(strongB.audit.direction_class, 'strong_bullish');
+assert.equal(strongB.audit.third, 'RUNHIGH');
+assert.deepEqual(strongB.audit.last5_moves, dir('bullish', 'ddduuuu').moves);
+const moderateB = withDir('bearish', 'duddud');
+assert.equal(moderateB.basket.third, 'PUT', 'moderate bearish trend = Fall');
+assert.equal(moderateB.momentum, false);
+assert.equal(withDir('bullish', 'dddduu').basket_entry, false, 'conflicting trend and moves = no basket');
+assert.equal(withDir('bearish', 'ddduuu')?.basket.third ?? null, null, 'a bearish trend with rising moves picks neither Fall nor Rise');
+assert.equal(strongB.cover_digit, pairScan.digits.least.digit, 'the basket signal names the least frequent digit for the optional Differs cover');
+assert.ok(Number.isInteger(strongB.cover_digit) && strongB.cover_digit >= 0 && strongB.cover_digit <= 9);
 
 // ---- property check on random digit windows: the bias never leans both ways, and it follows the key digits exactly
 {
@@ -161,10 +201,9 @@ assert.equal(noTrend('bullish', [10, 9]).basket_direction, 'bullish', 'a confirm
     x.digits.contracts.under5.favoured = false;
     x.digits.contracts.over4.favoured = true;
     x.digits.contracts.under5.strength = 0;
-    x.trend = 'none';
+    x.trend = 'bullish';
+    x.direction_info = dir('bullish', 'duuddu'); // a moderate bullish trend = Rise (drift)
     x.direction = 'bullish';
-    x.rise_run = 0;
-    x.fall_run = 0;
     const sigs = computeRunSignals(x, 'T');
     assert.equal(sigs.some(sg => sg.entry && sg.pair_key && !sg.single_basket), false, 'no full-pair entry: Under 5 is not favoured');
     const one = sigs.filter(sg => sg.single_basket);
@@ -179,6 +218,16 @@ assert.equal(noTrend('bullish', [10, 9]).basket_direction, 'bullish', 'a confirm
     assert.equal(sb.basket_setup, basketFor('even_over4', 'bullish', false).number);
     assert.ok(sb.run_id.endsWith(':single'));
     assert.ok(Number.isInteger(sb.cover_digit));
+    // NO DIRECTION: the single contract is still seen, but it is rejected with a clear reason and nothing can be bought
+    const nd = JSON.parse(JSON.stringify(x));
+    nd.trend = 'none';
+    nd.direction_info = dir('none', 'uuuuuu');
+    nd.direction = null;
+    const rej = computeRunSignals(nd, 'T').filter(sg => sg.single_basket);
+    assert.equal(rej.length, 1);
+    assert.equal(rej[0].basket_entry, false);
+    assert.equal(rej[0].basket_setup, null);
+    assert.match(rej[0].basket_reject, /^NO DIRECTION/);
     // with a full pair basket on the same market, the single one is not added (no double buy on the same ticks)
     const both = computeRunSignals(JSON.parse(JSON.stringify(pairScan)), 'T');
     const y = JSON.parse(JSON.stringify(pairScan));
@@ -190,5 +239,42 @@ assert.equal(noTrend('bullish', [10, 9]).basket_direction, 'bullish', 'a confirm
     const z = JSON.parse(JSON.stringify(pairScan));
     for (const k of ['even', 'odd', 'over4', 'under5']) z.digits.contracts[k].favoured = false;
     assert.equal(computeRunSignals(z, 'T').some(sg => sg.single_basket), false, 'no favoured contract, no basket');
+}
+
+// ---- the supplied backend snapshot, rebuilt as 300-tick digit windows (counts per digit 0-9, no ties among the key digits): supports, shares,
+// strengths and the live-selected base must match. These are VALIDATION windows only: the bot calculates every market live and hard-codes nothing.
+{
+    const windows = {
+        V10: { counts: [23, 31, 16, 27, 36, 20, 37, 39, 41, 30], even: [2, 51], odd: [2, 49], over4: [4, 56], under5: [0, 44], strength: { over4: 71 }, base: 'even_over4' },
+        V25: { counts: [30, 30, 28, 30, 34, 33, 24, 28, 31, 32], even: [1, 49], odd: [3, 51], over4: [2, 49], under5: [2, 51], strength: { odd: 42, under5: 21 }, base: 'odd_under5' },
+        V50: { counts: [31, 28, 36, 27, 31, 32, 18, 25, 30, 42], even: [1, 49], odd: [3, 51], over4: [2, 49], under5: [2, 51], strength: { odd: 43, under5: 22 }, base: 'odd_under5' },
+        V75: { counts: [25, 30, 36, 26, 29, 27, 27, 35, 42, 23], even: [3, 53], odd: [1, 47], over4: [2, 51], under5: [2, 49], strength: { even: 46, over4: 23 }, base: 'even_over4' },
+        V100: { counts: [26, 30, 40, 37, 28, 24, 28, 25, 33, 29], even: [3, 52], odd: [1, 48], over4: [1, 46], under5: [3, 54], strength: { even: 43, under5: 47 }, base: 'even_under5' },
+    };
+    for (const [m, w] of Object.entries(windows)) {
+        assert.equal(w.counts.reduce((a, b) => a + b, 0), 300, `${m}: 300 ticks`);
+        const digits = [];
+        w.counts.forEach((c, d) => { for (let k = 0; k < c; k++) digits.push(d); });
+        for (let i = digits.length - 1; i > 0; i--) { const j = (i * 7919 + 13) % (i + 1); [digits[i], digits[j]] = [digits[j], digits[i]]; } // any order: no ties, so order does not matter
+        const f = digitFrequency(digits);
+        for (const k of ['even', 'odd', 'over4', 'under5']) {
+            assert.equal(f.contracts[k].support, w[k][0], `${m} ${k} support`);
+            assert.equal(Math.round(f.contracts[k].share), w[k][1], `${m} ${k} share`);
+        }
+        for (const [k, v] of Object.entries(w.strength)) assert.equal(f.contracts[k].strength, v, `${m} ${k} strength`);
+        const base = preferredBase(f);
+        assert.equal(base.key, w.base, `${m}: the live favoured contracts select ${w.base}`);
+        assert.equal(f.contracts.even.favoured !== f.contracts.odd.favoured, true, `${m}: exactly one of Even / Odd`);
+        assert.equal(f.contracts.over4.favoured !== f.contracts.under5.favoured, true, `${m}: exactly one of Over 4 / Under 5`);
+        assert.equal(f.n, 300);
+    }
+    // the base follows the live data: change the window and the base changes with it (nothing is permanent)
+    const flip = [];
+    [60, 5, 50, 5, 55, 5, 50, 5, 55, 10].forEach((c, d) => { for (let k = 0; k < c; k++) flip.push(d); }); // evens dominate, 8 and 9 are rare
+    assert.equal(preferredBase(digitFrequency(flip)).parity, 'even');
+    assert.equal(preferredBase(null), null);
+    // the window is the freshest 300 ticks
+    const long = Array.from({ length: 450 }, (_, i) => (i < 150 ? 0 : i % 10));
+    assert.equal(computeRunBias(series(long), 2).digits.n, 300, 'the window stays at the freshest 300 ticks');
 }
 console.log('digitFrequency checks passed');

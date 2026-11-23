@@ -79,5 +79,19 @@ export function digitFrequency(digits) {
         mine.favoured = mine.support >= DIGIT_MIN_SUPPORT && leads;
         mine.strength = mine.favoured ? Math.round(clamp((mine.support - 1) * 20 + Math.max(0, mine.share - 50) * 2, 0, 100)) : 0;
     }
-    return { n, counts, pct: counts.map(c => round2((c / n) * 100)), first, second, third, least, key_digits: [first.digit, second.digit, third.digit, least.digit], contracts };
+    return { n, counts, pct: counts.map(c => round2((c / n) * 100)), ranked: most, first, second, third, least, key_digits: [first.digit, second.digit, third.digit, least.digit], contracts };
+}
+
+/**
+ * The digit base the live favoured contracts select: the favoured one of Even / Odd + the favoured one of Over 4 / Under 5.
+ * One side of every opposite pair is always favoured when the window is not empty, so a base always exists. Never hard-coded per market:
+ * it is recalculated from each market's own window.
+ */
+export function preferredBase(freq) {
+    if (!freq) return null;
+    const c = freq.contracts;
+    const parity = c.even.favoured ? 'even' : c.odd.favoured ? 'odd' : null;
+    const size = c.over4.favoured ? 'over4' : c.under5.favoured ? 'under5' : null;
+    if (!parity || !size) return null;
+    return { parity, size, key: `${parity}_${size}`, reason: `${parity} favoured (support ${c[parity].support}/4, share ${c[parity].share}%) + ${size} favoured (support ${c[size].support}/4, share ${c[size].share}%)` };
 }

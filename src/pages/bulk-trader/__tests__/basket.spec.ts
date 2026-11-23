@@ -11,6 +11,7 @@ class Conn {
     subs = new Map<number, { req: any; cb: any }>();
     history: Record<string, number[]> = {};
     payout = 3.8;
+    quote?: (req: any) => any; // a test can make any proposal fail, miss or cost too much
     log: string[] = []; // the order requests were sent in
     private n = 1;
     private buys = 0;
@@ -21,7 +22,10 @@ class Conn {
     async send(req: any) {
         this.sent.push(req);
         if (!req.ping) this.log.push(Object.keys(req).find(k => ['proposal', 'buy', 'ticks_history'].includes(k)) ?? 'other');
-        if (req.proposal) return { proposal: { ask_price: 1, payout: this.payout } };
+        if (req.proposal) {
+            if (this.quote) return this.quote(req);
+            return { proposal: { ask_price: req.amount ?? 1, payout: this.payout * (req.amount ?? 1) } };
+        }
         if (req.buy) return { buy: { contract_id: 100 + ++this.buys } };
         if (req.ticks_history) {
             const prices = this.history[req.ticks_history] ?? [];
@@ -64,13 +68,60 @@ const make = (signals: Record<string, unknown[]>, cfg: Partial<TAutoPilotConfig>
 
 // a basket signal: a digit-pair signal with the chart direction and the momentum flag (a fresh run id on every read)
 const basketSig = (key: string, types: [string, string], trend: string, momentum: boolean, extra: object = {}) =>
-    ({ family: 'run_bias', strategy: 'run_bias', entry: true, basket_entry: true, confluence: false, pair_types: types, pair_key: key, trend, momentum, get run_id() { return `${++rid}:2:pair`; }, contract_type: types[0], label: 'pair', confidence: 70, basis: '', ...extra }) as never;
+    ({ family: 'run_bias', strategy: 'run_bias', entry: true, basket_entry: true, confluence: false, pair_types: types, pair_key: key, trend, momentum,
+        // the backend names the live direction and the setup number; the tests send them exactly as it does (trend = the direction)
+        ...(trend === 'bullish' || trend === 'bearish' ? { basket_direction: trend, basket_setup: basketSetup(key, trend, momentum)?.number } : {}), get run_id() { return `${++rid}:2:pair`; }, contract_type: types[0], label: 'pair', confidence: 70, basis: '', ...extra }) as never;
 const bk: Partial<TAutoPilotConfig> = { basket_mode: true, stake: 2, martingale_multiplier: 1.5, max_steps: 5, stop_loss: 1000, take_profit: 1000, recovery_mode: 'flat' };
 const EU = ['even_under5', ['DIGITEVEN', 'DIGITUNDER']] as const;
 const buyTypes = (h: { conn: Conn }, from = 0, n = 3) => h.conn.buys_().slice(from, from + n).map(b => b.parameters.contract_type);
 const buyStakes = (h: { conn: Conn }, from = 0, n = 3) => h.conn.buys_().slice(from, from + n).map(b => b.price);
 // settles the three legs of the round that starts at buy index `from` (ids are 101, 102, ... in buy order)
 const settleRound = (h: { conn: Conn }, from: number, results: number[]) => results.forEach((profit, i) => h.conn.settle(101 + from + i, profit, h.conn.buys_()[from + i].price));
+
+describe('backend and frontend agree on the 16 setups', () => {
+    // The backend (JS, ESM) is the source of truth for the setup number. Load it and compare every one of the 16 with what the AI builds.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const loadBackend = async () => (await import('../../../../backend/src/runBias.js')) as unknown as { basketFor: (k: string, d: string, m: boolean) => { number: number; types: string[]; shares: number[]; regime: string } | null; BASKET_BASE_KEYS: string[] };
+    it('every base x regime x direction: same number, same three contract types, same stake shares', async () => {
+        let backend: Awaited<ReturnType<typeof loadBackend>>;
+        try {
+            backend = await loadBackend();
+        } catch {
+            return; // the test runner cannot load the backend module: the same check runs in backend/test/digitFrequency.check.mjs
+        }
+        const numbers: number[] = [];
+        expect(backend.BASKET_BASE_KEYS).toEqual(BASKET_BASES.map(b => b.key));
+        for (const base of BASKET_BASES) {
+            for (const momentum of [true, false]) {
+                for (const direction of ['bullish', 'bearish']) {
+                    const b = backend.basketFor(base.key, direction, momentum)!;
+                    const f = basketSetup(base.key, direction, momentum)!;
+                    expect(f.number).toBe(b.number);
+                    expect(f.legs.map(l => l.type)).toEqual(b.types);
+                    expect(f.legs.map(l => l.share)).toEqual(b.shares);
+                    expect(f.regime).toBe(b.regime);
+                    numbers.push(f.number);
+                }
+            }
+        }
+        expect(numbers.sort((x, y) => x - y)).toEqual(Array.from({ length: 16 }, (_, i) => i + 1));
+    });
+    it('the full table (documented in CHANGES-V2.md)', () => {
+        const table = BASKET_BASES.flatMap(base => [true, false].flatMap(m => ['bullish', 'bearish'].map(d => { const f = basketSetup(base.key, d, m)!; return `${f.number}: ${base.key} + ${f.legs[2].type} (${d} ${m ? 'momentum' : 'drift'})`; })));
+        expect(table).toHaveLength(16);
+        expect(table[0]).toBe('1: even_under5 + RUNHIGH (bullish momentum)');
+        expect(table[15]).toBe('16: odd_under5 + PUT (bearish drift)');
+        console.log(table.join('\n'));
+    });
+    it('a bullish reading never builds a bearish third contract, a bearish one never a bullish one', () => {
+        for (const base of BASKET_BASES) for (const m of [true, false]) {
+            expect(basketSetup(base.key, 'bullish', m)!.legs[2].type).toBe(m ? 'RUNHIGH' : 'CALL');
+            expect(basketSetup(base.key, 'bearish', m)!.legs[2].type).toBe(m ? 'RUNLOW' : 'PUT');
+            expect(basketSetup(base.key, undefined, m)).toBeNull();
+            expect(basketSetup(base.key, 'none', m)).toBeNull();
+        }
+    });
+});
 
 describe('the 16 basket setups', () => {
     it('numbers 1-16 map to base x regime x direction, in the order the spec lists them', () => {
@@ -185,15 +236,116 @@ describe('the basket is bought in one go', () => {
         h.engine.stop();
     });
 
-    it('no confirmed trend is needed: the basket buys at once, the third contract leaning the way the backend names', async () => {
-        const h = make({ R_B5: [basketSig(EU[0], [...EU[1]] as [string, string], 'none', false, { basket_direction: 'bearish', basket_setup: 4 })] }, bk);
+    it('the AI buys the direction the BACKEND names and nothing else: a bullish trend field without a backend direction buys nothing', async () => {
+        const noDir = { ...(basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false) as object), basket_direction: undefined, basket_setup: undefined };
+        const h = make({ R_B5: [noDir as never] }, bk);
         h.engine.start();
         await wait(150);
-        const types = h.conn.buys_().map(b => b.parameters.contract_type);
-        expect(types).toHaveLength(3);
-        expect([...types].sort()).toEqual(['DIGITEVEN', 'DIGITUNDER', 'PUT']); // setup 3/4 = bearish drift: Fall
-        expect(h.conn.log.filter(x => x === 'ticks_history')).toHaveLength(0); // no chart request before the buy
+        expect(h.conn.buys_()).toHaveLength(0);
+        expect(h.conn.log.filter(x => x === 'proposal' || x === 'ticks_history')).toHaveLength(0);
         h.engine.stop();
+    });
+
+    it('NO DIRECTION: the backend rejects the basket, the AI buys nothing, logs the reason once and never replays it', async () => {
+        const rejected = basketSig(EU[0], [...EU[1]] as [string, string], 'none', false, { basket_entry: false, basket_setup: null, basket_direction: undefined, basket_reject: 'NO DIRECTION: no confirmed trend' });
+        const h = make({ R_B5: [rejected] }, bk);
+        h.engine.start();
+        await wait(350);
+        expect(h.conn.buys_()).toHaveLength(0);
+        expect(h.conn.log.filter(x => x === 'proposal')).toHaveLength(0);
+        h.engine.stop();
+        // one log line per run: the run id changes on every read of the fixture, so count the lines per distinct run instead of expecting exactly one
+        expect(h.logs.some(l => /Signal rejected on R_B5.*NO DIRECTION: no confirmed trend.*not replayed/.test(l))).toBe(true);
+    });
+
+    it('an old backend (no basket_setup at all) buys nothing: the AI never guesses the setup', async () => {
+        const old = { ...(basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false) as object), basket_setup: undefined };
+        const h = make({ R_B5: [old as never] }, bk);
+        h.engine.start();
+        await wait(150);
+        expect(h.conn.buys_()).toHaveLength(0);
+        h.engine.stop();
+    });
+
+    describe('all or nothing', () => {
+        const run = async (quote: ((req: any) => any) | undefined, cfg: Partial<TAutoPilotConfig> = {}) => {
+            const h = make({ R_AT: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false)] }, { ...bk, stake: 2, ...cfg });
+            if (quote) h.conn.quote = quote;
+            h.engine.start();
+            await wait(200);
+            h.engine.stop();
+            return h;
+        };
+        it('three valid proposals: all three are priced first, then all three are bought', async () => {
+            const h = await run(undefined);
+            expect(h.conn.log.slice(0, 6)).toEqual(['proposal', 'proposal', 'proposal', 'buy', 'buy', 'buy']);
+            expect(h.logs.some(l => /Proposals valid/.test(l))).toBe(true);
+            expect(h.logs.some(l => /Atomic purchase result.*3 of 3/.test(l))).toBe(true);
+        });
+        for (const leg of [0, 1, 2]) {
+            it(`proposal ${leg + 1} of 3 is missing: nothing is bought`, async () => {
+                let n = 0;
+                const h = await run(req => {
+                    if (n++ === leg) throw new Error('Contract not offered');
+                    return { proposal: { ask_price: req.amount, payout: req.amount * 1.9 } };
+                });
+                expect(h.conn.buys_()).toHaveLength(0);
+                expect(h.logs.some(l => /NOT bought.*no proposal/.test(l))).toBe(true);
+            });
+            it(`proposal ${leg + 1} of 3 is invalid (no price): nothing is bought`, async () => {
+                let n = 0;
+                const h = await run(req => (n++ === leg ? { proposal: {} } : { proposal: { ask_price: req.amount, payout: req.amount * 1.9 } }));
+                expect(h.conn.buys_()).toHaveLength(0);
+            });
+        }
+        it('one proposal costs more than its stake: nothing is bought', async () => {
+            let n = 0;
+            const h = await run(req => ({ proposal: { ask_price: n++ === 1 ? req.amount * 1.2 : req.amount, payout: req.amount * 1.9 } }));
+            expect(h.conn.buys_()).toHaveLength(0);
+            expect(h.logs.some(l => /costs .* but its stake/.test(l))).toBe(true);
+        });
+        it('a proposal that would pay no more than it costs: nothing is bought', async () => {
+            let n = 0;
+            const h = await run(req => ({ proposal: { ask_price: req.amount, payout: n++ === 2 ? req.amount : req.amount * 1.9 } }));
+            expect(h.conn.buys_()).toHaveLength(0);
+        });
+        it('an expired signal is not bought: slow proposals push the signal past its 1.5 s limit', async () => {
+            const h = make({ R_AT: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false)] }, { ...bk, stake: 2 });
+            h.conn.quote = (req: any) => new Promise(res => setTimeout(() => res({ proposal: { ask_price: req.amount, payout: req.amount * 1.9 } }), 1700));
+            h.engine.start();
+            await wait(2100);
+            h.engine.stop();
+            expect(h.conn.buys_()).toHaveLength(0);
+            expect(h.logs.some(l => /signal expired/.test(l))).toBe(true);
+        });
+        it('the audit record for another market stops the buy (market mismatch)', async () => {
+            const sg = basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false, { audit: { symbol: 'OTHER', ts: Date.now() } });
+            const h = make({ R_AT: [sg] }, bk);
+            h.engine.start();
+            await wait(150);
+            h.engine.stop();
+            expect(h.conn.buys_()).toHaveLength(0);
+        });
+        it('the balance cannot cover the basket: nothing is bought', async () => {
+            const h = make({ R_AT: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false)] }, { ...bk, stake: 50 });
+            h.conn.accountInfo.balance = 10;
+            h.engine.start();
+            await wait(150);
+            expect(h.conn.buys_()).toHaveLength(0);
+            expect(h.conn.log.filter(x => x === 'proposal')).toHaveLength(0);
+        });
+        it('the audit record is logged before the buy: digits, bias, direction, setup', async () => {
+            const audit = { ts: Date.now(), symbol: 'R_AT', sample_size: 300, counts: [30, 30, 30, 30, 30, 30, 30, 30, 30, 30], shares: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10], ranked: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], key_digits: [0, 1, 2, 9], support: { even: 2, odd: 2, over4: 2, under5: 2 }, favoured: ['even', 'under5'], strength: { even: 20, odd: 0, over4: 0, under5: 22 }, run_current: { even: 2 }, run_bias: { even: 55 }, run_bias_sample: 300, two_tick: 'separate sample', trigger: 'DIGITEVEN', path: 'single', base: 'even_under5', base_reason: 'even + under5', trend: 'bullish', last5_moves: ['up', 'down', 'up', 'up', 'down'], direction_class: 'moderate_bullish', direction_reason: 'moderate bullish trend: 3 of 5 moves up', third: 'CALL', regime: 'drift', setup: 3, shares_stake: [0.35, 0.35, 0.3] };
+            const h = make({ R_AT: [basketSig(EU[0], [...EU[1]] as [string, string], 'bullish', false, { audit })] }, bk);
+            h.engine.start();
+            await wait(150);
+            h.engine.stop();
+            const text = h.logs.join('\n');
+            expect(text).toMatch(/last 300 ticks, digit counts 0-9/);
+            expect(text).toMatch(/favoured even \+ under5/);
+            expect(text).toMatch(/last 5 non-flat moves up down up up down, moderate_bullish/);
+            expect(text).toMatch(/setup 3; stake shares 35%\/35%\/30%/);
+        });
     });
 
     it('cover on: a 4th contract, Differs from the least frequent digit, is bought in the same go; cover off keeps 3', async () => {
@@ -375,7 +527,7 @@ describe('a silent AI explains itself', () => {
     it('a quiet market, then the reasons digit-pair entries were dropped', () => {
         const base = { ...old, basket_setup: 1, basket_entry: false };
         expect(basketDiagnosis(snap([{ ...base, entry: false }]), {})).toMatch(/No digit-pair entry on any market/);
-        expect(basketDiagnosis(snap([{ ...base, basket_setup: null }]), {})).toMatch(/1 had no chart direction/);
+        expect(basketDiagnosis(snap([{ ...base, basket_setup: null }]), {})).toMatch(/1 had NO DIRECTION/);
         expect(basketDiagnosis(snap([{ ...base, basket: { third_bias: 51 } }]), {})).toMatch(/no support for the third contract/);
         expect(basketDiagnosis(snap([{ ...base, basket: { third_bias: 60 } }]), {})).toMatch(/losing when replayed/);
         expect(basketDiagnosis(snap([{ ...base, basket_entry: true, confidence: 12 }]), { min_confidence: 20 })).toMatch(/weaker than the minimum signal strength \(20\)/);

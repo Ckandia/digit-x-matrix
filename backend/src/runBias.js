@@ -17,7 +17,7 @@
 // validated edge, and every contract still pays less than 2x. The numbers are here so the AI has a consistent, fast signal.
 
 import { detectTrend, TREND_WINDOW } from './trend.js';
-import { digitFrequency, DIGIT_GATE_ON } from './digitFrequency.js';
+import { digitFrequency, preferredBase, DIGIT_GATE_ON } from './digitFrequency.js';
 
 export const MIN_RUN = 2; // the shortest run any contract is analysed on
 export const RUN_WINDOW = 300; // ticks the bias is measured on (the freshest, so it follows the market)
@@ -305,17 +305,36 @@ export function replayBasket(pp, flag, prices, flags, min_run, decimals = 2, tre
  * @param {number} [total_ticks] how many ticks this symbol has ever shown (so a run's id keeps counting as the window slides)
  */
 /**
- * The direction the basket's third contract (Rise / Fall, Only Ups / Only Downs) leans. The confirmed 1-tick trend when there is one; otherwise the
- * way the last price MOVED (the last tick that was not flat); with no move at all, bullish. The basket no longer waits for a confirmed trend:
- * the third contract does not have to agree with the digit pair for the AI to buy.
+ * THE DIRECTION OF THE BASKET'S THIRD CONTRACT. Judged only from live data: the confirmed 1-tick trend (swings over the last 60 ticks) and the
+ * last FIVE NON-FLAT price movements (flat ticks are ignored). Nothing is invented: with no direction there is no third contract and no basket.
+ *   strong bullish  : trend bullish AND the last 3 non-flat moves all UP AND at least 4 of the last 5 UP      -> Only Ups   (momentum)
+ *   strong bearish  : the mirror image                                                                       -> Only Downs (momentum)
+ *   moderate bullish: trend bullish AND at least 3 of the last 5 UP AND not strong AND the last 2 moves are not both DOWN -> Rise (drift)
+ *   moderate bearish: the mirror image                                                                       -> Fall (drift)
+ *   none            : no confirmed trend, a trend that conflicts with the moves, or fewer than 5 non-flat moves. NOT Rise, NOT bullish, NOT the last tick.
+ * Strong wins over moderate. A bullish reading can never pick a bearish contract and the other way round (one trend decides the side).
  */
-export function basketDirection(trend, prices) {
-    if (trend === 'bullish' || trend === 'bearish') return trend;
-    for (let i = prices.length - 1; i > 0; i--) {
-        if (prices[i] > prices[i - 1]) return 'bullish';
-        if (prices[i] < prices[i - 1]) return 'bearish';
+export const DIRECTION_MOVES = 5;
+export function classifyDirection(trend, prices) {
+    const moves = [];
+    for (let i = prices.length - 1; i > 0 && moves.length < DIRECTION_MOVES; i--) {
+        if (prices[i] > prices[i - 1]) moves.push('up');
+        else if (prices[i] < prices[i - 1]) moves.push('down');
     }
-    return 'bullish';
+    moves.reverse(); // oldest -> newest
+    const ups = moves.filter(m => m === 'up').length;
+    const downs = moves.filter(m => m === 'down').length;
+    const none = reason => ({ klass: 'none', direction: null, momentum: false, trend, moves, ups, downs, reason });
+    if (moves.length < DIRECTION_MOVES) return none(`insufficient movement data (${moves.length} of ${DIRECTION_MOVES} non-flat moves)`);
+    if (trend !== 'bullish' && trend !== 'bearish') return none('no confirmed trend');
+    const want = trend === 'bullish' ? 'up' : 'down';
+    const against = trend === 'bullish' ? 'down' : 'up';
+    const agree = trend === 'bullish' ? ups : downs;
+    const strong = moves.slice(-3).every(m => m === want) && agree >= 4;
+    if (strong) return { klass: `strong_${trend}`, direction: trend, momentum: true, trend, moves, ups, downs, reason: `strong ${trend} momentum: last 3 moves ${want}, ${agree} of 5 ${want}` };
+    const moderate = agree >= 3 && !moves.slice(-2).every(m => m === against);
+    if (moderate) return { klass: `moderate_${trend}`, direction: trend, momentum: false, trend, moves, ups, downs, reason: `moderate ${trend} trend: ${agree} of 5 moves ${want}` };
+    return none(`the ${trend} trend conflicts with the recent moves (${agree} of 5 ${want}, last moves ${moves.slice(-2).join('/')})`);
 }
 
 /** How many of the last entries of a boolean array are true in a row. */
@@ -401,7 +420,47 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
     // Digit frequency of the same window: 1st / 2nd / 3rd most and the least frequent digit, and what they say about Even / Odd / Over 4 / Under 5.
     const digits = digitFrequency(tail.map(price => lastDigit(price, decimals)));
     const trend = detectTrend(tail.slice(-TREND_WINDOW));
-    return { n, min_run: MIN_RUN, decimals, reported_decimals: reported_dp, trend, direction: basketDirection(trend, tail), rise_run: trailingRun(flags.rise), fall_run: trailingRun(flags.fall), digits, rows, pairs };
+    const direction_info = classifyDirection(trend, tail);
+    return { n, min_run: MIN_RUN, decimals, reported_decimals: reported_dp, trend, direction_info, direction: direction_info.direction, rise_run: trailingRun(flags.rise), fall_run: trailingRun(flags.fall), digits, rows, pairs };
+}
+
+/**
+ * The record that explains one basket signal end to end (the AI tab logs it when it buys or rejects). Everything is read from the same scan.
+ * Note the two statistics that are NOT the same sample: the digit frequency and the run bias use the last 300 ticks of this market; the two-tick
+ * pattern table (pairScan.js) uses the market feed's 500-tick buffer (498 three-price windows) and overlaps it. They are shown side by side, never combined.
+ */
+export function buildAudit(scan, symbol, o) {
+    const d = scan.digits;
+    const keys = ['even', 'odd', 'over4', 'under5'];
+    const setup_info = o.setup ? basketFor(o.pp.key, o.info.direction, o.info.momentum) : null;
+    return {
+        ts: Date.now(),
+        symbol,
+        sample_size: d ? d.n : 0,
+        counts: d ? d.counts : [],
+        shares: d ? d.pct : [],
+        ranked: d ? d.ranked : [],
+        key_digits: d ? d.key_digits : [],
+        support: d ? Object.fromEntries(keys.map(k => [k, d.contracts[k].support])) : {},
+        favoured: d ? keys.filter(k => d.contracts[k].favoured) : [],
+        strength: d ? Object.fromEntries(keys.map(k => [k, d.contracts[k].strength])) : {},
+        run_current: Object.fromEntries(scan.rows.map(r => [r.key, r.current])),
+        run_bias: Object.fromEntries(scan.rows.map(r => [r.key, r.levels[0] ? r.levels[0].bias : null])),
+        run_bias_sample: scan.n,
+        two_tick: 'see the two-tick table (pairScan.js): 500-tick buffer, 498 windows; a different sample from the 300-tick window above',
+        trigger: o.trigger,
+        path: o.path,
+        base: o.pp.key,
+        base_reason: o.base_reason,
+        trend: scan.trend,
+        last5_moves: o.info.moves,
+        direction_class: o.info.klass,
+        direction_reason: o.info.reason,
+        third: setup_info ? setup_info.third.type : null,
+        regime: setup_info ? setup_info.regime : null,
+        setup: o.setup ?? null,
+        shares_stake: setup_info ? setup_info.shares : null,
+    };
 }
 
 /**
@@ -411,6 +470,7 @@ export function computeRunBias(prices, decimals = 2, total_ticks = prices.length
  */
 export function computeRunSignals(scan, symbol) {
     if (!scan || !scan.rows.length) return [];
+    const info = scan.direction_info ?? classifyDirection(scan.trend, []); // live direction of the third contract (see classifyDirection)
     const entries = [];
     const extras = [];
     const singles = []; // digit-contract entries (fast rule) that can start a basket on their own
@@ -479,9 +539,10 @@ export function computeRunSignals(scan, symbol) {
             // longer hold the basket back (with the digit frequency off, the old rule needs both: third bias >= 55% and a basket not losing).
             let basket = null;
             if (BASKET_BASE_KEYS.includes(pp.key)) {
-                const momentum = (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS);
-                // Fast rule: the third contract leans the way the chart moves (trend, else the last tick); no confirmed trend is needed. Old rule: trend only.
-                const direction = fast ? (scan.direction ?? scan.trend) : scan.trend;
+                // The third contract comes ONLY from the live direction (classifyDirection): strong momentum = Only Ups / Only Downs, a moderate trend =
+                // Rise / Fall, anything else = NO DIRECTION and no basket (never a default Rise, never the last tick).
+                const momentum = info.momentum;
+                const direction = info.direction;
                 const setup = basketFor(pp.key, direction, momentum);
                 const third_row = setup ? scan.rows.find(r => r.key === setup.third.key) : null;
                 const third_bias = third_row ? third_row.levels[0].bias : null;
@@ -489,7 +550,7 @@ export function computeRunSignals(scan, symbol) {
                 const rb = level.basket ?? { outcomes: 0, avg_net: null };
                 const basket_replayed = rb.outcomes >= MIN_OUTCOME_SAMPLE && rb.avg_net !== null;
                 const basket_net_ok = !basket_replayed || rb.avg_net >= 0;
-                basket = { setup: setup ? setup.number : null, direction, regime: momentum ? 'momentum' : 'drift', third: setup ? setup.third.type : null, third_bias, outcomes: rb.outcomes, avg_net: rb.avg_net, entry: Boolean(entry && setup && (fast || (third_ok && basket_net_ok))) };
+                basket = { setup: setup ? setup.number : null, direction, regime: direction ? (momentum ? 'momentum' : 'drift') : null, direction_class: info.klass, reject: setup ? undefined : `NO DIRECTION: ${info.reason}`, third: setup ? setup.third.type : null, third_bias, outcomes: rb.outcomes, avg_net: rb.avg_net, entry: Boolean(entry && setup && (fast || (third_ok && basket_net_ok))) };
             }
             (entry ? entries : extras).push({
                 family: 'run_bias',
@@ -502,8 +563,10 @@ export function computeRunSignals(scan, symbol) {
                 basket: basket ?? undefined,
                 trend: scan.trend, // the 1-tick chart trend (bullish / bearish / none)
                 cover_digit: basket && scan.digits ? scan.digits.least.digit : undefined, // the digit the optional Differs cover contract bets against (the least frequent one)
-                basket_direction: basket ? basket.direction : undefined, // the direction the basket's third contract leans (the trend, else the last tick's move)
-                momentum: (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS),
+                basket_direction: basket && basket.direction ? basket.direction : undefined, // the live direction of the third contract (strong/moderate trend); absent = NO DIRECTION
+                basket_reject: basket ? basket.reject : undefined,
+                momentum: info.momentum,
+                audit: entry && basket ? buildAudit(scan, symbol, { path: 'pair', trigger: pp.types[0], pp, info, setup: basket.setup, base_reason: leg_freq.length ? `both digit legs favoured: ${pp.keys.map(k => `${k} (support ${scan.digits.contracts[k].support}/4, share ${scan.digits.contracts[k].share}%)`).join(' + ')}` : 'pair' }) : undefined,
                 duration_ticks: 1,
                 prediction: pp.types[0] === 'DIGITOVER' ? 4 : undefined,
                 label: pp.label,
@@ -525,18 +588,13 @@ export function computeRunSignals(scan, symbol) {
     // (Only Ups/Downs or Rise/Fall) leaning the way the chart moves. The legs do not have to agree with each other. Skipped when a full pair
     // basket is already on for this market (it buys the same ticks), and one per market per look: the strongest, then the most recent run.
     if (SINGLE_BASKET_ON && singles.length && !entries.some(e => e.pair_key && e.basket_entry === true)) {
-        const classOf = key => (key === 'even' || key === 'odd' ? 'parity' : 'size');
+        const base = preferredBase(scan.digits); // the base the live favoured contracts select
         const candidates = [];
         for (const { row, level, dc, signal } of singles) {
-            const others = (classOf(row.key) === 'parity' ? ['over4', 'under5'] : ['even', 'odd']).map(k => ({ key: k, c: scan.digits.contracts[k] }));
-            others.sort((a, b) => Number(b.c.favoured) - Number(a.c.favoured) || b.c.support - a.c.support || b.c.share - a.c.share);
-            const partner = others[0];
-            const pp = PAIR_PATTERNS.find(x => BASKET_BASE_KEYS.includes(x.key) && x.keys.includes(row.key) && x.keys.includes(partner.key));
+            if (!base) continue;
+            const pp = PAIR_PATTERNS.find(x => BASKET_BASE_KEYS.includes(x.key) && x.key === base.key && x.keys.includes(row.key)); // X must belong to the selected base
             if (!pp) continue;
-            const momentum = (scan.trend === 'bullish' && scan.rise_run >= MOMENTUM_TICKS) || (scan.trend === 'bearish' && scan.fall_run >= MOMENTUM_TICKS);
-            const direction = scan.direction ?? scan.trend;
-            const setup = basketFor(pp.key, direction, momentum);
-            if (!setup) continue;
+            const setup = basketFor(pp.key, info.direction, info.momentum);
             candidates.push({
                 family: 'run_bias',
                 strategy: 'run_bias',
@@ -545,30 +603,33 @@ export function computeRunSignals(scan, symbol) {
                 pair_key: pp.key,
                 single_basket: true, // started by ONE confirmed contract (below), not by a full digit pair
                 trigger_contract: row.contract_type,
-                basket_entry: true,
-                basket_setup: setup.number,
-                basket: { setup: setup.number, direction, regime: momentum ? 'momentum' : 'drift', third: setup.third.type, third_bias: null, outcomes: 0, avg_net: null, entry: true },
+                basket_entry: Boolean(setup),
+                basket_setup: setup ? setup.number : null,
+                basket_reject: setup ? undefined : `NO DIRECTION: ${info.reason}`,
+                basket: { setup: setup ? setup.number : null, direction: info.direction, regime: info.direction ? (info.momentum ? 'momentum' : 'drift') : null, direction_class: info.klass, reject: setup ? undefined : `NO DIRECTION: ${info.reason}`, third: setup ? setup.third.type : null, third_bias: null, outcomes: 0, avg_net: null, entry: Boolean(setup) },
                 trend: scan.trend,
                 cover_digit: scan.digits.least.digit,
-                basket_direction: direction,
-                momentum,
+                basket_direction: info.direction ?? undefined,
+                momentum: info.momentum,
                 duration_ticks: 1,
                 prediction: pp.types[0] === 'DIGITOVER' ? 4 : undefined,
                 label: pp.label,
                 confidence: signal.confidence,
-                digit_freq: { favoured: dc.favoured, strength: dc.strength, legs: [row.key, partner.key], key_digits: scan.digits.key_digits },
+                digit_freq: { favoured: dc.favoured, strength: dc.strength, legs: pp.keys, key_digits: scan.digits.key_digits },
                 entry: true,
                 confluence: signal.confluence,
                 run_id: `${row.run_start}:${level.min_run}:single`,
                 run: signal.run,
-                basis: `Single-contract basket: ${row.label} is confirmed on ${symbol} (2 ticks in a row, ${dc.support}/4 key digits support it); the AI buys the basket it belongs to: ${pp.label} + the third contract (${direction} ${momentum ? 'momentum' : 'drift'}).`,
+                audit: buildAudit(scan, symbol, { path: 'single', trigger: row.contract_type, pp, info, setup: setup ? setup.number : null, base_reason: base.reason }),
+                basis: `Single-contract basket: ${row.label} is confirmed on ${symbol} (2 ticks in a row, ${dc.support}/4 key digits support it); the AI buys the basket it belongs to: ${pp.label} + ${setup ? setup.third.label : 'NO DIRECTION (' + info.reason + ')'}.`,
                 _start: row.run_start,
             });
         }
         if (candidates.length) {
-            candidates.sort((a, b) => b.confidence - a.confidence || b._start - a._start);
+            // A buyable basket first; then the strongest; then the most recent run. One per market per look.
+            candidates.sort((a, b) => Number(b.basket_entry) - Number(a.basket_entry) || b.confidence - a.confidence || b._start - a._start);
             const { _start, ...best } = candidates[0];
-            entries.push(best);
+            if (best.basket_entry || !entries.some(e => e.pair_key)) entries.push(best);
         }
     }
     entries.sort((a, b) => b.confidence - a.confidence);

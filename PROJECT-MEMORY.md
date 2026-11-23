@@ -1,3 +1,6 @@
+## V2 direction fix (Nov 2026)
+- Third contract only from a live trend + last 5 non-flat moves; NO DIRECTION = no basket. Baskets priced first, bought together or not at all. Details: CHANGES-V2.md (supersedes 'no trend needed').
+
 ## Single-contract basket (Nov 2026)
 - One confirmed digit contract (2 ticks + digit frequency) buys the basket it belongs to; partner = favoured contract of the other class. `SINGLE_BASKET=off` disables. Details in FIXES-AND-SETUP.md.
 
